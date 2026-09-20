@@ -1,0 +1,17 @@
+/target
+
+# The stores. The archive is a record and the tape is a cache; neither is
+# source, and a captured day is measured in hundreds of megabytes.
+/var
+
+# The maintainer's local tooling.
+/.claude/
+/openspec/
+
+# No token is ever tracked. galata-vault tokens are minted into var/ and
+# carry this prefix; the hygiene guard checks for it too.
+*.gvt
+*.gvkit
+
+# macOS Finder metadata.
+.DS_Store

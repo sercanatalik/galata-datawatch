@@ -1,0 +1,29 @@
+[package]
+name = "galata-wire"
+description = "The shared vocabulary of galata-datawatch: how an instrument is named, what a dataset is, and what a normalised market-data event carries."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["market-data", "trading", "finance", "capture"]
+categories = ["data-structures", "finance"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+[lints]
+workspace = true
+
+# THE DEPENDENCY WALL. Every future consumer of the vocabulary links this
+# crate — an algo process that only needs to name an event must not inherit a
+# columnar format to do it. `scripts/check-workspace-deps.sh` fails the build
+# if this list grows beyond serde, serde_json, rust_decimal and thiserror.
+#
+# In the predecessor tree eighteen crates reached the broker through the crate
+# that also owned the archive writer, so `galata-algo-fast` — whose entire
+# justification is that it links no history — linked `parquet` transitively.
+[dependencies]
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

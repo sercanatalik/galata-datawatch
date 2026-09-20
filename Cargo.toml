@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/galata-wire",
+    "crates/galata-segments",
+]
+
+# Declared once, and taken once — every member says `license.workspace = true`.
+#
+# `scripts/check-release-hygiene.sh` fails the build if a member states a
+# licence of its own. No registry reads these fields; licence scanners,
+# `cargo deny` and anyone vendoring the tree read exactly them, and a second
+# place to state a licence is a place for two to disagree.
+[workspace.package]
+authors = ["Sercan Atalik <6832079+sercanatalik@users.noreply.github.com>"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sercanatalik/galata-datawatch"
+# Matches rust-toolchain.toml. Two places state a version because they answer
+# different questions: the toolchain file selects the compiler, this states the
+# floor a consumer needs.
+rust-version = "1.98"
+version = "0.1.0"
+
+# Declared once, and USED once — every member says `workspace = true`.
+#
+# `scripts/check-workspace-deps.sh` fails the build if a member re-declares a
+# version for anything named here, and also if this table names something no
+# member uses. A table nobody references reads as though versions are pinned in
+# one place when they are not, and the pin that loses is the one nobody reads.
+[workspace.dependencies]
+# The columnar format. CONFINED to galata-segments and, later, the tape:
+# galata-wire must never link it, because every future consumer of the
+# vocabulary links galata-wire and a process that only names an event must not
+# inherit a columnar format to do it. Held by check-workspace-deps.sh.
+arrow = "60"
+parquet = { version = "60", features = ["arrow"] }
+# Exact numbers. 96-bit, about 28 significant digits — below the
+# decimal(38,18) written to disk, which holds 38. See `Num` for why that bound
+# is acceptable and why it is stated rather than discovered.
+rust_decimal = "1"
+serde = { version = "1", features = ["derive"] }
+# `raw_value` is load-bearing, not a convenience: a normaliser peeks at a
+# frame's channel and takes its `data` as a borrowed span, then types that span
+# alone. Without it every frame is parsed into a Value tree first.
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+
+[workspace.lints.rust]
+# Neither crate needs it, and a store whose durability argument rests on
+# `rename` has no business also asking to be trusted with raw pointers.
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+debug = 1

@@ -1,0 +1,87 @@
+//! What can go wrong, named so a refusal says which path and which file.
+
+use std::path::PathBuf;
+
+/// Why a segment operation could not complete.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SegmentError {
+    /// The partition directory could not be created.
+    #[error("could not create {path}: {source}")]
+    CreateDir {
+        /// The directory.
+        path: PathBuf,
+        /// The underlying cause.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A write or a sync failed.
+    #[error("could not write {path}: {source}")]
+    Write {
+        /// The file.
+        path: PathBuf,
+        /// The underlying cause.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The rename that commits a segment failed.
+    #[error("could not commit {from} to {to}: {source}")]
+    Commit {
+        /// The temporary.
+        from: PathBuf,
+        /// Where it was to land.
+        to: PathBuf,
+        /// The underlying cause.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The columnar layer refused.
+    #[error("parquet {path}: {source}")]
+    Parquet {
+        /// The file.
+        path: PathBuf,
+        /// The underlying cause.
+        #[source]
+        source: parquet::errors::ParquetError,
+    },
+    /// Nothing was written.
+    ///
+    /// Refused rather than committed: a segment that claims a range and holds
+    /// nothing is a lie a reader cannot detect.
+    #[error("nothing to write")]
+    Empty,
+    /// Another compaction holds this root.
+    ///
+    /// A scheduler beside an operator's hand is two compactors on one tree, and
+    /// two compactors on one partition leave the same rows twice under two
+    /// names — a twin the interruption rule was never asked to resolve. So the
+    /// tool refuses.
+    #[error("another compaction holds {root}")]
+    Held {
+        /// The root somebody else is compacting.
+        root: PathBuf,
+    },
+    /// The hold itself could not be taken.
+    #[error("could not take the hold on {root}: {source}")]
+    Hold {
+        /// The root.
+        root: PathBuf,
+        /// The underlying cause.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A partition holds segments whose positions are not comparable.
+    ///
+    /// One writer owns one partition, so a mixed partition is always a bug. It
+    /// is reported rather than resolved, because guessing which ordering was
+    /// meant is how a store starts lying.
+    #[error("{path} holds both {a:?} and {b:?} cursors, which do not order against each other")]
+    MixedCursors {
+        /// The partition.
+        path: PathBuf,
+        /// One variant found.
+        a: crate::cursor::Variant,
+        /// The other.
+        b: crate::cursor::Variant,
+    },
+}

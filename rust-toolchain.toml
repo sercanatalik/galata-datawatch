@@ -1,0 +1,9 @@
+# Pinned to stable. A published crate must not require nightly, and this
+# machine's default toolchain is one.
+#
+# 1.98 is also galata-vault's minimum, and Tier 5 links its SDK — so the floor
+# is stated here and repeated as `rust-version` in [workspace.package], which
+# answers the different question of what a CONSUMER needs.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

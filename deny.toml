@@ -1,0 +1,42 @@
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+# Permissive only. This tree is MIT, and a copyleft dependency would make the
+# licence statement in every manifest false rather than merely awkward.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The columnar format must reach exactly one crate. `cargo deny` sees the
+# resolved graph, so a transitive edge fails like a direct one — which is what
+# check-workspace-deps.sh cannot see from manifests alone.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Nothing is vendored and nothing comes from git. A published crate may not
+# depend on a git source at all: `cargo publish` refuses it.
+allow-git = []

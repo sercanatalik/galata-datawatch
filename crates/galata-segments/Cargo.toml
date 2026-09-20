@@ -1,0 +1,26 @@
+[package]
+name = "galata-segments"
+description = "Durable parquet segments: buffer, write, fsync, atomically rename — with the durability fact carried in the filename."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["parquet", "arrow", "durability", "storage", "columnar"]
+categories = ["database-implementations", "filesystem"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+[lints]
+workspace = true
+
+# Deliberately depends on NO other workspace member. This is a general-purpose
+# store — it knows nothing about markets — which is why it may publish before
+# the crates that use it.
+[dependencies]
+arrow.workspace = true
+parquet.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
