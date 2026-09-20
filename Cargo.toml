@@ -46,6 +46,22 @@ serde = { version = "1", features = ["derive"] }
 # alone. Without it every frame is parsed into a Value tree first.
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
+# The runtime, and the transport. `tokio-tungstenite` rather than
+# `fastwebsockets`, in order of weight: this workspace forbids `unsafe` and
+# that crate is reported unsound; the published benchmarks disagree on which is
+# faster; and the frame decoder is not the bottleneck here — parquet writing
+# and JSON parsing are.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Jitter on reconnect backoff. Not for a thundering herd — three processes on
+# one host is not one — but for the venue's per-IP new-connection budget, which
+# a tight reconnect loop can spend while learning nothing.
+rand = "0.10"
 
 [workspace.lints.rust]
 # Neither crate needs it, and a store whose durability argument rests on

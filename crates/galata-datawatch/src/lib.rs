@@ -23,10 +23,12 @@
 
 pub mod adapters;
 pub mod calendar;
+pub mod capture;
 pub mod ingest;
 pub mod normalise;
 pub mod record;
 pub mod sink;
+pub mod source;
 pub mod venue;
 
 #[cfg(test)]

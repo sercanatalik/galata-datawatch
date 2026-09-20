@@ -14,10 +14,10 @@ include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 [lints]
 workspace = true
 
-# No runtime, no HTTP client, no broker client. This crate is provable with no
-# network, which is the whole reason the venue seam is a separate change —
-# a panicking normaliser and a killed process are what most of this design is
-# for, and both are easier to arrange against a fake than against a venue.
+# The runtime and the transport arrive here, and nothing else does: no HTTP
+# client, no broker client, no credential reader. Everything below the capture
+# loop is still provable with no network — the loop itself is driven against a
+# fake source and a controllable clock — and only the soak needs a venue.
 [dependencies]
 arrow.workspace = true
 galata-segments = { version = "0.1.0", path = "../galata-segments" }
@@ -26,6 +26,13 @@ galata-wire = { version = "0.1.0", path = "../galata-wire" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
 
 [features]
 default = ["hyperliquid"]
@@ -34,3 +41,4 @@ hyperliquid = []
 
 [dev-dependencies]
 tempfile = "3"
+tracing-subscriber = { workspace = true }

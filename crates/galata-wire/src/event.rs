@@ -431,6 +431,18 @@ pub enum Clipped {
     Assumed24h,
 }
 
+impl Default for Clipped {
+    /// **Nothing is clipped until a calendar says so.**
+    ///
+    /// An unknown calendar OVERSTATES the loss rather than erasing it, which is
+    /// the safe direction: a gap that is too wide costs a re-fetch, while one
+    /// that is too narrow is a hole nobody looks for. The alternative — an
+    /// empty session set — would clip every gap away.
+    fn default() -> Self {
+        Clipped::Assumed24h
+    }
+}
+
 impl Clipped {
     /// The discriminator written to disk.
     pub fn as_str(&self) -> &'static str {
