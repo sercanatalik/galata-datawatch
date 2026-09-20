@@ -21,11 +21,13 @@
 //! process are what most of this design is for, and both are easier to arrange
 //! against a fake than against a venue.
 
+pub mod adapters;
 pub mod calendar;
 pub mod ingest;
 pub mod normalise;
 pub mod record;
 pub mod sink;
+pub mod venue;
 
 #[cfg(test)]
 mod tests;
@@ -35,3 +37,4 @@ pub use ingest::{Ingested, ingest};
 pub use normalise::{Normalise, NormaliseError};
 pub use record::{Archive, Failure, Payload, PayloadAddress, RecordError};
 pub use sink::{NullSink, Sink, SinkError};
+pub use venue::{Adapter, Construct, Declaration, Keepalive, Subscription, Symbols};

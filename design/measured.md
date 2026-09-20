@@ -23,9 +23,12 @@ re-taken in this tree.
 | file-size cost of 16,384 | +26.5% | accepted deliberately | `writer.rs` |
 | fixture the above was taken on | 1,757,937 rows · 24.9 MB · 5 hours | the scale the knee holds at | `writer.rs` |
 | archive volume | 551 MB/day, 145,387 segments/day | that compaction ships with the writer | `compact.rs` |
-| Hyperliquid session lifetime | ~10.4 min observed | rotation policy — **Tier 1** | not yet used |
-| Hyperliquid public book cadence | 5.27 s | why `bbo` was chosen over `l2Book` — **Tier 1** | not yet used |
-| per-ticker volume, Hyperliquid | ~111 MB/day (book 21, trades 45, candles 44) | disk sizing — **Tier 1** | not yet used |
+| Hyperliquid public book cadence | 5.27 s | why `bbo` was chosen over `l2Book` | `wire.rs`, at `channel_of` |
+| Hyperliquid session lifetime | ~10.4 min observed | `OBSERVED_LIFETIME_SECS` | `adapters/hyperliquid` |
+| Hyperliquid candle reach | 5,000 bars per (coin, interval) | the candle `Paging` | `adapters/hyperliquid` |
+| Hyperliquid funding page | 500 rows, forward from start | the funding `Paging` | `adapters/hyperliquid` |
+| Hyperliquid request budget | 1,200 weight/min per IP | `Budget` | `adapters/hyperliquid` |
+| per-ticker volume, Hyperliquid | ~111 MB/day (book 21, trades 45, candles 44) | disk sizing | not yet used |
 
 **The row-group table's known weakness.** It was taken on **one** dataset and
 then applied to all of them. A row count is not row-width independent: 16,384
@@ -51,6 +54,22 @@ Recorded so a later measurement has something to disagree with.
 
 That is the only one so far, and it is a unit-scale check that pruning happens
 at all — not a performance figure. Tier 1's soak produces the first real ones.
+
+## Answered by reading, not by running
+
+Recorded because a design question resolved from documentation is still not a
+measurement, and the distinction matters when the answer turns out to be wrong.
+
+| question | answer | source |
+|---|---|---|
+| does `bbo` carry sizes? | **yes** — it is functionally `l2Book` with `nLevels: 1, strict: true` | the venue's own subscription documentation |
+| how often does `bbo` fire? | **only when the top of book changes on a block** — bounded by block cadence and by change, not by every quote update | the same |
+| does `activeAssetCtx` cover the HIP-3 `xyz` dex? | **unresolved.** HIP-3 assets are addressed `<dex>:<coin>` in subscriptions generally, and this one is not separately documented | — |
+
+The last is the one that costs something if wrong: if `activeAssetCtx` is
+main-dex only, WTIOIL, XYZ100 and GOLD carry no funding and no mark, and the
+declaration must say so rather than the walk discovering it. **The first live
+subscription answers it**, which is the soak's first job.
 
 ## Open, and waiting on a soak
 

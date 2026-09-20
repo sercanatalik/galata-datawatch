@@ -534,6 +534,8 @@ dependencies = [
  "arrow",
  "galata-segments",
  "galata-wire",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

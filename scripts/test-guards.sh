@@ -127,6 +127,11 @@ prove "check-ingest-callers (a second caller appends)" \
       ./scripts/check-ingest-callers.sh \
       crates/galata-datawatch/src/calendar.rs own
 
+# Exactly one module names a venue. Plants for itself, same reason.
+prove "check-venue-boundary (a venue named outside the adapters tree)" \
+      ./scripts/check-venue-boundary.sh \
+      crates/galata-datawatch/src/sink.rs own
+
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)
 present=$(find scripts -maxdepth 1 -name 'check-*.sh' ! -name 'check-all.sh' | wc -l | tr -d ' ')
