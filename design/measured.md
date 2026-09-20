@@ -107,6 +107,60 @@ What remains true, and matters more than the name:
    `meta` answers it in one request. That needs the REST client, which is the
    next change — and this is now the strongest reason for it.
 
+## The first soak — 11 minutes, six instruments, four series
+
+Release build, Hyperliquid mainnet, 2026-09-20. BTC, ETH, HYPE on the main perp
+dex; CL, XYZ100, GOLD on the `xyz` HIP-3 dex. Subscribed: trades, quotes
+(`bbo`), candles (1m) and funding (`activeAssetCtx`).
+
+| figure | value |
+|---|---|
+| elapsed | 11 min 03 s |
+| archive | **5.1 MB**, **1,280 segments** |
+| rate | ~28 MB/hour → **~670 MB/day**, **~112 MB/day/instrument** |
+| subscriptions held | 24 of 24, throughout |
+| session failures | **0** |
+| **rotations** | **at least one** — session age 162 s against 663 s elapsed |
+| **gap segments written** | **0** |
+
+### Rotate-ahead is free, and this is the measurement
+
+A handover happened and **no gap was published, because none occurred.** The
+predecessor measured the alternative: a naive reconnect left a p50 handover of
+1.00 s, a maximum of 66.00 s and 0.371% of the day uncovered. Here the same
+event cost nothing observable — no gap row, no failed session, no interruption
+in any pair's coverage.
+
+### `bbo` is not the volume problem it might have been
+
+The open question was whether an event-driven top-of-book would cost far more
+than the 5.27 s throttled snapshot it replaces. It does not:
+
+```text
+  kind=candles   1.2 MB   310 files
+  kind=funding   1.2 MB   312 files
+  kind=quotes    1.2 MB   312 files     <- bbo
+  kind=trades    1.3 MB   312 files
+  kind=pong      124 KB    31 files     <- 2.4%, keepalive echoes
+```
+
+All four are level. Being emitted only when the top of book changes **on a
+block** bounds it, exactly as the venue's documentation implied — and unlike
+the frame *shape*, that part was right.
+
+The per-instrument rate, ~112 MB/day, is within a percent of the predecessor's
+~111 MB/day/ticker on the same venue with a different series mix. Two
+independent measurements agreeing is worth more than either alone.
+
+### And one thing nobody asked
+
+**Keepalive echoes are archived**, under `kind=pong`, at 2.4% of volume. That
+is the record's rule working as written — a frame carrying no observation still
+arrived, and the record records arrivals — and it is a real cost. It buys
+something: a pong is evidence the connection was alive at that moment, which is
+a claim about coverage rather than about the market. Left as is, recorded so
+the cost is a decision rather than an accident.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
@@ -139,11 +193,6 @@ subscription answers it**, which is the soak's first job.
   normalisation runs either way — what changes is that one panic costs the
   batch's parses instead of one. Take the figure first.
 
-- **Is `bbo` cheaper or more expensive than the `l2Book` it replaces?** The
-  public book is a throttled snapshot every 5.27 s; `bbo` is event-driven and
-  fires on every top-of-book change. Unmeasured, and the answer decides disk
-  sizing. Nothing should quote a MB/day figure for the shipped configuration
-  until this is taken.
 - **A byte bound on row groups.** `parquet` 60 added `set_max_row_group_bytes`,
   which expresses `MAX_ROW_GROUP_ROWS`'s actual intent directly and is
   row-width independent. Left unset; when both are set the smaller limit wins,

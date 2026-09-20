@@ -30,11 +30,13 @@
 
 pub mod declaration;
 pub mod symbols;
+pub mod universe;
 
 pub use declaration::{
     Budget, ConnectionPolicy, Declaration, DeclarationError, PageDirection, PageEnd, Paging,
 };
 pub use symbols::Symbols;
+pub use universe::UniverseError;
 
 use galata_wire::{Series, Ticker};
 

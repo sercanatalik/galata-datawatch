@@ -66,6 +66,16 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 # consumers. TLS handshakes happen once per connection here, roughly every
 # eight minutes.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# **`default-features = false` against reqwest's own default, on purpose.**
+# 0.13 switched its default TLS to rustls with **aws-lc** as the provider. Two
+# providers in one binary is the failure above in a second costume: rustls
+# refuses to choose, and the binary compiles and then panics on its first
+# request. `ring` here keeps one provider in the process, and avoids the cmake
+# and NASM that aws-lc wants at build time.
+#
+# `json` for the venue's request bodies; `query` and `form` are features in
+# 0.13 and neither is used.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
 tokio-util = "0.7"
 futures-util = "0.3"
 toml = "1"

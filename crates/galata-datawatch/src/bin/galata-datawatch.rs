@@ -29,6 +29,22 @@ impl Adapters for Resolver {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // **One crypto provider, installed explicitly, before anything can build a
+    // client.**
+    //
+    // rustls 0.23 is provider-agnostic and refuses to guess. The websocket path
+    // gets away without this because exactly one provider feature is enabled in
+    // the graph and rustls can infer it; `reqwest` with `rustls-no-provider`
+    // cannot, and says so by panicking when a `Client` is built — at runtime,
+    // on the first request, not at compile time.
+    //
+    // `ring` rather than aws-lc: aws-lc wants cmake and NASM at build time,
+    // which a published crate should not require of its consumers, and two
+    // providers in one process is the failure this line exists to prevent.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("no other crypto provider may already be installed");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -55,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(&venue_name)
         .ok_or_else(|| format!("{venue_name} is not a venue this configuration declares"))?;
 
-    let adapter = adapters::build(AdapterConfig::from_declared(&venue_name, venue)?)?;
+    let adapter_config = AdapterConfig::from_declared(&venue_name, venue)?;
 
     let declared: Vec<Subscription> = venue
         .instruments
@@ -72,6 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
+        // BEFORE anything connects. An unlisted coin is answered by a hang-up
+        // rather than a refusal, and it takes every other subscription with
+        // it — seventeen resets in eighteen seconds, measured, with a log that
+        // reads like a network fault. One request per dex removes it.
+        adapters::check_universe(&adapter_config).await?;
+        let adapter = adapters::build(adapter_config)?;
+
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let mut capture = Capture::new(Wiring {
             adapter,
@@ -106,7 +129,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             signal.cancel();
         });
 
-        capture.run(shutdown).await
+        capture
+            .run(shutdown)
+            .await
+            .map_err(Box::<dyn std::error::Error>::from)
     })?;
 
     Ok(())

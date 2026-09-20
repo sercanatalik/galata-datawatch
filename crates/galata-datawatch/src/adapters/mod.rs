@@ -41,6 +41,13 @@ pub enum ResolveError {
     /// The adapter refused its configuration.
     #[error("{0}")]
     Construct(#[from] ConstructError),
+    /// The configuration names something the venue does not list, or the
+    /// listing could not be read.
+    #[error("{detail}")]
+    Universe {
+        /// What was wrong.
+        detail: String,
+    },
 }
 
 /// What an adapter is built from, venue-neutrally.
@@ -115,6 +122,47 @@ impl AdapterConfig {
                 name: other.to_string(),
                 known: known().join(", "),
             }),
+        }
+    }
+}
+
+/// Check a configuration's declared instruments against what the venue lists,
+/// **before anything connects**.
+///
+/// This lives here rather than in the binary because it is the one place
+/// permitted to name a venue — and it is not on the [`Adapter`] trait because
+/// that seam's whole claim is that it has no network and needs no runtime.
+///
+/// **Measured 2026-09-20:** an unlisted coin is answered by a hang-up rather
+/// than a refusal, and it takes every other subscription on the socket with
+/// it. One request per dex removes the whole failure mode.
+pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> {
+    match config {
+        #[cfg(feature = "hyperliquid")]
+        AdapterConfig::Hyperliquid(c) => {
+            use crate::venue::{Construct, universe};
+            let adapter = hyperliquid::Hyperliquid::new(c.clone(), None)?;
+            let client = adapter.client();
+            for dex in adapter.dexes() {
+                let listed = client
+                    .universe(&dex)
+                    .await
+                    .map_err(|e| ResolveError::Universe {
+                        detail: e.to_string(),
+                    })?;
+                let declared: Vec<String> = adapter
+                    .instruments()
+                    .iter()
+                    .filter(|i| i.dex.clone().unwrap_or_default() == dex)
+                    .map(|i| i.venue_symbol())
+                    .collect();
+                universe::check(hyperliquid::VENUE, &dex, &declared, &listed).map_err(|e| {
+                    ResolveError::Universe {
+                        detail: e.to_string(),
+                    }
+                })?;
+            }
+            Ok(())
         }
     }
 }

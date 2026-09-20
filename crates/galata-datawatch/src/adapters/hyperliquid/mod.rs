@@ -15,6 +15,7 @@
 //! call. A [`Ticker`](galata_wire::Ticker) may not hold a `:`, so the ticker is
 //! the bare coin and the prefix is composed at the seam.
 
+pub mod client;
 pub mod normalise;
 pub mod wire;
 
@@ -153,6 +154,7 @@ pub struct Hyperliquid {
     declaration: Declaration,
     symbols: Symbols,
     candle_interval: String,
+    instruments: Vec<Instrument>,
 }
 
 impl Construct for Hyperliquid {
@@ -246,11 +248,36 @@ impl Construct for Hyperliquid {
             declaration,
             symbols,
             candle_interval: config.candle_interval,
+            instruments: config.instruments,
         })
     }
 }
 
 impl Hyperliquid {
+    /// A client for this venue's REST root.
+    pub fn client(&self) -> client::Client {
+        client::Client::new(self.declaration.rest_url)
+    }
+
+    /// Every dex this configuration names, including the main one as `""`.
+    ///
+    /// The universe is asked **once per dex**, not once per instrument.
+    pub fn dexes(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .instruments
+            .iter()
+            .map(|i| i.dex.clone().unwrap_or_default())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The instruments this adapter was told to capture.
+    pub fn instruments(&self) -> &[Instrument] {
+        &self.instruments
+    }
+
     /// Which network this adapter speaks to.
     pub fn market(&self) -> Market {
         self.market
