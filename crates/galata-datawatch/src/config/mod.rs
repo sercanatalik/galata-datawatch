@@ -114,6 +114,11 @@ pub struct Paths {
     pub archive: PathBuf,
     /// The local surface, which works when the sink does not.
     pub status: PathBuf,
+    /// The tape — the projection that makes the record queryable.
+    ///
+    /// **A cache.** Deleting it loses nothing the archive does not hold, and a
+    /// rebuild writes it again.
+    pub tape: PathBuf,
 }
 
 /// The capture process's own cadences.
@@ -331,6 +336,7 @@ mod tests {
 [paths]
 archive = "var/archive"
 status = "var/status"
+tape = "var/tape"
 
 [capture]
 flush_secs = 2

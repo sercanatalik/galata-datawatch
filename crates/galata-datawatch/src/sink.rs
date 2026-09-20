@@ -43,6 +43,50 @@ pub trait Sink: Send + Sync {
     fn emit(&self, envelope: &Envelope) -> Result<(), SinkError>;
 }
 
+/// A sink that keeps what it is given.
+///
+/// **Not a test double.** The rebuild uses it in earnest: the one path emits
+/// into a sink, so the only way to take the envelopes it produced — rather than
+/// deriving them a second time — is to be the sink it emits into.
+///
+/// `Sink::emit` takes `&self`, because a sink must not need a mutable borrow on
+/// the hot path; keeping anything therefore needs interior mutability, and a
+/// `Mutex` is what makes this usable behind the `Arc<dyn Sink>` the loop holds.
+#[derive(Debug, Default)]
+pub struct CollectingSink {
+    taken: std::sync::Mutex<Vec<Envelope>>,
+}
+
+impl CollectingSink {
+    /// Everything emitted so far, leaving the sink empty.
+    ///
+    /// Drained rather than cloned: a rebuild takes a batch, writes it, and must
+    /// not write it again on the next batch.
+    pub fn drain(&self) -> Vec<Envelope> {
+        std::mem::take(&mut self.taken.lock().expect("not poisoned"))
+    }
+
+    /// How many are held.
+    pub fn len(&self) -> usize {
+        self.taken.lock().expect("not poisoned").len()
+    }
+
+    /// Whether any are.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Sink for CollectingSink {
+    fn emit(&self, envelope: &Envelope) -> Result<(), SinkError> {
+        self.taken
+            .lock()
+            .expect("not poisoned")
+            .push(envelope.clone());
+        Ok(())
+    }
+}
+
 /// A sink that takes everything and does nothing.
 ///
 /// What a process runs on when no broker is configured, or when one is

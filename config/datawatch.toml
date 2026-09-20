@@ -10,6 +10,10 @@
 archive = "var/archive"
 # The local surface, which works when the sink does not.
 status = "var/status"
+# The tape: the projection that makes the record queryable. A CACHE — deleting
+# it loses nothing the archive does not hold, and `galata-tape-rebuild` writes
+# it again.
+tape = "var/tape"
 
 [capture]
 # Seconds between commits. A CRASH CONVERTS THIS WINDOW INTO A GAP, which is

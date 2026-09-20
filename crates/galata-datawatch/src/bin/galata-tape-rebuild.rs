@@ -1,0 +1,141 @@
+//! Rebuild a day of the tape from the archive.
+//!
+//! ```text
+//!   galata-tape-rebuild <venue> <date>          one day
+//!   galata-tape-rebuild <venue> <from> <to>     a half-open range of dates
+//! ```
+//!
+//! **The exit code is the interface**, because this runs from a scheduler that
+//! reads nothing else:
+//!
+//! ```text
+//!   0   the tape was rebuilt
+//!   1   something is broken
+//!   2   the arguments are wrong
+//!   3   there was nothing to do
+//! ```
+//!
+//! `3` is separate from `0` on purpose. *Rebuilt nothing because the range is
+//! empty* and *rebuilt a day* are different facts, and a scheduler that cannot
+//! tell them apart cannot alert on the first.
+
+use galata_datawatch::adapters::{self, AdapterConfig};
+use galata_datawatch::calendar::midnight_of;
+use galata_datawatch::config::{Adapters, Config};
+use galata_datawatch::tape;
+
+/// Done.
+const DONE: i32 = 0;
+/// Broken.
+const BROKEN: i32 = 1;
+/// The arguments are wrong.
+const BAD_ARGUMENT: i32 = 2;
+/// There was nothing to do.
+const NOTHING: i32 = 3;
+
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+struct Resolver;
+
+impl Adapters for Resolver {
+    fn supplies(&self, venue: &str, series: galata_wire::Series) -> bool {
+        adapters::supplies(venue, series)
+    }
+    fn known(&self, venue: &str) -> bool {
+        adapters::known().contains(&venue)
+    }
+    fn known_names(&self) -> Vec<&'static str> {
+        adapters::known()
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    match run() {
+        Ok(code) => std::process::ExitCode::from(code as u8),
+        Err(error) => {
+            tracing::error!("{error}");
+            std::process::ExitCode::from(BROKEN as u8)
+        }
+    }
+}
+
+fn run() -> Result<i32, Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (venue_name, from_date, to_date) = match args.as_slice() {
+        [venue, date] => (venue.clone(), date.clone(), None),
+        [venue, from, to] => (venue.clone(), from.clone(), Some(to.clone())),
+        _ => {
+            eprintln!(
+                "usage: galata-tape-rebuild <venue> <date>\n       galata-tape-rebuild <venue> \
+                 <from-date> <to-date>   (half-open)"
+            );
+            return Ok(BAD_ARGUMENT);
+        }
+    };
+
+    let Some(from_micros) = midnight_of(&from_date) else {
+        eprintln!("{from_date:?} is not a YYYY-MM-DD date");
+        return Ok(BAD_ARGUMENT);
+    };
+    let to_micros = match &to_date {
+        None => from_micros + MICROS_PER_DAY,
+        Some(date) => match midnight_of(date) {
+            Some(micros) => micros,
+            None => {
+                eprintln!("{date:?} is not a YYYY-MM-DD date");
+                return Ok(BAD_ARGUMENT);
+            }
+        },
+    };
+    if to_micros <= from_micros {
+        eprintln!("the range ends before it begins");
+        return Ok(BAD_ARGUMENT);
+    }
+
+    let path =
+        std::env::var("GALATA_CONFIG").unwrap_or_else(|_| "config/datawatch.toml".to_string());
+    let config = Config::load_from(std::path::Path::new(&path), &Resolver)?;
+    let Some(venue) = config.venue.get(&venue_name) else {
+        eprintln!("{venue_name} is not a venue this configuration declares");
+        return Ok(BAD_ARGUMENT);
+    };
+
+    // **No network.** The adapter is built for its `normalise`, which is a pure
+    // function of the bytes — the whole reason that seam has no async on it.
+    let adapter = adapters::build(AdapterConfig::from_declared(&venue_name, venue)?)?;
+    let scope = format!("venue={venue_name}");
+
+    let report = tape::rebuild(
+        &config.paths.archive,
+        &config.paths.tape,
+        adapter.as_ref(),
+        Some(&[&scope]),
+        from_micros,
+        to_micros,
+    )?;
+
+    if report.is_empty() {
+        tracing::info!(venue = venue_name, from = from_date, "nothing to rebuild");
+        return Ok(NOTHING);
+    }
+    tracing::info!(venue = venue_name, from = from_date, "{}", report.report());
+
+    // **Checked after writing, and it decides the exit code.** A rebuild that
+    // wrote a tree `check_layout` complains about has not succeeded, whatever
+    // the row count says — and the commonest complaint here is exactly the one
+    // a partial rebuild causes: two segments claiming the same sequence range.
+    let problems = tape::check_layout(&config.paths.tape);
+    if !problems.is_empty() {
+        for problem in &problems {
+            tracing::error!("{problem}");
+        }
+        return Ok(BROKEN);
+    }
+    Ok(DONE)
+}

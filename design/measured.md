@@ -340,6 +340,82 @@ It now returns `Option`, the catch-all refuses by name, and a test over
 moves from build time to test time, which is what `#[non_exhaustive]` costs its
 consumers — worth stating rather than claiming a guarantee that is not there.
 
+## The rebuild, against a real archive — 2026-09-21
+
+An hour and three quarters of live capture, rebuilt from the archive through
+the one path.
+
+```
+253,044 payloads → 361,928 rows in 15 segments (0 unparsed)
+      50 MB archive  →  6.9 MB tape
+```
+
+**Seven times smaller**, which is what the projection is for: the archive holds
+whole JSON frames verbatim, the tape holds typed columns of what they meant.
+
+| dataset | rows |
+|---|---|
+| quotes | 159,062 |
+| trades | 70,477 |
+| candles | 54,643 |
+| funding | 39,377 |
+| marks | 38,369 |
+
+More rows than payloads, because a walked candle page is one payload and 5,001
+bars — the one place in this system where the ratio is not near one.
+
+### Determinism, proved on the real archive
+
+Two runs over a **frozen copy** wrote the same 15 segment names and
+byte-identical files. Two runs over the *live* archive did not, and correctly
+so: the soak added ~1,900 payloads between them, and the segment names said so
+(`s-0_252926` against `s-0_254858`). A name that carries the sequence range is
+what makes the difference visible rather than silent.
+
+### Rows are dated by the venue's clock, and here is the proof
+
+Every archive segment in this run is named `date=2026-09-20`, because the
+archive dates by **receipt**. The tape it rebuilt into:
+
+```
+  kind=candles/date=2026-09-17 … 2026-09-20      4 days
+  kind=funding/date=2026-09-13 … 2026-09-20      8 days
+  kind=quotes /date=2026-09-20                   1 day
+```
+
+The walked history landed under the dates it is *about*. Had the tape dated by
+receipt like the archive, a date predicate over last week's funding would have
+found nothing — the rows would all be filed under the day they were fetched.
+
+### The two-clock latency, which is the figure only two clocks can produce
+
+```sql
+SELECT venue, ticker, avg(recv_micros - at_micros)/1000 AS lag_ms ...
+```
+
+| ticker | quotes | avg spread | lag ms |
+|---|---|---|---|
+| BTC | 38,568 | 1.1342 | 320.6 |
+| ETH | 40,095 | 0.1093 | 321.8 |
+| HYPE | 32,875 | 0.0034 | 321.6 |
+| CL | 20,437 | 0.0043 | 318.3 |
+| GOLD | 8,881 | 0.1118 | 319.8 |
+| XYZ100 | 18,206 | 1.1486 | 318.9 |
+
+**~320 ms, and flat across all six instruments** — including the three on the
+HIP-3 dex. A figure that does not vary by instrument is not about the
+instrument: it is the venue's own publishing cadence plus the path to us, which
+is exactly what a single timestamp column could never have told apart from a
+slow instrument.
+
+### One cost worth naming
+
+Deciding there was *nothing* to rebuild for an empty date took **25 seconds**,
+because listing the partitions of a 12,000-segment archive walks the tree before
+any name is compared. The two prunings work on the segments; nothing yet prunes
+the *directory walk* by date, and a `date=` partition is right there in the
+path. Not fixed here, and the figure is recorded so the fix has a baseline.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

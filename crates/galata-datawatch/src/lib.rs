@@ -28,6 +28,7 @@ pub mod config;
 pub mod ingest;
 pub mod normalise;
 pub mod record;
+pub mod replay;
 pub mod sink;
 pub mod source;
 pub mod tape;
