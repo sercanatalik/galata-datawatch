@@ -10,6 +10,10 @@
 #[cfg(feature = "hyperliquid")]
 pub mod hyperliquid;
 
+use galata_wire::Series;
+
+use crate::capture::Fetch;
+use crate::record::Payload;
 use crate::venue::{Adapter, ConstructError};
 
 /// Every venue this build can speak to.
@@ -174,6 +178,85 @@ pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
         #[cfg(feature = "hyperliquid")]
         AdapterConfig::Hyperliquid(c) => {
             Ok(Box::new(hyperliquid::Hyperliquid::new(c, None)?) as Box<dyn Adapter>)
+        }
+    }
+}
+
+/// The historical endpoint for a venue.
+///
+/// Here rather than on the [`Adapter`] trait for the reason that trait states
+/// about itself: its methods are facts about a venue, and a fact that needs a
+/// runtime to state cannot be asserted in a test. This one needs a network.
+///
+/// It is also the second and last place permitted to name a venue, which is
+/// what keeps [`crate::capture::Capture::walk`] — and the binary — free of one.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum History {
+    /// Hyperliquid's info endpoint.
+    #[cfg(feature = "hyperliquid")]
+    Hyperliquid(hyperliquid::client::Client),
+}
+
+impl History {
+    /// The fetcher a configuration names.
+    pub fn for_config(config: &AdapterConfig) -> Result<History, ResolveError> {
+        use crate::venue::Construct;
+        match config {
+            #[cfg(feature = "hyperliquid")]
+            AdapterConfig::Hyperliquid(c) => {
+                let adapter = hyperliquid::Hyperliquid::new(c.clone(), None)?;
+                Ok(History::Hyperliquid(adapter.client()))
+            }
+        }
+    }
+
+    /// One historical request, returning the bytes **and the moment they
+    /// arrived** — the payload the one path then archives verbatim.
+    ///
+    /// The error is a `String` because the walk does not act on its variant: a
+    /// failed fetch is logged and the walk continues, and the outcome reports
+    /// what was reached either way.
+    pub async fn fetch(&self, request: Fetch, now_micros: i64) -> Result<Payload, String> {
+        match self {
+            #[cfg(feature = "hyperliquid")]
+            History::Hyperliquid(client) => match request.series {
+                Series::Candles => {
+                    let interval = request.interval_label.ok_or_else(|| {
+                        format!(
+                            "the venue serves no bar of {} micros",
+                            request.interval_micros
+                        )
+                    })?;
+                    client
+                        .candles(
+                            &request.symbol,
+                            &interval,
+                            request.from_micros,
+                            request.to_micros,
+                            now_micros,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                Series::Funding => client
+                    .funding(
+                        &request.symbol,
+                        request.from_micros,
+                        request.to_micros,
+                        now_micros,
+                    )
+                    .await
+                    .map_err(|e| e.to_string()),
+                // The walk never asks for one the declaration does not list as
+                // historical, so reaching this is a defect rather than a venue
+                // refusal — and it says so instead of returning empty bytes
+                // that would read as "no rows in that range".
+                other => Err(format!(
+                    "{} is not served historically; the walk should not have asked",
+                    other.as_str()
+                )),
+            },
         }
     }
 }

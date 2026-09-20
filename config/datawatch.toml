@@ -17,6 +17,16 @@ status = "var/status"
 flush_secs = 2
 # How often the full status snapshot is written.
 status_secs = 1
+# How far back a cold start of the walk goes. The venue's own reach clips this
+# where it is shorter — at a 1m bar this venue holds 3.5 days, and the walk
+# REPORTS the difference rather than covering less in silence.
+cold_start_days = 7
+# The share of the venue's STATED budget the walk may take. A share, not a
+# rate: the rate belongs to the venue's declaration.
+walk_share = 0.25
+# The most requests one series' walk will make. Exceeding it exits non-zero,
+# because this bound is ours to raise.
+walk_cap = 200
 
 [venue.hyperliquid]
 market = "mainnet"

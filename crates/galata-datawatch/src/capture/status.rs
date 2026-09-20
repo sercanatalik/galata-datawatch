@@ -85,6 +85,33 @@ pub struct PairStatus {
     pub reason: Option<String>,
 }
 
+/// A walk in progress.
+///
+/// **Present only while one is running.** An absent field is the honest answer
+/// to "is it walking" — a `WalkStatus` left behind from the last one would say
+/// a backfill is under way an hour after it finished, and nothing reading this
+/// could tell.
+///
+/// Facts like every other field here: a range, a point and a count. Nothing
+/// says whether the progress is acceptable, because a long backfill and a stuck
+/// one look identical from inside the process and the component that decides
+/// which is a different one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WalkStatus {
+    /// Which series is being walked.
+    pub series: Series,
+    /// The bar width, in microseconds.
+    pub interval_micros: i64,
+    /// Where the plan began, after the venue's reach clipped it.
+    pub from_micros: i64,
+    /// Where it was asked to reach.
+    pub to_micros: i64,
+    /// The point covered so far.
+    pub reached_micros: i64,
+    /// Requests made so far.
+    pub requests_made: u32,
+}
+
 /// Everything the process knows about itself, at one moment.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Status {
@@ -119,6 +146,10 @@ pub struct Status {
     /// The live size of the window a crash would convert into a gap — the one
     /// number here that is a direct measure of standing risk.
     pub buffered: usize,
+    /// A walk, while one is running — **absent otherwise**, so a long backfill
+    /// is visible rather than silent and a finished one leaves nothing stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub walking: Option<WalkStatus>,
     /// Every pair the process knows about, declared or merely seen.
     pub pairs: Vec<PairStatus>,
 }
@@ -187,6 +218,7 @@ mod tests {
             subs_refused: 0,
             last_flush_micros: Some(900),
             buffered: 3,
+            walking: None,
             pairs: vec![PairStatus {
                 ticker: Ticker::new("BTC").unwrap(),
                 series: Series::Quotes,
@@ -279,5 +311,35 @@ mod tests {
         // wrong — a quiet instrument at four in the morning is stale and fine.
         assert_eq!(PairState::Stale.as_str(), "stale");
         assert_eq!(PairState::NotSubscribed.as_str(), "not_subscribed");
+    }
+
+    #[test]
+    fn no_walk_means_no_walk_field() {
+        // An absent field is the honest answer. A WalkStatus left behind from
+        // the last walk would claim a backfill an hour after it finished.
+        let json = status().to_json();
+        assert!(!json.contains("walking"), "{json}");
+    }
+
+    #[test]
+    fn a_running_walk_appears_and_is_not_a_verdict() {
+        let mut s = status();
+        s.walking = Some(WalkStatus {
+            series: Series::Candles,
+            interval_micros: 60_000_000,
+            from_micros: 1_000,
+            to_micros: 9_000,
+            reached_micros: 4_000,
+            requests_made: 12,
+        });
+        let json = s.to_json();
+        assert!(json.contains("\"walking\""), "{json}");
+        assert!(json.contains("\"reached_micros\": 4000"), "{json}");
+        for verdict in ["behind", "stuck", "healthy", "slow", "degraded"] {
+            assert!(
+                !json.to_lowercase().contains(verdict),
+                "{verdict:?}:\n{json}"
+            );
+        }
     }
 }

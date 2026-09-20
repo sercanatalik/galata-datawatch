@@ -338,6 +338,24 @@ impl Archive {
         last_durable(&self.scope_path()).map(|(_, position)| position as i64)
     }
 
+    /// The last moment **one venue's one kind** is durable to.
+    ///
+    /// This is a **receipt** clock, like every position the record keeps: the
+    /// segment is named for when bytes arrived, not for the range they cover.
+    /// For the bar width a venue pushes live that is within seconds of the
+    /// truth; for anything else it is not, and the walk is shaped around that
+    /// rather than pretending otherwise. See [`crate::capture::walk`].
+    ///
+    /// Unscoped on purpose: it names the venue it is asking about, so a handle
+    /// scoped to one venue can still ask about another's subtree.
+    pub fn last_durable_for(&self, venue: &str, kind: &str) -> Option<i64> {
+        let path = self
+            .root
+            .join(format!("venue={venue}"))
+            .join(format!("kind={kind}"));
+        last_durable(&path).map(|(_, position)| position as i64)
+    }
+
     /// Record that this process stopped having flushed everything it held.
     ///
     /// **Best-effort by construction**: if writing this fails, the next start

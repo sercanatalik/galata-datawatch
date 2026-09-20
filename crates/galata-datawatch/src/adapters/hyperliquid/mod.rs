@@ -60,6 +60,25 @@ const _: () = assert!(
     "less than a minute of margin inside the venue's observed lifetime"
 );
 
+/// The venue's label as a bar width. The inverse of
+/// [`Hyperliquid::interval_label`], kept beside it so the two cannot drift.
+fn interval_micros_of(label: &str) -> Option<i64> {
+    Some(match label {
+        "1m" => 60_000_000,
+        "3m" => 180_000_000,
+        "5m" => 300_000_000,
+        "15m" => 900_000_000,
+        "30m" => 1_800_000_000,
+        "1h" => 3_600_000_000,
+        "2h" => 7_200_000_000,
+        "4h" => 14_400_000_000,
+        "8h" => 28_800_000_000,
+        "12h" => 43_200_000_000,
+        "1d" => 86_400_000_000,
+        _ => return None,
+    })
+}
+
 /// Which Hyperliquid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Market {
@@ -328,6 +347,47 @@ impl Adapter for Hyperliquid {
 
     fn keepalive(&self) -> Keepalive {
         Keepalive::Frame(wire::ping_frame().to_string())
+    }
+
+    fn venue_symbol(&self, ticker: &galata_wire::Ticker) -> Option<String> {
+        self.symbols.venue_symbol_for(ticker).map(str::to_string)
+    }
+
+    fn interval_label(&self, interval_micros: i64) -> Option<String> {
+        // The venue's own set. Refused rather than rounded: asking for `1h`
+        // where `1m` was wanted covers sixty times too little and says nothing.
+        Some(
+            match interval_micros {
+                60_000_000 => "1m",
+                180_000_000 => "3m",
+                300_000_000 => "5m",
+                900_000_000 => "15m",
+                1_800_000_000 => "30m",
+                3_600_000_000 => "1h",
+                7_200_000_000 => "2h",
+                14_400_000_000 => "4h",
+                28_800_000_000 => "8h",
+                43_200_000_000 => "12h",
+                86_400_000_000 => "1d",
+                _ => return None,
+            }
+            .to_string(),
+        )
+    }
+
+    fn live_interval_micros(&self) -> Option<i64> {
+        // The width this adapter subscribed. Everything else the walk asks for
+        // must state its own need.
+        interval_micros_of(&self.candle_interval)
+    }
+
+    fn page_end(&self, payload: &Payload) -> Option<crate::venue::PageEnd> {
+        // Funding alone pages forward here; a candle page is planned by spans
+        // and needs no end read out of it.
+        match payload.channel.as_str() {
+            "fundingHistory" => client::funding_page_end(&payload.payload),
+            _ => None,
+        }
     }
 
     fn venue_ticker(&self, channel: &str, venue_symbol: &str) -> Option<galata_wire::Ticker> {

@@ -117,7 +117,10 @@ pub struct Paths {
 }
 
 /// The capture process's own cadences.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+// Not `Eq`: `walk_share` is a share of a budget, and a float has no total
+// equality. Nothing compares two of these for identity — `Config::hash` is what
+// answers "is this the same configuration".
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Capture {
     /// Seconds between commits. **A crash converts this window into a gap**,
@@ -125,6 +128,20 @@ pub struct Capture {
     pub flush_secs: u64,
     /// Seconds between status snapshots.
     pub status_secs: u64,
+    /// How far back a cold start of the walk goes.
+    pub cold_start_days: u32,
+    /// The share of the venue's **stated** budget the walk may take.
+    ///
+    /// A share rather than a rate: the rate is the venue's declaration, and a
+    /// number here would be one measured against a venue this file may not be
+    /// describing.
+    pub walk_share: f64,
+    /// The most requests one series' walk will make.
+    ///
+    /// A bound so a run **says** it covered less rather than spending a budget
+    /// nobody watched. Exceeding it exits non-zero, because this one is ours to
+    /// raise.
+    pub walk_cap: u32,
 }
 
 /// One instrument to capture.
@@ -153,7 +170,7 @@ pub struct VenueConfig {
 }
 
 /// Everything the process was told.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Where the stores live.
@@ -221,6 +238,31 @@ impl Config {
                 field: "capture.status_secs",
                 value: self.capture.status_secs.to_string(),
                 bound: "1..=300",
+            });
+        }
+
+        if !(1..=3_650).contains(&self.capture.cold_start_days) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "capture.cold_start_days",
+                value: self.capture.cold_start_days.to_string(),
+                bound: "1..=3650",
+            });
+        }
+        if !(0.001..=1.0).contains(&self.capture.walk_share) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "capture.walk_share",
+                value: self.capture.walk_share.to_string(),
+                bound: "0.001..=1.0 — a share of the venue's stated budget, never a rate",
+            });
+        }
+        if !(1..=100_000).contains(&self.capture.walk_cap) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "capture.walk_cap",
+                value: self.capture.walk_cap.to_string(),
+                bound: "1..=100000",
             });
         }
 
@@ -293,6 +335,9 @@ status = "var/status"
 [capture]
 flush_secs = 2
 status_secs = 1
+cold_start_days = 7
+walk_share = 0.25
+walk_cap = 200
 
 [venue.hyperliquid]
 market = "mainnet"
@@ -397,5 +442,24 @@ instruments = [
         .unwrap_err()
         .to_string();
         assert!(err.contains("document datawatch v12"), "{err}");
+    }
+
+    #[test]
+    fn a_walk_share_above_the_whole_budget_is_refused() {
+        // A share, never a rate. Above 1.0 is asking for more than the venue
+        // said it would serve.
+        let err = load(&GOOD.replace("walk_share = 0.25", "walk_share = 2.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("walk_share"), "{err}");
+        assert!(err.contains("share of the venue"), "{err}");
+    }
+
+    #[test]
+    fn a_walk_cap_of_zero_is_refused() {
+        let err = load(&GOOD.replace("walk_cap = 200", "walk_cap = 0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("walk_cap"), "{err}");
     }
 }

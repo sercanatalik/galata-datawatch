@@ -147,6 +147,42 @@ pub trait Adapter: Normalise {
     /// are the thing that must not be lost.
     fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload;
 
+    /// The venue's own string for a ticker — the inverse of
+    /// [`Adapter::venue_ticker`], and what a historical request carries.
+    ///
+    /// On the seam for the same reason as its inverse: a venue's spelling is
+    /// the venue's business, and a walk composing `xyz:XYZ100` for itself would
+    /// be the venue boundary leaking upward.
+    fn venue_symbol(&self, ticker: &Ticker) -> Option<String>;
+
+    /// The venue's own label for a bar width — `1m`, `4h`.
+    ///
+    /// The walk plans in microseconds because arithmetic over a range needs a
+    /// number; the venue is asked in its own units. `None` for a width the
+    /// venue does not serve, which is refused rather than rounded: a walk that
+    /// silently asked for hourly bars where minute ones were wanted would
+    /// report success over sixty times too little.
+    fn interval_label(&self, interval_micros: i64) -> Option<String>;
+
+    /// The bar width the venue **pushes**, where it pushes one.
+    ///
+    /// The walk needs this to know which width may resume from the record.
+    /// Every other width must state what it needs, because the record is dated
+    /// by receipt — see [`crate::capture::walk`].
+    fn live_interval_micros(&self) -> Option<i64> {
+        None
+    }
+
+    /// Where a forward-paged page ended, so the walk can issue the next or know
+    /// it has had the last.
+    ///
+    /// `None` for a payload that is not a forward-paged page, and for a page
+    /// the adapter cannot read — which stops the walk rather than paging
+    /// forever from a time it invented.
+    fn page_end(&self, _payload: &Payload) -> Option<PageEnd> {
+        None
+    }
+
     /// The ticker a venue's own symbol means on a channel.
     ///
     /// The loop needs this to credit coverage to the right pair, and it must

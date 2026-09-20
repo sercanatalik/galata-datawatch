@@ -107,7 +107,7 @@ What remains true, and matters more than the name:
    `meta` answers it in one request. That needs the REST client, which is the
    next change — and this is now the strongest reason for it.
 
-## The first soak — 11 minutes, six instruments, four series
+## The first soak — 38 minutes, six instruments, four series
 
 Release build, Hyperliquid mainnet, 2026-09-20. BTC, ETH, HYPE on the main perp
 dex; CL, XYZ100, GOLD on the `xyz` HIP-3 dex. Subscribed: trades, quotes
@@ -115,13 +115,15 @@ dex; CL, XYZ100, GOLD on the `xyz` HIP-3 dex. Subscribed: trades, quotes
 
 | figure | value |
 |---|---|
-| elapsed | 11 min 03 s |
-| archive | **5.1 MB**, **1,280 segments** |
+| elapsed | 38 min, to a clean stop |
+| archive | **18 MB**, **4,510 segments** |
 | rate | ~28 MB/hour → **~670 MB/day**, **~112 MB/day/instrument** |
+| *(at 11 min)* | 5.1 MB, 1,280 segments — the rate held over the whole run |
 | subscriptions held | 24 of 24, throughout |
 | session failures | **0** |
-| **rotations** | **at least one** — session age 162 s against 663 s elapsed |
+| **rotations** | **at least three** — one per 8 min of the 38 |
 | **gap segments written** | **0** |
+| clean-shutdown marker | written on SIGINT, so the next start reports downtime rather than a crash |
 
 ### Rotate-ahead is free, and this is the measurement
 
@@ -160,6 +162,60 @@ arrived, and the record records arrivals — and it is a real cost. It buys
 something: a pong is evidence the connection was alive at that moment, which is
 a claim about coverage rather than about the market. Left as is, recorded so
 the cost is a decision rather than an accident.
+
+## The walk — 12 requests, one cold start, 2026-09-20
+
+A cold start into an empty record, release build, mainnet, all six instruments.
+Read back off disk with `cargo run --example walked`, which counts *fetched*
+payloads and the span of venue time each covers — because a walk's report says
+what was **asked for**, and only the record says what arrived.
+
+```
+walk of candles at 1m: asked 7d, the venue holds 3d 11h 20m,
+                       covered 3d 11h 20m in 6 requests
+walk of funding, paged forward: asked 7d, no stated bound,
+                       covered 7d in 6 requests
+```
+
+| series  | per instrument | rows  | span   | pages | elapsed |
+|---------|----------------|-------|--------|-------|---------|
+| candles | 1 request      | 5,001 | 3.47 d | 1     | ~1.4 s  |
+| funding | 1 request      | 168   | 6.96 d | 1     | ~1.9 s  |
+
+Identical for `BTC`, `ETH`, `HYPE` and for `xyz:CL`, `xyz:GOLD`, `xyz:XYZ100`
+— **the HIP-3 dex serves history exactly as the main one does**, which was not
+known before this run.
+
+### The reach is one page, so the backward cap cannot bind
+
+5,001 rows against a declared `max_rows_per_call` of 5,000 and a `max_rows` of
+5,000. The two being equal is the whole shape of the backward walk here: the
+venue's reach **is** one page, so a candle walk is one request per instrument
+and `walk_cap` can never truncate it. The cap still exists and is still tested,
+because the forward walk can hit it and because the next venue may not have
+this property.
+
+The off-by-one is the venue's, not ours: it returns the bar *containing* each
+endpoint, so an inclusive range of 5,000 minutes holds 5,001 bars. Nothing
+downstream cares — identity is content-derived and a duplicate bar is the same
+bar.
+
+### Funding stopped because the page was short, not because it was told to
+
+168 hourly rows for 7 days, against a page size of 500. One page, a short one,
+and the walk stopped — the condition that ends a forward walk is the page,
+never a count the caller kept. A 7-day cold start will never page twice here;
+the paging loop is exercised by the tests rather than by this run, which is
+worth saying plainly rather than claiming the run covered it.
+
+### What the record's clock cost
+
+The record is dated by **receipt**, so all twelve of these pages sit under
+`date=2026-09-20` whatever they cover. That is correct — the record records
+arrivals — and it is exactly why `WalkInterval` distinguishes a width the
+stream pushes from one it does not. At 1m the receipt clock tracks the truth
+because live capture keeps it there. At 1h it would not, and an hourly walk
+resuming from it would ask for one minute and report success.
 
 ## Answered by reading, not by running
 

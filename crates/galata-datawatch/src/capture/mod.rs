@@ -16,10 +16,12 @@ pub mod run;
 pub mod session;
 pub mod status;
 pub mod subscriptions;
+pub mod walk;
 
 pub use clock::{Clock, SystemClock, TestClock};
 pub use coverage::Coverage;
-pub use run::{Capture, CaptureError, Wiring};
+pub use run::{Capture, CaptureError, Fetch, WalkRequest, Wiring};
 pub use session::{Act, Session};
 pub use status::{Connection, PairState, PairStatus, Status, StatusFile};
 pub use subscriptions::{Held, Outcome};
+pub use walk::{Ask, Step, Walk, WalkInterval, WalkOutcome};

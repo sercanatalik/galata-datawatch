@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use galata_datawatch::adapters::{self, AdapterConfig};
-use galata_datawatch::capture::{Capture, Clock, SystemClock, Wiring};
+use galata_datawatch::adapters::{self, AdapterConfig, History};
+use galata_datawatch::capture::{Capture, Clock, SystemClock, WalkInterval, WalkRequest, Wiring};
 use galata_datawatch::config::{Adapters, Config};
 use galata_datawatch::sink::NullSink;
 use galata_datawatch::venue::Subscription;
-use galata_wire::{Clipped, Ticker};
+use galata_wire::{Clipped, Series, Ticker};
 
 /// What the loader asks an adapter, answered without this file naming a venue.
 struct Resolver;
@@ -86,6 +86,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Result<_, _>>()?;
 
+    let declared_series: Vec<Series> = venue.series.clone();
+    let walk_config = adapter_config.clone();
+
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
         // BEFORE anything connects. An unlisted coin is answered by a hang-up
@@ -94,6 +97,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // reads like a network fault. One request per dex removes it.
         adapters::check_universe(&adapter_config).await?;
         let adapter = adapters::build(adapter_config)?;
+
+        // Which history to walk, taken from the venue's own declaration: the
+        // series it hands back on request, at the bar width it PUSHES — which
+        // is the one width that may resume from the record, because live
+        // capture keeps the record's receipt clock within seconds of it. A
+        // width the stream does not push would have to state its own need. The
+        // width is carried for every item and used where the series has one;
+        // funding pages forward and has none.
+        let live_interval = adapter.live_interval_micros().ok_or_else(|| {
+            "this venue pushes no bar width, so no walk may resume from the record".to_string()
+        })?;
+        let walk_items: Vec<(Series, WalkInterval)> = declared_series
+            .iter()
+            .filter(|series| adapter.declaration().serves_historically(**series))
+            .map(|series| (*series, WalkInterval::live(live_interval)))
+            .collect();
 
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let mut capture = Capture::new(Wiring {
@@ -120,6 +139,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let gaps = capture.report_restart_gap();
         if gaps > 0 {
             tracing::info!(gaps, "published the window this process was not covering");
+        }
+
+        // The history, before the live loop and after the restart gap — so a
+        // backfill is never mistaken for coverage the record already had, and
+        // so the walk's own requests are paced against a venue nothing else is
+        // yet talking to.
+        //
+        // Every page crosses the one path. The walk publishes its status on the
+        // usual timer while it runs, because a backfill of several hundred
+        // requests is minutes of work and a silent process is indistinguishable
+        // from a stuck one.
+        let history = History::for_config(&walk_config)?;
+        let request = WalkRequest {
+            items: walk_items,
+            share: config.capture.walk_share,
+            cold_start_days: config.capture.cold_start_days,
+            cap: config.capture.walk_cap,
+        };
+        let outcomes = capture
+            .walk(&request, |fetch| {
+                let history = history.clone();
+                // The loop owns the clock, and it is read here because the
+                // payload's receipt time is a fact about when bytes arrived.
+                let at = SystemClock.now_micros();
+                async move { history.fetch(fetch, at).await }
+            })
+            .await?;
+
+        // **A run that covered less than it was asked for is not a green one.**
+        // The venue's own reach never reaches here — that is a stated fact and
+        // exits zero. Our cap does, because our cap is ours to raise.
+        let capped: Vec<&galata_datawatch::capture::WalkOutcome> =
+            outcomes.iter().filter(|o| o.capped).collect();
+        if !capped.is_empty() {
+            for outcome in &capped {
+                tracing::error!("{}", outcome.report());
+            }
+            return Err(format!(
+                "{} of {} walks were truncated by capture.walk_cap = {}; raise it or accept the \
+                 shorter history explicitly",
+                capped.len(),
+                outcomes.len(),
+                config.capture.walk_cap
+            )
+            .into());
         }
 
         let shutdown = tokio_util::sync::CancellationToken::new();
