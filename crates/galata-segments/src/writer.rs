@@ -106,8 +106,15 @@ impl Codec {
 }
 
 /// The writer properties every segment is written with.
-fn properties(codec: Codec) -> WriterProperties {
-    WriterProperties::builder()
+///
+/// `prune_on` names the columns whose chunk statistics are written. It is a
+/// **parameter rather than a constant** because two stores prune on different
+/// things: the archive reads by receipt time and nothing else, while the tape
+/// reads by venue, ticker and venue time and never by receipt. A single
+/// constant would have made one of them pay for statistics it cannot use and
+/// left the other with none it can.
+fn properties(codec: Codec, prune_on: &[&str]) -> WriterProperties {
+    let mut builder = WriterProperties::builder()
         .set_compression(codec.to_parquet())
         .set_max_row_group_row_count(Some(MAX_ROW_GROUP_ROWS))
         // Unset on purpose: see MAX_ROW_GROUP_ROWS. When both are set the
@@ -122,9 +129,12 @@ fn properties(codec: Codec) -> WriterProperties {
         // column, including opaque payload columns nothing will ever push a
         // predicate down into; on a mean segment of a few kilobytes that is a
         // measurable share of the file, times the whole file count.
-        .set_statistics_enabled(EnabledStatistics::None)
-        .set_column_statistics_enabled(ColumnPath::from(PRUNE_COLUMN), EnabledStatistics::Chunk)
-        .build()
+        .set_statistics_enabled(EnabledStatistics::None);
+    for column in prune_on {
+        builder = builder
+            .set_column_statistics_enabled(ColumnPath::from(*column), EnabledStatistics::Chunk);
+    }
+    builder.build()
 }
 
 /// A segment written incrementally, committed once, in [`SegmentWriter::finish`].
@@ -146,12 +156,28 @@ pub struct SegmentWriter {
 }
 
 impl SegmentWriter {
-    /// Open a writer for one segment.
+    /// Open a writer for one segment, pruning on [`PRUNE_COLUMN`].
     pub fn create(
         dir: &Path,
         cursor: Cursor,
         schema: SchemaRef,
         codec: Codec,
+    ) -> Result<Self, SegmentError> {
+        SegmentWriter::create_pruned(dir, cursor, schema, codec, &[PRUNE_COLUMN])
+    }
+
+    /// The same, naming the columns whose chunk statistics are written.
+    ///
+    /// A column named here that the schema does not hold costs nothing and
+    /// prunes nothing — parquet writes statistics for the columns it has. It is
+    /// not an error, because the alternative is a writer that refuses a batch
+    /// over a column it would simply have ignored.
+    pub fn create_pruned(
+        dir: &Path,
+        cursor: Cursor,
+        schema: SchemaRef,
+        codec: Codec,
+        prune_on: &[&str],
     ) -> Result<Self, SegmentError> {
         std::fs::create_dir_all(dir).map_err(|source| SegmentError::CreateDir {
             path: dir.to_path_buf(),
@@ -170,7 +196,7 @@ impl SegmentWriter {
         // from the parquet logical types, and a both-ways read-parity test
         // holds that claim rather than assuming it.
         let options = ArrowWriterOptions::new()
-            .with_properties(properties(codec))
+            .with_properties(properties(codec, prune_on))
             .with_skip_arrow_metadata(true);
 
         let writer =
@@ -275,10 +301,81 @@ pub fn write_segment(
     batch: &RecordBatch,
     codec: Codec,
 ) -> Result<PathBuf, SegmentError> {
+    write_segment_pruned(dir, cursor, batch, codec, &[PRUNE_COLUMN])
+}
+
+/// The same, naming the columns whose chunk statistics are written.
+pub fn write_segment_pruned(
+    dir: &Path,
+    cursor: Cursor,
+    batch: &RecordBatch,
+    codec: Codec,
+    prune_on: &[&str],
+) -> Result<PathBuf, SegmentError> {
     if batch.num_rows() == 0 {
         return Err(SegmentError::Empty);
     }
-    let mut writer = SegmentWriter::create(dir, cursor, batch.schema(), codec)?;
+    let mut writer = SegmentWriter::create_pruned(dir, cursor, batch.schema(), codec, prune_on)?;
     writer.write(batch)?;
     writer.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statistics_are_written_for_the_named_columns_and_no_others() {
+        // The footer carries what reads prune on, and nothing else. A page
+        // index over an opaque payload column is a real share of a small file,
+        // times the whole file count.
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("at_micros", DataType::Int64, false),
+            Field::new("venue", DataType::Utf8, false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, 2])),
+                Arc::new(StringArray::from(vec!["hyperliquid", "rh-crypto"])),
+                Arc::new(StringArray::from(vec!["{}", "{}"])),
+            ],
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_segment_pruned(
+            dir.path(),
+            Cursor::Seq { first: 1, last: 2 },
+            &batch,
+            Codec::Uncompressed,
+            &["at_micros", "venue"],
+        )
+        .unwrap();
+
+        let file = File::open(&path).unwrap();
+        let reader =
+            parquet::file::reader::SerializedFileReader::new(file).expect("a readable segment");
+        use parquet::file::reader::FileReader;
+        let group = reader.metadata().row_group(0);
+        let named: Vec<(String, bool)> = (0..group.num_columns())
+            .map(|i| {
+                let column = group.column(i);
+                (column.column_path().string(), column.statistics().is_some())
+            })
+            .collect();
+
+        for (name, has_statistics) in &named {
+            let expected = name == "at_micros" || name == "venue";
+            assert_eq!(
+                *has_statistics, expected,
+                "{name}: statistics present = {has_statistics}, wanted {expected}"
+            );
+        }
+    }
 }

@@ -283,6 +283,63 @@ Recorded so the next set does not start from an assumption:
 putting a tz database in every consumer's binary for a feature nothing uses is
 not a trade worth making yet.
 
+## `venue` cannot be both a column and a partition level — DuckDB 1.5.5, 2026-09-21
+
+The roadmap said to fix legacy's tape by making `venue` *"a column, not only a
+partition level"*. The diagnosis was right and the remedy was not, and one tree
+settled it. Two files, each under a `venue=` directory, one of whose **column
+deliberately disagrees with its path**:
+
+| read | reported venue |
+|---|---|
+| `hive_partitioning=true` | the **path** |
+| no argument at all (the default) | the **path** |
+| `hive_partitioning=false` | the **column** |
+
+So a value written both ways answers the same query two ways depending on a
+flag, and nothing warns. The published discussion of this points at a
+*duplicate column* error; that is a case-sensitivity bug (`FOO` against `foo`),
+and the exact-match case does not error — it silently picks one.
+
+**So the tape writes it once, in the data.** `tape/kind=<kind>/date=<date>/`,
+with `venue` and `ticker` as columns sorted `(venue, ticker, at_micros)`.
+Verified against a written tape, with **no flags at all**:
+
+```sql
+SELECT venue, ticker, bid_px FROM read_parquet('tape/kind=quotes/**/*.parquet')
+```
+```
+hyperliquid  BTC      81213.000000000000000000
+hyperliquid  ETH       3100.500000000000000000
+rh-chain     BTC      81240.000000000000000000
+rh-crypto    BTC      81250.000000000000000000
+```
+
+Cross-venue BTC is one predicate on one table, which is what the quotes dataset
+was for. Pruning moves from directories to row-group statistics on a sorted
+column — the same mechanism that already keeps ticker out of the path, applied
+one level up.
+
+### The cost, paid knowingly
+
+`rm -rf` no longer deletes one venue's tape. The tape is a cache, a rebuild
+filters on the column, and **the archive** — where retention actually
+happens — keeps `venue=` above `kind=` precisely so a venue's bytes are one
+subtree. The two stores order their levels differently because their units
+differ, which was already true before this.
+
+### And a guarantee that was claimed and is not available
+
+`schema_for` was written as an exhaustive match, documented as *"a dataset added
+to `Kind` is a compile error here"*. It is not: `Kind` is `#[non_exhaustive]`
+and the tape is a different crate, so the compiler **requires** a catch-all and
+can never complain about a missing arm. The claim was false as written.
+
+It now returns `Option`, the catch-all refuses by name, and a test over
+`Kind::ALL` catches a dataset that was added and never projected. The check
+moves from build time to test time, which is what `#[non_exhaustive]` costs its
+consumers — worth stating rather than claiming a guarantee that is not there.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -29,4 +29,6 @@ pub use listing::{
     overlapping_ranges, partitions,
 };
 pub use reader::{read_segment, read_segment_range, row_groups_for_range};
-pub use writer::{Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment};
+pub use writer::{
+    Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment, write_segment_pruned,
+};

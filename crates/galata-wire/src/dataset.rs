@@ -160,6 +160,13 @@ impl FromStr for Series {
 
 impl Kind {
     /// Every dataset a store may write.
+    ///
+    /// **Here rather than in a consumer**, because [`Kind`] is
+    /// `#[non_exhaustive]`: outside this crate a `match` needs a catch-all, so
+    /// no consumer can be held exhaustive by the compiler. Inside it, adding a
+    /// variant without extending this array is a length mismatch and the build
+    /// fails — which is the check a consumer cannot have, offered to it as a
+    /// list it can iterate.
     pub const ALL: [Kind; 13] = [
         Kind::Trades,
         Kind::Book,
@@ -302,5 +309,21 @@ mod tests {
         assert!(Series::ALL.contains(&Series::Transfers));
         assert!(Series::ALL.contains(&Series::Mints));
         assert!(Kind::ALL.contains(&Kind::Reorgs));
+    }
+
+    #[test]
+    fn every_kind_is_in_all_and_round_trips() {
+        // The length is checked by the compiler; that each entry is DISTINCT
+        // and parses back is checked here, because a copy-paste duplicate would
+        // satisfy the length and silently drop a dataset.
+        let mut seen = std::collections::BTreeSet::new();
+        for kind in Kind::ALL {
+            assert!(
+                seen.insert(kind.as_str()),
+                "{kind} appears twice in Kind::ALL"
+            );
+            assert_eq!(kind.as_str().parse::<Kind>(), Ok(kind));
+        }
+        assert_eq!(seen.len(), Kind::ALL.len());
     }
 }

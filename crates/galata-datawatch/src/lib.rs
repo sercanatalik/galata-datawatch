@@ -30,6 +30,7 @@ pub mod normalise;
 pub mod record;
 pub mod sink;
 pub mod source;
+pub mod tape;
 pub mod venue;
 
 #[cfg(test)]
