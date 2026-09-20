@@ -170,7 +170,9 @@ mod tests {
     fn a_big_and_a_tiny_number_are_exact() {
         // Within the 28 digits Num carries. A f64 would lose the last of these
         // and the loss would look like a price.
-        let big = Token::new("123456789012345.678901234").require("px").unwrap();
+        let big = Token::new("123456789012345.678901234")
+            .require("px")
+            .unwrap();
         assert_eq!(big.to_string(), "123456789012345.678901234");
         let tiny = Token::new("0.000000000000000001").require("px").unwrap();
         assert_eq!(tiny.to_string(), "0.000000000000000001");

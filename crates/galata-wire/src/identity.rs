@@ -201,8 +201,18 @@ mod tests {
         // Three types share one validator, so the message has to carry which
         // one was being built or a config refusal says nothing useful.
         assert!(Venue::new("a b").unwrap_err().to_string().contains("venue"));
-        assert!(Ticker::new("a b").unwrap_err().to_string().contains("ticker"));
-        assert!(Market::new("a b").unwrap_err().to_string().contains("market"));
+        assert!(
+            Ticker::new("a b")
+                .unwrap_err()
+                .to_string()
+                .contains("ticker")
+        );
+        assert!(
+            Market::new("a b")
+                .unwrap_err()
+                .to_string()
+                .contains("market")
+        );
     }
 
     #[test]

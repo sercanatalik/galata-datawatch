@@ -12,15 +12,21 @@
 //! never sees a partial file, and a crash leaves a temporary that is
 //! recognisably not a segment.
 
+pub mod compact;
 pub mod cursor;
 pub mod error;
 pub mod listing;
+pub mod reader;
 pub mod writer;
 
+pub use compact::{
+    Compacted, HOLD_FILE, Hold, compact_closed, compact_partition, hold, overdue_closed,
+};
 pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;
 pub use listing::{
     frontier, last_durable, last_durable_for_scope, list_segments, mixed_cursors,
     overlapping_ranges, partitions,
 };
+pub use reader::{read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment};

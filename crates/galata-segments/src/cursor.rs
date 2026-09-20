@@ -299,10 +299,10 @@ mod tests {
         for name in [
             "README.md",
             "notes.parquet",
-            "t-1_2_3.parquet",      // too few fields for Time
-            "b-1_2_3.parquet",      // too many for Block
-            "x-1_2.parquet",        // unknown tag
-            "t-a_b_c_d.parquet",    // unparseable fields
+            "t-1_2_3.parquet",   // too few fields for Time
+            "b-1_2_3.parquet",   // too many for Block
+            "x-1_2.parquet",     // unknown tag
+            "t-a_b_c_d.parquet", // unparseable fields
             ".compact.lock",
         ] {
             assert_eq!(Cursor::parse(name), None, "{name} must not parse");
