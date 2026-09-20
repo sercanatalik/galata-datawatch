@@ -217,6 +217,72 @@ stream pushes from one it does not. At 1m the receipt clock tracks the truth
 because live capture keeps it there. At 1h it would not, and an hourly walk
 resuming from it would ask for one minute and report success.
 
+## The `xyz` instruments have no calendar — measured 2026-09-20
+
+**The roadmap was wrong, and the record settled it.** Tier 2 asserted that
+WTIOIL, XYZ100 and GOLD run Sun 18:00 ET to Fri 17:00 ET. They do not. Three and
+a half days of minute bars, walked from the venue and read back off disk, count
+bars **carrying a trade** by hour of the week in `America/New_York`:
+
+```
+xyz:XYZ100        0   1   2   3   4   5  ...  16  17  18  19  20  21  22  23
+Thu               .   .   .   .   .   .       60  60  60  60  60  60  60  60
+Fri              60  60  60  60  60  60       60  59  56  51  57  56  60  54
+Sat              51  52  57  55  57  60       60  60  60  60  60  60  60  60
+Sun              60  60  60  60  60  60       60  54   .   .   .   .   .   .
+```
+
+Friday 17:00 ET — the claimed close — is 59 traded minutes of 60. Saturday, the
+claimed dead day, never falls below 46. `xyz:CL` is 60/60 across the entire
+weekend. BTC, a genuinely continuous crypto perp, reads the same, which is the
+control that says the tool can read a continuous market.
+
+### Quiet is not closed, and gold is why the distinction is in the tool
+
+`xyz:GOLD` thins on Saturday morning — 29 traded minutes in the 06:00 hour, 31
+at 04:00 — and never reaches zero for a single hour. A measure counting
+**volume** would have called that a close. Counting **trades** shows it for what
+it is: an open market with thin liquidity, ragged rather than contiguous. A real
+close is a solid block of `0/60`, and nothing here shows one.
+
+### Which direction the error would have run
+
+This is the part that matters more than the constant. Everything about gap
+clipping rests on an unknown schedule **overstating** a loss. A believed-but-false
+calendar inverts it:
+
+```
+  believed closed, actually open  ──▶  a real Saturday outage is clipped to
+                                       nothing. clipped = "sessions", a
+                                       zero-length gap, and the row claims to
+                                       be TIGHT.
+```
+
+The hole nobody looks for, written confidently by the component whose whole
+purpose is to prevent it. So: **a calendar is measured before it is declared**,
+and `cargo run --example when-open` is the measurement.
+
+### What a calendar will need, when one is real
+
+Not built — no instrument here has hours, so the machinery would have no caller.
+Recorded so the next set does not start from an assumption:
+
+- An **IANA zone**, never a three-letter abbreviation. `CST` is US Central,
+  China and Cuba, and an abbreviation cannot express DST at all.
+- A library that **exposes DST ambiguity**. `chrono` answers a civil time inside
+  a spring-forward gap with `MappedLocalTime::None` and nothing further; `jiff`
+  gives the RFC 5545 compatible strategy plus `tz::AmbiguousZoned`. A venue
+  opening at 02:30 has a boundary that does not exist on one Sunday a year.
+- A **bundled** tz database, against jiff's own default. A minimal container has
+  no `/usr/share/zoneinfo`, and two processes resolving against different
+  databases disagree about whether a market was open — silently, and only near a
+  transition. The cost is that a rule change arrives on a release rather than a
+  system update; pinned in `Cargo.lock`, that is auditable.
+
+`jiff` is a **dev-dependency**: the library itself needs no tz conversion, and
+putting a tz database in every consumer's binary for a feature nothing uses is
+not a trade worth making yet.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -42,14 +42,18 @@ instruments = [
   { ticker = "BTC" },
   { ticker = "ETH" },
   { ticker = "HYPE" },
-  # The `xyz` HIP-3 dex. The venue spells these `xyz:WTIOIL` and so on; the
+  # The `xyz` HIP-3 dex. The venue spells these `xyz:XYZ100` and so on; the
   # prefix is composed at the seam, because a ticker may not hold a `:` and a
   # `:` in a partition level is a path that means something else.
   #
-  # THESE HAVE A CALENDAR — Sun 18:00 ET to Fri 17:00 ET — which nothing here
-  # yet expresses. Until sessions exist, their weekend gaps will be reported
-  # as real losses. That OVERSTATES the loss rather than erasing it, which is
-  # the safe direction, and it is why sessions are the next change.
+  # MEASURED 2026-09-20: THESE HAVE NO CALENDAR. The roadmap assumed Sun
+  # 18:00 ET to Fri 17:00 ET; the record shows all three trading every hour
+  # of the weekend, gold merely thinning to 29 traded minutes in 60 on a
+  # Saturday morning. `cargo run --example when-open` is the measurement.
+  #
+  # So they are continuous, like the three above, and nothing is clipped.
+  # Declaring the calendar that was assumed would have clipped a real
+  # Saturday outage to a zero-length gap and marked it TIGHT.
   #
   # WTI crude is `CL` here, not `WTIOIL`. Two published sources disagreed —
   # one lists "WTI crude (CL)", the other "WTIOIL" — and the venue's own

@@ -127,36 +127,50 @@ path), `check-clock-discipline.sh` (nothing below capture reads a clock),
 
 ---
 
-## Tier 2 — sessions, and the HIP-3 dex
+## Tier 2 — the HIP-3 dex, and the calendar that turned out not to exist
 
-*Before any long capture, because a gap row written without clipping is a row
-that lies, and it cannot be repaired after the fact.*
+*Done, and partly disproved. Kept in full because the disproof is the useful
+part.*
 
-- **HIP-3 dex support.** `Config` gains a per-instrument `dex`; `Symbols` maps
-  `"xyz:WTIOIL" → "WTIOIL"`. The `:` never reaches a `Ticker`. Legacy's
-  `symbols.everywhere(instrument, instrument)` self-mapping is replaced — today
-  it would fail at `Ticker::new`.
+- **HIP-3 dex support.** `Config` gained a per-instrument `dex`; `Symbols` maps
+  `"xyz:XYZ100" → "XYZ100"` and the `:` never reaches a `Ticker`. Legacy's
+  `symbols.everywhere(instrument, instrument)` self-mapping would have failed at
+  `Ticker::new`, and does not exist here.
 - **A duplicate ticker across dexes is refused at load**, naming both. HIP-3 is
   permissionless, so two dexes may each list `GOLD`, and within one venue
   `ticker` is a column, not a partition.
-- **Hours move to the instrument.** Not per venue, and not even per dex —
-  trade[XYZ]'s own schedule has commodities at Sun 18:00 ET, FX at 17:00, US
-  equities at 20:00.
-- **`[hours.*]`**, resolved through an **IANA zone**, because "ET" cannot
-  express DST. `source = "declared"`, since trade[XYZ] publishes hours as
-  documentation and not an endpoint.
-- **The `sessions` dataset** and **gap clipping**, designed in legacy for IBKR
-  and never implemented. Clipping uses the `full` session set and is applied
-  when the row is written, never by the consumer. Unknown hours mean
-  `assumed-24h`: overstate the loss rather than erase it.
-- **WTIOIL, XYZ100, GOLD** — Sun 18:00 ET → Fri 17:00 ET.
+- **The universe check**, which was not planned and turned out to matter more
+  than anything else in this tier: an unlisted coin is answered by a **hang-up**
+  rather than a refusal, taking every other subscription on the socket with it.
 
-> **Exit:** six instruments on one socket across two calendars. A weekend passes
-> and the three `xyz` instruments publish **no gap**, while a genuine
-> disconnection still does. This is the thesis test — *a stack that assumes 24/7
-> for one crypto perp will guess catastrophically for a hundred instruments
-> across five calendars* — and it is cheap here because it needs no second
-> venue, no credential and no new transport.
+### What was planned here and is NOT being built
+
+This tier assumed `WTIOIL, XYZ100, GOLD` ran Sun 18:00 ET → Fri 17:00 ET and
+planned `[hours.*]`, a `sessions` dataset and gap clipping against it.
+
+**The record disproves the premise.** All three trade every hour of the weekend;
+see `design/measured.md`. There is no calendar to clip against, every shipped
+instrument is continuous, and `Clipped::Continuous` is already what they are
+configured with.
+
+Building the machinery anyway would mean a component with no caller and no test
+that was not invented for it — and the *wrong* calendar would have been actively
+harmful, clipping a real Saturday outage to a zero-length gap marked tight.
+
+What is kept is the rule and the tool: **a calendar is measured before it is
+declared**, and `examples/when-open.rs` is the measurement. The predecessor's
+`design/datawatch/trading-hours.md` remains the design to build from when an
+instrument with real hours arrives — most likely at Tier 7, where a venue serves
+its hours from an endpoint rather than having them declared, which is a
+different shape from the one planned here.
+
+> **Exit:** six instruments on one socket, across two dexes, with the calendar
+> question **answered from the record rather than assumed**. The thesis test —
+> *a stack that assumes 24/7 for one crypto perp will guess catastrophically for
+> a hundred instruments across five calendars* — survives intact and moves to
+> the venue that first has a calendar. What this tier actually proved is the
+> half nobody writes down: **guessing that a market is closed is the more
+> dangerous guess.**
 
 ---
 
