@@ -41,17 +41,16 @@ instruments = [
   # as real losses. That OVERSTATES the loss rather than erasing it, which is
   # the safe direction, and it is why sessions are the next change.
   #
-  # MEASURED 2026-09-20, and the reason these are commented out: subscribing
-  # to a `xyz:` coin on this endpoint makes the venue CLOSE THE CONNECTION.
-  # Not refuse it — hang up. Over 18 seconds that was 17 resets, with every
-  # other subscription dying alongside. The same run with the main dex alone
-  # held 12 of 12 pairs live and reset zero times.
+  # WTI crude is `CL` here, not `WTIOIL`. Two published sources disagreed —
+  # one lists "WTI crude (CL)", the other "WTIOIL" — and the venue's own
+  # universe settles it: `meta` with `dex = "xyz"` lists `xyz:CL` and
+  # `xyz:BRENTOIL`, and no WTIOIL at all.
   #
-  # They stay declared rather than deleted: the instruments are wanted, the
-  # subscription form is not yet known, and a commented line is a question
-  # somebody can answer.
-  #
-  # { ticker = "WTIOIL", dex = "xyz" },
-  # { ticker = "XYZ100", dex = "xyz" },
-  # { ticker = "GOLD",   dex = "xyz" },
+  # That mattered more than a name. AN UNLISTED COIN MAKES THE VENUE HANG UP
+  # rather than refuse the subscription, and every other subscription on that
+  # socket dies with it. One wrong ticker here took down capture for all six
+  # instruments, seventeen times in eighteen seconds.
+  { ticker = "CL",     dex = "xyz" },
+  { ticker = "XYZ100", dex = "xyz" },
+  { ticker = "GOLD",   dex = "xyz" },
 ]
