@@ -12,10 +12,14 @@
 
 pub mod clock;
 pub mod coverage;
+pub mod run;
 pub mod session;
+pub mod status;
 pub mod subscriptions;
 
 pub use clock::{Clock, SystemClock, TestClock};
 pub use coverage::Coverage;
+pub use run::{Capture, CaptureError, Wiring};
 pub use session::{Act, Session};
+pub use status::{Connection, PairState, PairStatus, Status, StatusFile};
 pub use subscriptions::{Held, Outcome};

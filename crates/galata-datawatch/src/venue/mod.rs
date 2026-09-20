@@ -144,6 +144,14 @@ pub trait Adapter: Normalise {
     /// payload, under whatever channel the adapter can say, because the bytes
     /// are the thing that must not be lost.
     fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload;
+
+    /// The ticker a venue's own symbol means on a channel.
+    ///
+    /// The loop needs this to credit coverage to the right pair, and it must
+    /// not resolve the symbol itself — a venue's spelling is the venue's
+    /// business, and a loop that mapped one would be the venue boundary
+    /// leaking upward.
+    fn venue_ticker(&self, channel: &str, venue_symbol: &str) -> Option<Ticker>;
 }
 
 /// How an adapter is constructed.

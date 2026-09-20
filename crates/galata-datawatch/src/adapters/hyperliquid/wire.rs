@@ -166,8 +166,33 @@ pub struct WsLevel {
     pub n: Option<u32>,
 }
 
-/// A book frame. `bbo` and `l2Book` share this shape — the former is the latter
-/// at one level a side.
+/// Top of book, as the venue actually sends it.
+///
+/// **Measured from a live frame, 2026-09-20**, because the documentation is
+/// wrong about this. Third-party sources describe `bbo` as "functionally
+/// equivalent to `l2Book` with `nLevels: 1`", which is true of its MEANING and
+/// false of its SHAPE: it carries a flat `bbo` array of two entries, `[bid,
+/// ask]`, not `l2Book`'s `levels: [[bids], [asks]]`.
+///
+/// ```json
+/// {"channel":"bbo","data":{"coin":"BTC","time":1789937201247,
+///  "bbo":[{"px":"81213.0","sz":"15.82613","n":44},
+///         {"px":"81214.0","sz":"2.38926","n":7}]}}
+/// ```
+///
+/// An absent side is `null` in place of an entry, which is why the elements
+/// are optional — an empty book side is a real state, not a defect.
+#[derive(Debug, Deserialize)]
+pub struct WsBbo {
+    /// The venue's own symbol.
+    pub coin: String,
+    /// Venue milliseconds.
+    pub time: i64,
+    /// `[bid, ask]`.
+    pub bbo: Vec<Option<WsLevel>>,
+}
+
+/// A depth frame.
 #[derive(Debug, Deserialize)]
 pub struct WsBook {
     /// The venue's own symbol.

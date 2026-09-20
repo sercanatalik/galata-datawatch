@@ -145,6 +145,17 @@ pub struct Failure {
     pub venue: String,
     /// The channel they came on.
     pub channel: String,
+    /// The partition level the payload landed under.
+    ///
+    /// Carried separately from `channel` because **they are not the same
+    /// thing**, which the predecessor's code assumes they are: it partitions a
+    /// failure by channel and the payload by kind. For its venues the two
+    /// coincided — a `trades` channel under a `trades` kind — so nothing ever
+    /// showed. Here a `bbo` channel lands under a `quotes` kind, and a live run
+    /// produced `kind=bbo/failures/` beside `kind=quotes/`: a failure row in a
+    /// partition its payload is not in, which is exactly the join the seq was
+    /// supposed to make findable.
+    pub kind: String,
     /// What went wrong.
     pub error: String,
 }
@@ -403,10 +414,9 @@ fn group_by_partition(payloads: Vec<Payload>) -> Vec<(PathBuf, Vec<Payload>)> {
 fn group_failures_by_partition(failures: Vec<Failure>) -> Vec<(PathBuf, Vec<Failure>)> {
     let mut out: Vec<(PathBuf, Vec<Failure>)> = Vec::new();
     for failure in failures {
-        // A failure lands beside the payload it refers to, partitioned by the
-        // same channel-derived kind the payload was. A failure is always about
-        // bytes a venue sent: a computed payload has no parse to fail.
-        let partition = venue_partition_of(&failure.venue, &failure.channel, failure.recv_micros);
+        // Beside the payload it refers to: the SAME partition, by kind. Not by
+        // channel — see `Failure::kind`.
+        let partition = venue_partition_of(&failure.venue, &failure.kind, failure.recv_micros);
         match out.iter_mut().find(|(p, _)| *p == partition) {
             Some((_, group)) => group.push(failure),
             None => out.push((partition, vec![failure])),

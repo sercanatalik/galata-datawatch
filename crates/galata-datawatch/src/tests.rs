@@ -291,7 +291,7 @@ fn a_panic_is_reported_as_a_failure_that_names_it() {
 
     let failures = root
         .path()
-        .join(venue_partition_of("hyperliquid", "bbo", at))
+        .join(venue_partition_of("hyperliquid", "quotes", at))
         .join("failures");
     let (_, path) = list_segments(&failures).pop().expect("a failure row");
     let batches = read_segment(&path).unwrap();
@@ -337,7 +337,7 @@ fn a_failure_and_its_payload_join_on_seq() {
 
     let failures = root
         .path()
-        .join(venue_partition_of("hyperliquid", "bbo", at))
+        .join(venue_partition_of("hyperliquid", "quotes", at))
         .join("failures");
     let (_, path) = list_segments(&failures).pop().unwrap();
     let batches = read_segment(&path).unwrap();

@@ -14,7 +14,7 @@ use galata_wire::{
 };
 
 use super::wire::{
-    AssetCtx, FundingRow, Peek, WsActiveAssetCtx, WsBook, WsCandle, WsTrade, is_control_frame,
+    AssetCtx, FundingRow, Peek, WsActiveAssetCtx, WsBbo, WsCandle, WsTrade, is_control_frame,
 };
 use crate::normalise::NormaliseError;
 use crate::record::Payload;
@@ -57,11 +57,9 @@ pub fn normalise(
                 .map(|t| trade(venue, symbols, raw, t))
                 .collect()
         }
-        // `bbo` and `l2Book` share a shape; only what they mean differs, and
-        // that is decided by which series they belong to.
         "bbo" => {
-            let book: WsBook = typed(data)?;
-            Ok(vec![quote(venue, symbols, raw, book)?])
+            let top: WsBbo = typed(data)?;
+            Ok(vec![quote(venue, symbols, raw, top)?])
         }
         "candle" => {
             let c: WsCandle = typed(data)?;
@@ -152,15 +150,15 @@ fn quote(
     venue: &Venue,
     symbols: &Symbols,
     raw: &Payload,
-    book: WsBook,
+    top: WsBbo,
 ) -> Result<Envelope, NormaliseError> {
-    let ticker = resolve(symbols, "bbo", &book.coin)?;
+    let ticker = resolve(symbols, "bbo", &top.coin)?;
 
-    // `levels` is `[bids, asks]`. A side may be empty or absent, and that is a
-    // real state — an empty book side, not a defect — so it yields `None`
-    // rather than a zero nobody quoted.
+    // `bbo` is a flat `[bid, ask]`. A side may be absent, and that is a real
+    // state — an empty book side, not a defect — so it yields `None` rather
+    // than a zero nobody quoted.
     let best = |side: usize| -> Result<(Option<_>, Option<_>), NormaliseError> {
-        match book.levels.get(side).and_then(|s| s.first()) {
+        match top.bbo.get(side) {
             Some(Some(level)) => Ok((
                 Some(level.px.require("quote price")?),
                 Some(level.sz.require("quote size")?),
@@ -174,7 +172,7 @@ fn quote(
     Ok(Envelope::new(
         venue.clone(),
         ticker,
-        Some(millis_to_micros(book.time)),
+        Some(millis_to_micros(top.time)),
         raw.recv_micros,
         Event::Quote(Quote {
             bid_px,

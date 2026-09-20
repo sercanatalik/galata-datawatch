@@ -53,6 +53,19 @@ thiserror = "2"
 # and JSON parsing are.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# **Declared explicitly, and this is not optional.** rustls 0.23 is
+# provider-agnostic: `tokio-tungstenite`'s rustls feature selects the TLS
+# stack but NOT the cryptography behind it, and a build that names neither
+# `ring` nor `aws-lc-rs` compiles cleanly and then panics on the first
+# connection — "could not automatically determine the process-level
+# CryptoProvider". A runtime panic rather than a compile error, which is
+# exactly the kind of failure that is found in production rather than in CI.
+#
+# `ring` over `aws-lc-rs`: the latter is faster and wants a C toolchain and
+# cmake at build time, which a published crate should not require of its
+# consumers. TLS handshakes happen once per connection here, roughly every
+# eight minutes.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio-util = "0.7"
 futures-util = "0.3"
 toml = "1"

@@ -303,6 +303,10 @@ impl Adapter for Hyperliquid {
         Keepalive::Frame(wire::ping_frame().to_string())
     }
 
+    fn venue_ticker(&self, channel: &str, venue_symbol: &str) -> Option<galata_wire::Ticker> {
+        self.symbols.resolve(channel, venue_symbol).cloned()
+    }
+
     fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload {
         let (channel, symbol) = wire::envelope_of(bytes);
         Payload {

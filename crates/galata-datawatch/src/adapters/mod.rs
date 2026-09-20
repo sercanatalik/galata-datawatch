@@ -55,6 +55,70 @@ pub enum AdapterConfig {
     Hyperliquid(hyperliquid::Config),
 }
 
+/// Whether a venue supplies a series, by either route.
+///
+/// Answered from the adapter's own declaration rather than from a second list
+/// here: a second implementation of what a venue serves does not fail, it
+/// disagrees.
+pub fn supplies(venue: &str, series: galata_wire::Series) -> bool {
+    match venue {
+        #[cfg(feature = "hyperliquid")]
+        hyperliquid::VENUE => declaration_of_hyperliquid()
+            .map(|d| d.supplies(series))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "hyperliquid")]
+fn declaration_of_hyperliquid() -> Option<crate::venue::Declaration> {
+    use crate::venue::{Adapter, Construct};
+    // A placeholder instrument: what a venue serves and pages does not depend
+    // on which instruments are asked for.
+    hyperliquid::Hyperliquid::new(
+        hyperliquid::Config {
+            market: hyperliquid::Market::Mainnet,
+            instruments: vec![hyperliquid::Instrument::main("BTC")],
+            candle_interval: "1m".into(),
+        },
+        None,
+    )
+    .ok()
+    .map(|a| a.declaration().clone())
+}
+
+impl AdapterConfig {
+    /// The adapter configuration a declared venue block means.
+    ///
+    /// **The only place a venue's name becomes a variant**, which is what keeps
+    /// the boundary checkable.
+    pub fn from_declared(
+        name: &str,
+        venue: &crate::config::VenueConfig,
+    ) -> Result<AdapterConfig, ResolveError> {
+        match name {
+            #[cfg(feature = "hyperliquid")]
+            hyperliquid::VENUE => Ok(AdapterConfig::Hyperliquid(hyperliquid::Config {
+                market: hyperliquid::Market::parse(&venue.market)
+                    .map_err(ResolveError::Construct)?,
+                instruments: venue
+                    .instruments
+                    .iter()
+                    .map(|i| hyperliquid::Instrument {
+                        ticker: i.ticker.clone(),
+                        dex: i.dex.clone(),
+                    })
+                    .collect(),
+                candle_interval: venue.candle.clone(),
+            })),
+            other => Err(ResolveError::Unknown {
+                name: other.to_string(),
+                known: known().join(", "),
+            }),
+        }
+    }
+}
+
 /// Build the adapter a configuration names.
 pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
     use crate::venue::Construct;

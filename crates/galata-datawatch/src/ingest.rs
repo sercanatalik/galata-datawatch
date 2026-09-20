@@ -103,6 +103,7 @@ pub fn ingest(
                     recv_micros: payload.recv_micros,
                     venue: payload.address.value().to_string(),
                     channel: payload.channel.clone(),
+                    kind: payload.kind.clone(),
                     error: error.clone(),
                 });
             }
@@ -130,6 +131,78 @@ pub fn ingest(
     }
 
     Ok(result)
+}
+
+/// Record an event this process **generated**, then emit it.
+///
+/// A gap has no bytes behind it: nothing arrived, which is the whole point of
+/// it. So there is no payload to archive before a parse — but *durable before
+/// emitted* still applies, and for a sharper reason than usual.
+///
+/// **A gap emitted straight to the sink exists only if the sink was up.** And a
+/// gap is precisely what a consumer needs after an outage, which is exactly
+/// when the sink is most likely to have been down. The predecessor publishes
+/// its gaps and does not record them; an outage therefore erases the evidence
+/// of itself.
+///
+/// So the envelope is rendered to JSON, stored as a payload of its own under
+/// the dataset it belongs to, and emitted only once that has committed. This
+/// lives in `ingest.rs` beside [`ingest`] because it is the same ordering rule,
+/// and the rule has one home.
+pub fn record_generated(
+    archive: &mut Archive,
+    sink: &dyn Sink,
+    venue: &str,
+    envelope: Envelope,
+) -> Result<Ingested, RecordError> {
+    let seq = archive.next_seq();
+    let kind = envelope.kind();
+    let rendered = serde_json::to_vec(&GeneratedPayload {
+        seq,
+        at_micros: envelope.at_micros,
+        recv_micros: envelope.recv_micros,
+        ticker: envelope.ticker().map(|t| t.as_str().to_string()),
+        event: format!("{:?}", envelope.event),
+    })
+    .unwrap_or_default();
+
+    archive.append(Payload {
+        seq,
+        recv_micros: envelope.recv_micros,
+        address: crate::record::PayloadAddress::Venue(venue.to_string()),
+        channel: kind.as_str().to_string(),
+        kind: kind.as_str().to_string(),
+        symbol: envelope.ticker().map(|t| t.as_str().to_string()),
+        // Generated, and durable before it is emitted — so a crash leaves the
+        // record ahead of the stream and never behind it.
+        origin: Origin::Fetched,
+        payload: rendered,
+    })?;
+
+    let envelope = envelope.stamped(seq);
+    let mut result = Ingested {
+        seq,
+        ..Ingested::default()
+    };
+    match sink.emit(&envelope) {
+        Ok(()) => result.emitted += 1,
+        Err(_) => result.emit_failed = true,
+    }
+    Ok(result)
+}
+
+/// How a generated event is rendered into the record.
+///
+/// Deliberately not the wire encoding: this is the record's own readable
+/// rendering of something that never crossed a wire, and it exists so the fact
+/// survives a sink that was not there.
+#[derive(serde::Serialize)]
+struct GeneratedPayload {
+    seq: u64,
+    at_micros: Option<i64>,
+    recv_micros: i64,
+    ticker: Option<String>,
+    event: String,
 }
 
 /// Normalise, converting a panic into an error.

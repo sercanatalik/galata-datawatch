@@ -1,0 +1,401 @@
+//! One file, one type, one load.
+//!
+//! Anything absent, unparseable, unknown or out of bounds **refuses here**, and
+//! the process exits non-zero. A configuration validated in pieces at the point
+//! of use fails halfway through a run, having already done something.
+//!
+//! # The source is a seam
+//!
+//! A source yields `(text, Origin)` and everything below is unchanged. That is
+//! what lets a second source — a vault document rather than a file — drop in
+//! later without changing a caller, and it is why `Origin` appears in every
+//! refusal where a path would.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use galata_wire::Series;
+use serde::Deserialize;
+
+/// Where a configuration's text came from.
+///
+/// It appears in every refusal, because *unknown key `walk_shre`* is not
+/// actionable without it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Origin {
+    /// A file on disk.
+    File(PathBuf),
+    /// A versioned document from a vault. **Not implemented yet** — named so
+    /// the shape of every refusal is settled before the second source exists.
+    Document {
+        /// Its name.
+        name: String,
+        /// The version read.
+        version: u64,
+    },
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Origin::File(path) => write!(f, "{}", path.display()),
+            Origin::Document { name, version } => write!(f, "document {name} v{version}"),
+        }
+    }
+}
+
+/// Why a configuration was refused.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConfigError {
+    /// The text could not be read.
+    #[error("{origin}: {source}")]
+    Read {
+        /// Where it came from.
+        origin: Origin,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The text is not the shape this type expects.
+    #[error("{origin}: {detail}")]
+    Parse {
+        /// Where it came from.
+        origin: Origin,
+        /// What was wrong, as the parser saw it — including the key, for an
+        /// unknown one.
+        detail: String,
+    },
+    /// A value is outside its permitted range.
+    #[error("{origin}: {field} is {value}, outside {bound}")]
+    OutOfBounds {
+        /// Where it came from.
+        origin: Origin,
+        /// Which field.
+        field: &'static str,
+        /// What it was.
+        value: String,
+        /// What it must be.
+        bound: &'static str,
+    },
+    /// A venue declares a series its adapter cannot supply.
+    #[error(
+        "{origin}: [venue.{venue}] declares series `{series}`, which this venue neither streams \
+         nor serves historically — it would subscribe to a channel that does not exist"
+    )]
+    UnsupportedSeries {
+        /// Where it came from.
+        origin: Origin,
+        /// Which venue.
+        venue: String,
+        /// Which series.
+        series: String,
+    },
+    /// No adapter answers to this venue's name.
+    #[error(
+        "{origin}: [venue.{venue}] names a venue this build does not implement. Compiled in: {known}"
+    )]
+    UnknownVenue {
+        /// Where it came from.
+        origin: Origin,
+        /// Which venue.
+        venue: String,
+        /// What is available.
+        known: String,
+    },
+}
+
+/// Where the stores live.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Paths {
+    /// The record. Never rewritten except by compaction.
+    pub archive: PathBuf,
+    /// The local surface, which works when the sink does not.
+    pub status: PathBuf,
+}
+
+/// The capture process's own cadences.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Capture {
+    /// Seconds between commits. **A crash converts this window into a gap**,
+    /// which is why it is declared rather than defaulted.
+    pub flush_secs: u64,
+    /// Seconds between status snapshots.
+    pub status_secs: u64,
+}
+
+/// One instrument to capture.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InstrumentDecl {
+    /// The ticker, which is also the venue's bare symbol.
+    pub ticker: String,
+    /// The builder-deployed dex it lives on, where it is not on the main one.
+    #[serde(default)]
+    pub dex: Option<String>,
+}
+
+/// One venue to capture from.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VenueConfig {
+    /// The venue's own network selector.
+    pub market: String,
+    /// What to capture.
+    pub series: Vec<Series>,
+    /// The bar width subscribed live.
+    pub candle: String,
+    /// The instruments.
+    pub instruments: Vec<InstrumentDecl>,
+}
+
+/// Everything the process was told.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// Where the stores live.
+    pub paths: Paths,
+    /// The process's own cadences.
+    pub capture: Capture,
+    /// What to capture, per venue.
+    pub venue: BTreeMap<String, VenueConfig>,
+}
+
+/// What a caller must answer about an adapter, so this module can refuse a
+/// configuration at load rather than at connect.
+///
+/// A trait rather than a direct call, so the loader itself names no venue —
+/// `check-venue-boundary.sh` holds that.
+pub trait Adapters {
+    /// Whether a venue supplies a series, by either route.
+    fn supplies(&self, venue: &str, series: Series) -> bool;
+    /// Whether this build implements the venue at all.
+    fn known(&self, venue: &str) -> bool;
+    /// What it does implement, for a refusal that says what to do next.
+    fn known_names(&self) -> Vec<&'static str>;
+}
+
+impl Config {
+    /// Load from a file.
+    pub fn load_from(path: &Path, adapters: &dyn Adapters) -> Result<Config, ConfigError> {
+        let origin = Origin::File(path.to_path_buf());
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            origin: origin.clone(),
+            source,
+        })?;
+        Config::load_from_str(&text, origin, adapters)
+    }
+
+    /// Load from text that came from somewhere.
+    ///
+    /// **Everything below this is source-agnostic**, which is what lets a vault
+    /// document drop in later without changing a caller.
+    pub fn load_from_str(
+        text: &str,
+        origin: Origin,
+        adapters: &dyn Adapters,
+    ) -> Result<Config, ConfigError> {
+        let config: Config = toml::from_str(text).map_err(|e| ConfigError::Parse {
+            origin: origin.clone(),
+            detail: e.to_string(),
+        })?;
+        config.validate(&origin, adapters)?;
+        Ok(config)
+    }
+
+    fn validate(&self, origin: &Origin, adapters: &dyn Adapters) -> Result<(), ConfigError> {
+        if !(1..=60).contains(&self.capture.flush_secs) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "capture.flush_secs",
+                value: self.capture.flush_secs.to_string(),
+                bound: "1..=60 — a crash converts this window into a gap",
+            });
+        }
+        if !(1..=300).contains(&self.capture.status_secs) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "capture.status_secs",
+                value: self.capture.status_secs.to_string(),
+                bound: "1..=300",
+            });
+        }
+
+        for (name, venue) in &self.venue {
+            if !adapters.known(name) {
+                return Err(ConfigError::UnknownVenue {
+                    origin: origin.clone(),
+                    venue: name.clone(),
+                    known: adapters.known_names().join(", "),
+                });
+            }
+            for series in &venue.series {
+                // Refused HERE, not at connect. A process that starts and then
+                // cannot subscribe has already claimed it is capturing
+                // something it is not.
+                if !adapters.supplies(name, *series) {
+                    return Err(ConfigError::UnsupportedSeries {
+                        origin: origin.clone(),
+                        venue: name.clone(),
+                        series: series.as_str().to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// An identifier that changes when any field does.
+    ///
+    /// What lets a consumer notice that two processes disagree about what they
+    /// were told, which is otherwise invisible. FNV-1a: enough to tell two
+    /// configurations apart, and it needs nothing.
+    pub fn hash(&self) -> String {
+        let rendered = format!("{self:?}");
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in rendered.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fake;
+    impl Adapters for Fake {
+        fn supplies(&self, venue: &str, series: Series) -> bool {
+            venue == "hyperliquid"
+                && matches!(
+                    series,
+                    Series::Trades | Series::Quotes | Series::Candles | Series::Funding
+                )
+        }
+        fn known(&self, venue: &str) -> bool {
+            venue == "hyperliquid"
+        }
+        fn known_names(&self) -> Vec<&'static str> {
+            vec!["hyperliquid"]
+        }
+    }
+
+    const GOOD: &str = r#"
+[paths]
+archive = "var/archive"
+status = "var/status"
+
+[capture]
+flush_secs = 2
+status_secs = 1
+
+[venue.hyperliquid]
+market = "mainnet"
+series = ["trades", "quotes", "candles"]
+candle = "1m"
+instruments = [
+  { ticker = "BTC" },
+  { ticker = "XYZ100", dex = "xyz" },
+]
+"#;
+
+    fn origin() -> Origin {
+        Origin::File(PathBuf::from("config/datawatch.toml"))
+    }
+
+    fn load(text: &str) -> Result<Config, ConfigError> {
+        Config::load_from_str(text, origin(), &Fake)
+    }
+
+    #[test]
+    fn the_shipped_shape_loads() {
+        let c = load(GOOD).unwrap();
+        assert_eq!(c.capture.flush_secs, 2);
+        assert_eq!(c.venue["hyperliquid"].instruments.len(), 2);
+        assert_eq!(
+            c.venue["hyperliquid"].instruments[1].dex.as_deref(),
+            Some("xyz")
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_is_refused_by_name() {
+        let text = GOOD.replace("flush_secs = 2", "flush_secs = 2\nflush_secx = 3");
+        let err = load(&text).unwrap_err().to_string();
+        assert!(err.contains("flush_secx"), "{err}");
+        assert!(
+            err.contains("datawatch.toml"),
+            "the refusal must say where: {err}"
+        );
+    }
+
+    #[test]
+    fn a_value_out_of_bounds_is_refused_with_its_bound() {
+        let text = GOOD.replace("flush_secs = 2", "flush_secs = 0");
+        let err = load(&text).unwrap_err().to_string();
+        assert!(err.contains("flush_secs"), "{err}");
+        assert!(err.contains("gap"), "the bound must say why: {err}");
+    }
+
+    #[test]
+    fn a_series_the_venue_cannot_serve_is_refused_at_load() {
+        // Not at connect. A process that starts and then cannot subscribe has
+        // already claimed it is capturing something it is not.
+        let text = GOOD.replace(
+            r#"["trades", "quotes", "candles"]"#,
+            r#"["trades", "book"]"#,
+        );
+        let err = load(&text).unwrap_err().to_string();
+        assert!(err.contains("book"), "{err}");
+        assert!(err.contains("hyperliquid"), "{err}");
+    }
+
+    #[test]
+    fn an_unimplemented_venue_is_refused_by_listing_the_known() {
+        let text = GOOD.replace("[venue.hyperliquid]", "[venue.kraken]");
+        let err = load(&text).unwrap_err().to_string();
+        assert!(err.contains("kraken"), "{err}");
+        assert!(
+            err.contains("hyperliquid"),
+            "a refusal must say what IS available: {err}"
+        );
+    }
+
+    #[test]
+    fn one_changed_field_changes_the_hash() {
+        let a = load(GOOD).unwrap();
+        let b = load(&GOOD.replace("flush_secs = 2", "flush_secs = 3")).unwrap();
+        assert_eq!(a.hash(), a.hash(), "stable");
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn a_dex_changes_the_hash() {
+        // Two processes told different instruments must not report the same
+        // configuration.
+        let a = load(GOOD).unwrap();
+        let b = load(&GOOD.replace(r#"dex = "xyz""#, r#"dex = "other""#)).unwrap();
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    #[test]
+    fn a_refusal_from_a_document_names_the_document() {
+        // The second source does not exist yet; the shape of its refusal does.
+        let err = Config::load_from_str(
+            "not toml at all {{{",
+            Origin::Document {
+                name: "datawatch".into(),
+                version: 12,
+            },
+            &Fake,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("document datawatch v12"), "{err}");
+    }
+}

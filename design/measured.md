@@ -51,9 +51,35 @@ Recorded so a later measurement has something to disagree with.
 | figure | value | how |
 |---|---|---|
 | row groups selected by a 100 µs window over a 50,000-row segment | **1 of 4** | `a_narrow_range_decodes_few_groups`, `tests/durability.rs` |
+| `bbo`'s frame shape | **`data.bbo` is a flat `[bid, ask]`**, not `l2Book`'s `levels: [[bids],[asks]]` | first live run, 2026-09-20 |
+| a `xyz:` HIP-3 subscription on the main WS endpoint | **the venue closes the connection** | first live run, 2026-09-20 |
+| session resets over 18 s, six instruments incl. three HIP-3 | **17** | `/tmp/dw2.log` |
+| session resets over 16 s, three main-dex instruments | **0**, 12/12 pairs live | `/tmp/dw3.log` |
 
-That is the only one so far, and it is a unit-scale check that pruning happens
-at all — not a performance figure. Tier 1's soak produces the first real ones.
+### The two things the first live run overturned
+
+**`bbo` does not send `levels`.** Third-party sources describe it as
+"functionally equivalent to `l2Book` with `nLevels: 1, strict: true`", which is
+true of its *meaning* and false of its *shape*. Every frame failed to
+normalise, and the record held all of them — which is what made the real shape
+readable afterwards rather than guessable. This is the entry above in *answered
+by reading, not by running* being overturned by running, which is why that
+section exists.
+
+**A HIP-3 subscription kills the whole connection.** Not a refusal — the venue
+does not say no. It closes the socket, and every other subscription on it dies
+too. Three instruments' worth of capture was destroying the other three's.
+
+Two consequences, neither yet acted on:
+
+1. **The shipped configuration captures the main dex only** until the correct
+   form for a HIP-3 subscription is established. WTIOIL, XYZ100 and GOLD are
+   declared and commented, not deleted.
+2. **The loop lets one bad subscription destroy coverage for every other.**
+   `Subscribed::Refused` exists and nothing populates it, because this venue
+   refuses by hanging up rather than by answering. A subscription that
+   consistently precedes a close should be quarantined and reported refused,
+   rather than retried forever at the cost of everything else.
 
 ## Answered by reading, not by running
 

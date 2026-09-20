@@ -1,0 +1,57 @@
+# galata-datawatch — what to capture, and where it lands.
+#
+# One file, one type, one load. Anything absent, unparseable, unknown or out of
+# bounds refuses at load and the process exits non-zero — a configuration
+# validated in pieces at the point of use fails halfway through a run, having
+# already done something.
+
+[paths]
+# The record. One row per payload, verbatim, before any parse was attempted.
+archive = "var/archive"
+# The local surface, which works when the sink does not.
+status = "var/status"
+
+[capture]
+# Seconds between commits. A CRASH CONVERTS THIS WINDOW INTO A GAP, which is
+# why it is declared rather than defaulted.
+flush_secs = 2
+# How often the full status snapshot is written.
+status_secs = 1
+
+[venue.hyperliquid]
+market = "mainnet"
+candle = "1m"
+# `quotes` is the venue's `bbo` channel rather than `l2Book`: it carries sizes
+# (it is `l2Book` at one level a side) and it is emitted ONLY when the top of
+# book changes on a block, so its rate is bounded by block cadence and by
+# change — where the public `l2Book` is a throttled snapshot on a timer
+# whatever happened.
+series = ["trades", "quotes", "candles", "funding"]
+instruments = [
+  # The main perp dex. Continuous — this venue never closes.
+  { ticker = "BTC" },
+  { ticker = "ETH" },
+  { ticker = "HYPE" },
+  # The `xyz` HIP-3 dex. The venue spells these `xyz:WTIOIL` and so on; the
+  # prefix is composed at the seam, because a ticker may not hold a `:` and a
+  # `:` in a partition level is a path that means something else.
+  #
+  # THESE HAVE A CALENDAR — Sun 18:00 ET to Fri 17:00 ET — which nothing here
+  # yet expresses. Until sessions exist, their weekend gaps will be reported
+  # as real losses. That OVERSTATES the loss rather than erasing it, which is
+  # the safe direction, and it is why sessions are the next change.
+  #
+  # MEASURED 2026-09-20, and the reason these are commented out: subscribing
+  # to a `xyz:` coin on this endpoint makes the venue CLOSE THE CONNECTION.
+  # Not refuse it — hang up. Over 18 seconds that was 17 resets, with every
+  # other subscription dying alongside. The same run with the main dex alone
+  # held 12 of 12 pairs live and reset zero times.
+  #
+  # They stay declared rather than deleted: the instruments are wanted, the
+  # subscription form is not yet known, and a commented line is a question
+  # somebody can answer.
+  #
+  # { ticker = "WTIOIL", dex = "xyz" },
+  # { ticker = "XYZ100", dex = "xyz" },
+  # { ticker = "GOLD",   dex = "xyz" },
+]

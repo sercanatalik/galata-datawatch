@@ -24,6 +24,7 @@
 pub mod adapters;
 pub mod calendar;
 pub mod capture;
+pub mod config;
 pub mod ingest;
 pub mod normalise;
 pub mod record;
