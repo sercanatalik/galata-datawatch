@@ -36,6 +36,13 @@ fails=0
 
 # prove <name> <guard> <file> append <text>
 # prove <name> <guard> <file> replace <find> <with>
+# prove <name> <guard> <file> own                — the guard plants for itself
+#
+# `own` exists because a plant must obey the same scanning rule the check does.
+# A guard that reads each file only as far as its first `#[cfg(test)]` cannot be
+# planted by appending: the violation lands in the region the check deliberately
+# ignores, the planted run passes, and the harness reports the GUARD as broken
+# when the PLANT is. Such a guard carries its own plant beside its own rule.
 prove() {
     local name="$1" guard="$2" file="$3" mode="$4"; shift 4
 
@@ -46,7 +53,10 @@ prove() {
 
     PLANTED="$file"
     cp "$file" "$file.guard-backup"
-    python3 - "$file" "$mode" "$@" <<'PY'
+    if [[ "$mode" == "own" ]]; then
+        "$guard" plant
+    else
+        python3 - "$file" "$mode" "$@" <<'PY'
 import sys, pathlib
 path, mode = pathlib.Path(sys.argv[1]), sys.argv[2]
 text = path.read_text()
@@ -59,6 +69,7 @@ else:
     text = text.replace(find, repl, 1)
 path.write_text(text)
 PY
+    fi
 
     if "$guard" >/dev/null 2>&1; then
         echo "  $name: PLANTED ITS VIOLATION AND STAYED GREEN — the guard does not work" >&2
@@ -109,6 +120,12 @@ prove "check-release-hygiene (missing description)" \
       crates/galata-segments/Cargo.toml replace \
       'description = "Durable parquet segments' \
       'not-description = "Durable parquet segments'
+
+# The one path cannot be bypassed. This guard plants for itself, for the reason
+# `own` exists at all.
+prove "check-ingest-callers (a second caller appends)" \
+      ./scripts/check-ingest-callers.sh \
+      crates/galata-datawatch/src/calendar.rs own
 
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)

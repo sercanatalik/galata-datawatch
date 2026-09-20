@@ -1,0 +1,28 @@
+[package]
+name = "galata-datawatch"
+description = "Market data capture: the record every payload lands in verbatim, and the one path it crosses to get there."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["market-data", "capture", "parquet", "archive", "trading"]
+categories = ["database-implementations", "finance"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+[lints]
+workspace = true
+
+# No runtime, no HTTP client, no broker client. This crate is provable with no
+# network, which is the whole reason the venue seam is a separate change —
+# a panicking normaliser and a killed process are what most of this design is
+# for, and both are easier to arrange against a fake than against a venue.
+[dependencies]
+arrow.workspace = true
+galata-segments = { version = "0.1.0", path = "../galata-segments" }
+galata-wire = { version = "0.1.0", path = "../galata-wire" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

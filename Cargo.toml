@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/galata-wire",
     "crates/galata-segments",
+    "crates/galata-datawatch",
 ]
 
 # Declared once, and taken once — every member says `license.workspace = true`.

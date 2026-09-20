@@ -41,6 +41,7 @@ Recorded so a later measurement has something to disagree with.
 | `sonic-rs` is 3–4× `serde_json`, 1.5–2× `simd-json` at deserialisation | its own benchmarks | **not adopted.** No capture path exists to measure against, and the normaliser already avoids a `Value` tree |
 | `LZ4_RAW` decompresses markedly faster than ZSTD at a worse ratio | `arrow-rs` docs | **knob added, default unchanged.** `Codec` is declarable; both callers still say Zstd |
 | ~1M rows per group is right for time-sorted range reads | general parquet guidance | **contradicted for this workload**, with reasoning, at `MAX_ROW_GROUP_ROWS` |
+| a hot loop can spend a large share of its time in the panic-catching machinery (`__rust_try`, `__rust_maybe_catch_panic`, the panic-count thread-local) | a published profile of another program | **guard kept.** See the open question below |
 
 ## Measured in this tree
 
@@ -52,6 +53,20 @@ That is the only one so far, and it is a unit-scale check that pruning happens
 at all — not a performance figure. Tier 1's soak produces the first real ones.
 
 ## Open, and waiting on a soak
+
+- **What does `catch_unwind` cost on the one path?** Normalisation runs inside
+  a panic boundary for every event of every payload, which is the hottest path
+  in the system — the predecessor measured candles at 44 MB/day/ticker because
+  Hyperliquid pushes one on *every* update, not once per bar. The boundary is
+  kept: an adapter panic taking down capture is worse than the overhead, the
+  published figure is old, and a profile of another program is a hypothesis
+  here rather than a result.
+
+  **The mitigation is recorded in advance so it is not invented under
+  pressure:** wrap a *batch* of frames rather than each frame. That still costs
+  only parses and never bytes, because the bytes are durable before
+  normalisation runs either way — what changes is that one panic costs the
+  batch's parses instead of one. Take the figure first.
 
 - **Is `bbo` cheaper or more expensive than the `l2Book` it replaces?** The
   public book is a throttled snapshot every 5.27 s; `bbo` is event-driven and

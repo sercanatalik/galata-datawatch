@@ -528,6 +528,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "galata-datawatch"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "galata-segments",
+ "galata-wire",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "galata-segments"
 version = "0.1.0"
 dependencies = [
