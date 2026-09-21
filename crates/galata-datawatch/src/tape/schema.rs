@@ -75,6 +75,17 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             // The venue's own identity, so two receipts of one trade are one
             // trade. Null where the venue states none — and a consumer must
             // then not claim it can deduplicate.
+            //
+            // **Redelivery is not hypothetical, it is scheduled.** Hyperliquid
+            // sends recent trade history on every `subscribe`, and the session
+            // rotates every eight minutes — so each rotation redelivers trades
+            // already captured. Measured over a 24-minute run: 163, 161 and
+            // 167 at minutes 8, 16 and 24, **1.55% of the dataset**, and it
+            // grows with run length.
+            //
+            // The record keeps both receipts, because both arrived. A consumer
+            // summing volume without grouping on this column overstates it.
+            // Never null on this venue: 0 of 31,653.
             Field::new("trade_id", DataType::Utf8, true),
         ]),
 
@@ -96,6 +107,12 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("level", DataType::UInt32, true),
         ]),
 
+        // **A bar recurs, by design.** The live channel re-sends the open bar
+        // as it fills, and the historical walk covers the same bars again — so
+        // `(ticker, at_micros, interval)` repeats, measured at 17.7% of rows
+        // over a run whose candles were mostly backfill. **Not redelivery**:
+        // each row is that bar as it stood. A consumer takes the last by
+        // `recv_micros` per key.
         Kind::Candles => with(vec![
             Field::new("interval", DataType::Utf8, false),
             Field::new("open", PRICE, false),

@@ -2596,6 +2596,91 @@ already captured. **None would have been found by reading the code**, because
 in each case the code matched its own comment — and the comment was the thing
 that was wrong.
 
+## The latency, and the tail that was not latency — 2026-09-21
+
+Continuing the audit, this time on a claim that has never had a number. The
+tree carries `at_micros` and `recv_micros` on every row because *the difference
+between them is the number that matters* — and has never stated it.
+
+### The measurement, and its tail
+
+| series | n | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| quotes | 49,141 | 330 ms | 569 ms | 731 ms | 1,066 ms |
+| trades | 31,653 | 350 ms | 736 ms | **10,325 ms** | **197,983 ms** |
+
+A trade arriving **three minutes** after the venue timestamped it is not
+latency.
+
+### It is redelivery, and it is scheduled
+
+Hyperliquid sends recent trade history on every `subscribe`, and the session
+rotates every eight minutes. So each rotation redelivers trades already
+captured:
+
+```text
+  minute of run    redelivered
+  ─────────────────────────────
+        8              163
+       16              161
+       24              167
+```
+
+**491 rows, 1.55% of the dataset, growing with run length.** Anyone summing
+volume without grouping on `trade_id` overstates it by that much.
+
+The design was already right: `trade_id` exists *so two receipts of one trade
+are one trade*, and on this venue it is **never null** — 0 of 31,653. What was
+missing is that redelivery actually happens, on a timer, with a number.
+
+### The real latency
+
+Excluding redelivery and the opening burst, both series agree:
+
+| series | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| quotes | 330 ms | 569 ms | 731 ms | 1,066 ms |
+| trades | **346 ms** | **628 ms** | **806 ms** | 1,445 ms |
+
+**A third of a second, median, from venue clock to ours**, and under a second
+and a half at worst. The 10 s p99 and the 198 s max were artefacts of counting
+a redelivery as a late arrival.
+
+### A candle recurring is not a trade redelivered
+
+Candles repeat `(ticker, at_micros, interval)` at **17.7%**, which is not the
+same thing: the live channel re-sends the open bar as it fills, and the
+historical walk covers the same bars again. Each row is that bar *as it stood*.
+A consumer takes the last by `recv_micros` per key. Quotes repeat **0** times
+in 49,141 rows.
+
+Three datasets, three different right answers — which is why *deduplicate the
+tape* would have been the wrong fix for any of them.
+
+### A correction
+
+Two entries above I checked for duplicates across a handover and reported
+**zero**. That check read `kind=quotes` payload bodies only, where there is
+indeed no redelivery. It did not cover trades, which is where the redelivery
+is. The claim was true of what it examined and narrower than it sounded.
+
+### And one claim that was exactly right
+
+`buffered` says it is *the live size of the window a crash would convert into a
+gap*. Tested with a real `kill -9` at a moment when it read **106**:
+
+```text
+  696 payloads durable
+    0 payloads durable after the last flush
+  newest durable receipt   203,015 µs BEFORE the flush instant
+```
+
+and on restart, 24 gaps of cause `crash_unflushed` beginning at **exactly
+−203,015 µs** relative to that flush — the same microsecond, arrived at
+independently. **The gap is dated from the last durable receipt**, as designed,
+not from when the loss was noticed. Recorded because after three claims that
+overstated, one that holds to the microsecond is worth saying out loud.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
