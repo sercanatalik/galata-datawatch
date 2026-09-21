@@ -249,27 +249,50 @@ different shape from the one planned here.
 
 ## Tier 5 — the vault
 
-*Blocked on **galata-vault 0.1.0 reaching crates.io**. `cargo publish` refuses
-git dependencies.*
+*The seam is built. **The release-ordering blocker was a conflation and is
+gone.***
 
-- `ConfigSource` / `SecretSource` traits with `File` and `Vault`
-  implementations, so a breaking `0.y` of the SDK is a one-file change.
-- `Origin::Vault { document, version }` in every refusal where the path appears.
-  `expose()` into `load_from_str`, never `deserialize` — it would skip galata's
-  own refusals.
-- Both `GALATA_CONFIG` and `GALATA_CONFIG_DOCUMENT` set is refused, naming both.
-  `GV_TOKEN`/`GV_TOKEN_FILE` are never read.
-- **Per-`(binary, venue)` capability**, keyed off argv:
-  `galata-datawatch hyperliquid` holds a `config` token only;
-  `galata-datawatch rh-crypto` holds `config` + `read`.
-- Child vaults per venue credential, because encryption rather than the server
-  is what stops one `read` token reaching every secret.
-- A source guard confining `Vault::secret`/`secrets`/`secret_version` to the
-  credentials module.
+This tier used to read *"blocked on galata-vault 0.1.0 reaching crates.io"*. It
+is still unpublished — `cargo search galata-vault` returns nothing — and that
+**blocks a vault-backed binary and nothing else**.
 
-> **Exit:** `gv-server local` on loopback, the fleet booting from
-> `gv config get datawatch`, and `hyperliquid` still building with
-> `--no-default-features --features hyperliquid` — no vault, no broker.
+`Config::load_from_str` takes the text and its provenance rather than a path,
+and `Origin::Document { name, version }` has existed since Tier 0. So a
+vault-backed loader is three lines wherever the vault client already is:
+
+```rust
+let (text, version) = vault.get("datawatch").await?;
+Config::load_from_str(&text, Origin::Document { name, version }, &Resolver)
+```
+
+**This crate takes no vault dependency to be vault-backed**, and therefore
+publishes without one. The decision made three tiers ago to name the second
+source before it existed turned out to buy more than tidy refusals.
+
+### Done
+
+- **`ConfigSource` / `SecretSource`**, with `FileSource` and `EnvSecrets`. A
+  vault implementation of either needs nothing from here but the trait.
+- **`Secret`** — no `Display`, and a `Debug` that withholds. A secret reaches a
+  log through the most ordinary line somebody writes.
+- **Both `GALATA_CONFIG` and `GALATA_CONFIG_DOCUMENT` set is refused**, naming
+  both. The rule is a pure function, so it is tested — this workspace forbids
+  `unsafe` and setting an environment variable is `unsafe` in edition 2024, so
+  a rule that read the environment for itself could not have been.
+- **`check-secret-reach.sh`** — a secret is read in one module, and no vault
+  authentication variable is named anywhere. `GV_TOKEN` and `GV_TOKEN_FILE` are
+  the vault's rule, stated once, in the vault.
+
+### Still open
+
+- **A vault-backed binary**, which needs the vault published. Not this crate's
+  problem any more.
+- **Per-`(binary, venue)` capability** and child vaults per venue credential —
+  both are shapes of the vault's own token model, and belong with it.
+
+> **Exit:** `hyperliquid` still builds with
+> `--no-default-features --features hyperliquid` — no vault, no broker — and a
+> configuration from a document refuses exactly as one from a file does.
 
 ---
 

@@ -123,6 +123,21 @@ prove "check-release-hygiene (missing description)" \
 
 # The one path cannot be bypassed. This guard plants for itself, for the reason
 # `own` exists at all.
+prove "check-secret-reach (a secret read outside the one door)" \
+    "$ROOT/scripts/check-secret-reach.sh" \
+    "$ROOT/crates/galata-datawatch/src/capture/clock.rs" \
+    own
+
+# REPLACE, not append: appending lands in [dev-dependencies], and a dev
+# dependency does NOT break this wall — it is not propagated to a consumer. The
+# rule is right to check only [dependencies], and the plant has to obey it.
+prove "check-workspace-deps (galata-broker links a store)" \
+    "$ROOT/scripts/check-workspace-deps.sh" \
+    "$ROOT/crates/galata-broker/Cargo.toml" \
+    replace 'async-nats.workspace = true' \
+    'async-nats.workspace = true
+galata-segments = { version = "0.1.0", path = "../galata-segments" }'
+
 prove "check-ingest-callers (a second caller appends)" \
       ./scripts/check-ingest-callers.sh \
       crates/galata-datawatch/src/calendar.rs own

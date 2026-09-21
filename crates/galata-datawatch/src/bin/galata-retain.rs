@@ -16,7 +16,7 @@
 //! ```
 
 use galata_datawatch::adapters;
-use galata_datawatch::config::{Adapters, Config};
+use galata_datawatch::config::{Adapters, Config, FileSource};
 use galata_datawatch::retain;
 
 const DONE: u8 = 0;
@@ -69,9 +69,10 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         }
     }
 
-    let path =
-        std::env::var("GALATA_CONFIG").unwrap_or_else(|_| "config/datawatch.toml".to_string());
-    let config = Config::load_from(std::path::Path::new(&path), &Resolver)?;
+    // Through a source, so the two configuration variables are reconciled in
+    // one place — and both set is a refusal rather than a precedence rule
+    // somebody has to know.
+    let config = Config::load(&FileSource::from_env("config/datawatch.toml")?, &Resolver)?;
     let policy = config.retention.policy();
 
     if policy.is_empty() {

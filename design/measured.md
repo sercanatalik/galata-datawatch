@@ -671,6 +671,59 @@ status surface as `sink_dropped`, because **a drop that is counted and never
 published is a drop nobody sees** — which is exactly the failure the counter
 exists to prevent.
 
+## The vault blocker was a conflation — 2026-09-21
+
+Tier 5 read *"blocked on galata-vault 0.1.0 reaching crates.io"*. It is still
+unpublished; `cargo search galata-vault` returns nothing. What that blocks was
+never checked, and checking it took one reading of the loader.
+
+`Config::load_from_str` takes **the text and its provenance**, not a path, and
+`Origin::Document { name, version }` has existed since Tier 0 with the comment
+*"named so the shape of every refusal is settled before the second source
+exists"*. So a vault-backed loader is:
+
+```rust
+let (text, version) = vault.get("datawatch").await?;
+Config::load_from_str(&text, Origin::Document { name, version }, &Resolver)
+```
+
+and lives wherever the vault client already is. **This crate takes no vault
+dependency to be vault-backed**, so it publishes without one. The blocker
+applies to a vault-*backed binary*; those two were conflated.
+
+Verified: `--no-default-features --features hyperliquid` builds and links
+**zero NATS crates** — no vault, no broker.
+
+### Three places the tooling was right and I was not
+
+1. **A test that defeated itself.** An in-file test asserting *"no vault token
+   is named in this crate"* named `GV_TOKEN` in its own assertion list, so the
+   file contained it and the test failed against itself. That check belongs in
+   a guard that reads each file only as far as its first `#[cfg(test)]`.
+
+2. **A plant that proved nothing.** The new guard's plant *appended* its
+   violation — landing after `#[cfg(test)]`, in the region the check
+   deliberately ignores. The planted run **passed**. This is the exact failure
+   `check-ingest-callers.sh` documents in its own header, and it was walked
+   into anyway. The plant now inserts before the tests.
+
+3. **A second plant the harness caught.** Appending `galata-segments` to the
+   broker's manifest landed it in `[dev-dependencies]` — which correctly does
+   **not** break the wall, because a dev dependency is not propagated to a
+   consumer. The rule was right to check only `[dependencies]`; the plant was
+   wrong, and `test-guards.sh` said so rather than letting a guard be trusted
+   on the strength of a plant that never tested it.
+
+### And a constraint that produced a better design
+
+This workspace forbids `unsafe`, and `std::env::set_var` is `unsafe` in edition
+2024 — so a rule that reads the environment for itself is a rule **no test can
+exercise**. The two-source reconciliation therefore became a pure function
+taking two `Option<String>`, with the environment read as one line above it.
+
+The part with the judgement in it is now the part that is tested, which is the
+right way round and would not have been arrived at without the constraint.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -11,6 +11,10 @@
 //! later without changing a caller, and it is why `Origin` appears in every
 //! refusal where a path would.
 
+pub mod source;
+
+pub use source::{ConfigSource, EnvSecrets, FileSource, Secret, SecretSource};
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +53,40 @@ impl std::fmt::Display for Origin {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// Two configuration sources were named at once.
+    #[error(
+        "{path_var} names {path} and {document_var} names {document}. Two sources is a question \
+         about which one won, and the answer must never be whichever the code checked first — \
+         unset one"
+    )]
+    TwoSources {
+        /// The path variable.
+        path_var: &'static str,
+        /// What it said.
+        path: String,
+        /// The document variable.
+        document_var: &'static str,
+        /// What it said.
+        document: String,
+    },
+    /// A document was named and nothing here can fetch one.
+    #[error(
+        "{document_var} names {document}, and this binary reads files. Fetching a document is a \
+         vault client's job: read it and call `Config::load_from_str` with \
+         `Origin::Document`, which takes no dependency on a vault from this crate"
+    )]
+    NoDocumentReader {
+        /// The document variable.
+        document_var: &'static str,
+        /// What it said.
+        document: String,
+    },
+    /// A secret was not where it was said to be.
+    #[error("{name} is not set. Nothing connects anonymously, and no default is invented")]
+    SecretAbsent {
+        /// The name it should have been under. **Never the value.**
+        name: String,
+    },
     /// The text could not be read.
     #[error("{origin}: {source}")]
     Read {
@@ -267,7 +305,22 @@ pub trait Adapters {
 }
 
 impl Config {
-    /// Load from a file.
+    /// Load from a source.
+    ///
+    /// **The one door.** A file, a document, or anything else that can say what
+    /// the text is and where it came from — all of them cross the same
+    /// validation, because a source that deserialised straight to this type
+    /// would skip [`Config::validate`], which is where the bounds and the
+    /// unknown-key and unknown-venue refusals live.
+    pub fn load(source: &dyn ConfigSource, adapters: &dyn Adapters) -> Result<Config, ConfigError> {
+        let (text, origin) = source.read()?;
+        Config::load_from_str(&text, origin, adapters)
+    }
+
+    /// Load from a file, which is [`Config::load`] over a [`FileSource`].
+    ///
+    /// Kept because a caller holding a path should not have to construct a
+    /// source to use one.
     pub fn load_from(path: &Path, adapters: &dyn Adapters) -> Result<Config, ConfigError> {
         let origin = Origin::File(path.to_path_buf());
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {

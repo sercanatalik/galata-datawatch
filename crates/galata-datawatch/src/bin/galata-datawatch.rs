@@ -9,7 +9,7 @@ use std::sync::Arc;
 use galata_broker::{BrokerIdentity, NatsPublisher, Publisher, Subject};
 use galata_datawatch::adapters::{self, AdapterConfig, History};
 use galata_datawatch::capture::{Capture, Clock, SystemClock, WalkInterval, WalkRequest, Wiring};
-use galata_datawatch::config::{Adapters, Config};
+use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource, SecretSource};
 use galata_datawatch::sink::{NatsSink, NullSink, Sink};
 use galata_datawatch::venue::Subscription;
 use galata_wire::{Clipped, Envelope, Series, Ticker};
@@ -59,12 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .ok_or("usage: galata-datawatch <venue>. One process per venue.")?;
 
-    let path =
-        std::env::var("GALATA_CONFIG").unwrap_or_else(|_| "config/datawatch.toml".to_string());
-
-    // One file, one type, one load. Anything absent, unparseable, unknown or
-    // out of bounds refuses here and the process exits non-zero.
-    let config = Config::load_from(std::path::Path::new(&path), &Resolver)?;
+    // One source, one type, one load. Anything absent, unparseable, unknown or
+    // out of bounds refuses here and the process exits non-zero — and naming
+    // two sources at once is itself a refusal, rather than a precedence rule
+    // somebody has to know.
+    let config = Config::load(&FileSource::from_env("config/datawatch.toml")?, &Resolver)?;
     let config_hash = config.hash();
 
     let venue = config
@@ -130,14 +129,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(NullSink)
             }
             Some(broker) => {
-                let password = std::env::var(&broker.password_var).map_err(|_| {
-                    format!(
-                        "{} is not set, and [broker] names it. Nothing connects anonymously",
-                        broker.password_var
-                    )
-                })?;
-                let identity =
-                    BrokerIdentity::new(broker.user.clone(), password, broker.password_var.clone());
+                // **Through the one door.** `check-secret-reach.sh` refuses an
+                // `env::var` for a secret anywhere but `config/source.rs`: one
+                // call site is one place to get the logging wrong, and the
+                // third would be added by somebody who did not read this.
+                let password = EnvSecrets.secret(&broker.password_var)?;
+                let identity = BrokerIdentity::new(
+                    broker.user.clone(),
+                    password.expose(),
+                    broker.password_var.clone(),
+                );
                 match NatsPublisher::connect(&broker.url, &identity).await {
                     Ok(publisher) => {
                         let (tx, rx) = tokio::sync::mpsc::channel(broker.queue);
