@@ -238,9 +238,10 @@ different shape from the one planned here.
 
 ### Still open in this tier
 
-- **`status.<venue>` is not published yet.** The status *file* is written on its
-  timer and is the surface that works when the broker does not; putting the
-  same snapshot on the bus is a small addition and is not done.
+- ~~**`status.<venue>` is not published yet.**~~ **Done**, and verified with a
+  second process holding `status.>` against a real server. The file is still
+  written **first**, because the surface that reports a broker outage must not
+  be a publish.
 - **Grants.** The server's user table is what makes *"this component reads only
   market data"* a rule the server enforces rather than one somebody reviews.
   The types here make the intent legible; nothing generates the table.

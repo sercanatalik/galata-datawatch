@@ -324,10 +324,24 @@ impl Capture {
         self.last_status_micros = now_micros;
         let status = self.status(now_micros);
 
+        let json = status.to_json();
+
+        // **The file first, always.** Reversing this would put the report of a
+        // broker outage behind the broker — and the local file exists precisely
+        // because a surface that only lives on a bus cannot say the bus is
+        // unreachable. The same shape as archive-before-normalise: the thing
+        // that survives goes first.
         let file = StatusFile::new(&self.wiring.status_dir, self.wiring.adapter.venue());
-        if let Err(error) = file.write(&status.to_json()) {
+        if let Err(error) = file.write(&json) {
             tracing::warn!(error = %error, "the local status file could not be written");
         }
+
+        // Then the copy for a reader that is not on this box. A refusal here
+        // costs nothing the file does not already hold.
+        let _ = self
+            .wiring
+            .sink
+            .emit_status(self.wiring.adapter.venue(), json.as_bytes());
 
         // The counters roll once the minute they are named for has elapsed —
         // not once per snapshot, which would report a pair as quiet between

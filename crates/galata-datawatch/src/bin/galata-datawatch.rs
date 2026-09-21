@@ -10,9 +10,9 @@ use galata_broker::{BrokerIdentity, NatsPublisher, Publisher, Subject};
 use galata_datawatch::adapters::{self, AdapterConfig, History};
 use galata_datawatch::capture::{Capture, Clock, SystemClock, WalkInterval, WalkRequest, Wiring};
 use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource, SecretSource};
-use galata_datawatch::sink::{NatsSink, NullSink, Sink};
+use galata_datawatch::sink::{NatsSink, NullSink, Outbound, Sink};
 use galata_datawatch::venue::Subscription;
-use galata_wire::{Clipped, Envelope, Series, Ticker};
+use galata_wire::{Clipped, Series, Ticker};
 
 /// What the loader asks an adapter, answered without this file naming a venue.
 struct Resolver;
@@ -151,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 match NatsPublisher::connect(&broker.url, &identity).await {
                     Ok(publisher) => {
-                        let (tx, rx) = tokio::sync::mpsc::channel(broker.queue);
+                        let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(broker.queue);
                         tokio::spawn(publish_loop(publisher, rx));
                         tracing::info!(url = broker.url, user = broker.user, "publishing");
                         Arc::new(NatsSink::new(tx))
@@ -282,16 +282,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// **The only place that awaits a publish.** `NatsSink::emit` is synchronous
 /// and hands over through a bounded channel, so a broker that is slow costs
 /// dropped events and a counter — never a stalled capture loop.
-async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Receiver<Envelope>) {
+async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Receiver<Outbound>) {
     let mut reachable = true;
-    while let Some(envelope) = rx.recv().await {
-        let Some(subject) = Subject::of(&envelope) else {
-            // Addressed to a market rather than a venue. Nothing capture
-            // produces is, today; publishing it to an invented subject would
-            // be worse than declining to.
-            continue;
+    while let Some(outbound) = rx.recv().await {
+        let sent = match &outbound {
+            Outbound::Event(envelope) => {
+                let Some(subject) = Subject::of(envelope) else {
+                    // Addressed to a market rather than a venue. Nothing
+                    // capture produces is, today; publishing it to an invented
+                    // subject would be worse than declining to.
+                    continue;
+                };
+                publisher.publish(&subject, envelope).await
+            }
+            // **Its own subject root**, so a market-data subscriber does not
+            // receive snapshots and a dashboard takes `status.>` without also
+            // taking the firehose.
+            Outbound::Status { venue, json } => {
+                publisher
+                    .publish_status(&Subject::status(venue), json)
+                    .await
+            }
+            _ => continue,
         };
-        match publisher.publish(&subject, &envelope).await {
+        match sent {
             Ok(()) => {
                 if !reachable {
                     tracing::info!("the broker is taking events again");
@@ -302,7 +316,7 @@ async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Recei
                 // **On the edge, not per message.** A warning per event is what
                 // buries a log, and the count is on the status surface.
                 if reachable {
-                    tracing::warn!(%error, "the broker refused an event; the record is unaffected");
+                    tracing::warn!(%error, "the broker refused; the record is unaffected");
                     reachable = false;
                 }
             }

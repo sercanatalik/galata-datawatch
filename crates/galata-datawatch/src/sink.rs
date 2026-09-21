@@ -50,6 +50,15 @@ pub trait Sink: Send + Sync {
         0
     }
 
+    /// A status snapshot, on its own root.
+    ///
+    /// **Defaulted to doing nothing**, so a sink that has no use for one is not
+    /// forced to pretend — and so adding this did not break any sink already
+    /// written, including one written outside this crate.
+    fn emit_status(&self, _venue: &galata_wire::Venue, _json: &[u8]) -> Result<(), SinkError> {
+        Ok(())
+    }
+
     /// Hand off one event. Returns immediately.
     fn emit(&self, envelope: &Envelope) -> Result<(), SinkError>;
 }
@@ -100,6 +109,37 @@ impl Sink for CollectingSink {
 
 /// The bridge from a **synchronous** sink to an **asynchronous** broker.
 ///
+/// What goes down the one channel to the broker.
+///
+/// **One channel rather than two**, because backpressure is one decision. Two
+/// would mean two capacities, two drop counters and two answers to *what
+/// happens when the broker is behind* — and the interesting case is exactly
+/// when both are backed up at once.
+///
+/// # Why the large variant is not boxed
+///
+/// Clippy notices that `Event` is much bigger than `Status` and suggests a
+/// `Box`. **The large variant is the common one**: events arrive continuously
+/// and a snapshot once a second, so boxing would add an allocation to the
+/// hottest path in the system in order to save memory on the rare one. At the
+/// shipped queue depth the whole channel is a couple of megabytes, which is not
+/// a number worth trading a per-event allocation for.
+#[allow(clippy::large_enum_variant)]
+#[cfg(feature = "capture")]
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Outbound {
+    /// A normalised event.
+    Event(Envelope),
+    /// A status snapshot, and whose it is.
+    Status {
+        /// Which venue's process.
+        venue: galata_wire::Venue,
+        /// The snapshot, as JSON.
+        json: Vec<u8>,
+    },
+}
+
 /// **Behind the `capture` feature**, because the channel it hands over is
 /// tokio's. A consumer that only reads the tape has nothing to publish.
 ///
@@ -118,10 +158,20 @@ impl Sink for CollectingSink {
 ///
 /// **Drops are counted, never silent.** A publish that quietly did nothing is
 /// indistinguishable from one that worked.
+///
+/// # Why the large variant is not boxed
+///
+/// Clippy notices that [`Outbound::Event`] is much bigger than
+/// [`Outbound::Status`] and suggests a `Box`. **The large variant is the common
+/// one**: events arrive continuously and a snapshot once a second, so boxing
+/// would add an allocation to the hottest path in the system in order to save
+/// memory on the rare one. At the shipped queue depth the whole channel is a
+/// couple of megabytes, which is not a number worth trading a per-event
+/// allocation for.
 #[cfg(feature = "capture")]
 #[derive(Debug)]
 pub struct NatsSink {
-    tx: tokio::sync::mpsc::Sender<Envelope>,
+    tx: tokio::sync::mpsc::Sender<Outbound>,
     dropped: std::sync::atomic::AtomicU64,
 }
 
@@ -132,7 +182,7 @@ impl NatsSink {
     /// The capacity is **exactly the number of events a broker stall can
     /// swallow before they start being dropped**, so it is declared by an
     /// operator rather than defaulted by us.
-    pub fn new(tx: tokio::sync::mpsc::Sender<Envelope>) -> NatsSink {
+    pub fn new(tx: tokio::sync::mpsc::Sender<Outbound>) -> NatsSink {
         NatsSink {
             tx,
             dropped: std::sync::atomic::AtomicU64::new(0),
@@ -146,13 +196,10 @@ impl NatsSink {
 }
 
 #[cfg(feature = "capture")]
-impl Sink for NatsSink {
-    fn dropped(&self) -> u64 {
-        NatsSink::dropped(self)
-    }
-
-    fn emit(&self, envelope: &Envelope) -> Result<(), SinkError> {
-        match self.tx.try_send(envelope.clone()) {
+impl NatsSink {
+    /// Hand anything over, or say why not.
+    fn offer(&self, outbound: Outbound) -> Result<(), SinkError> {
+        match self.tx.try_send(outbound) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 let n = self
@@ -167,6 +214,27 @@ impl Sink for NatsSink {
                 "the broker task has stopped; events are recorded but not published".into(),
             )),
         }
+    }
+}
+
+#[cfg(feature = "capture")]
+impl Sink for NatsSink {
+    fn dropped(&self) -> u64 {
+        NatsSink::dropped(self)
+    }
+
+    fn emit(&self, envelope: &Envelope) -> Result<(), SinkError> {
+        self.offer(Outbound::Event(envelope.clone()))
+    }
+
+    /// **The same queue and the same drop rule as an event.** A dropped
+    /// snapshot is the least costly thing in it, because the file on disk still
+    /// has one.
+    fn emit_status(&self, venue: &galata_wire::Venue, json: &[u8]) -> Result<(), SinkError> {
+        self.offer(Outbound::Status {
+            venue: venue.clone(),
+            json: json.to_vec(),
+        })
     }
 }
 
@@ -254,7 +322,7 @@ mod sink_tests {
     fn full_sink() -> NatsSink {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         // One slot, filled, and the receiver held so the channel stays open.
-        tx.try_send(envelope()).unwrap();
+        tx.try_send(Outbound::Event(envelope())).unwrap();
         std::mem::forget(rx);
         NatsSink::new(tx)
     }
@@ -318,7 +386,39 @@ mod sink_tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let sink = NatsSink::new(tx);
         assert!(sink.emit(&envelope()).is_ok());
-        assert_eq!(rx.try_recv().unwrap(), envelope());
+        assert_eq!(rx.try_recv().unwrap(), Outbound::Event(envelope()));
         assert_eq!(sink.dropped(), 0);
+    }
+
+    #[test]
+    fn a_status_snapshot_shares_the_queue_and_its_drop_rule() {
+        // One channel rather than two, because backpressure is one decision —
+        // and the interesting case is when events and snapshots are backed up
+        // at once.
+        let venue = galata_wire::Venue::new("hyperliquid").unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let sink = NatsSink::new(tx);
+        assert!(sink.emit_status(&venue, b"{}").is_ok());
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Outbound::Status {
+                venue: venue.clone(),
+                json: b"{}".to_vec()
+            }
+        );
+
+        // And a full queue drops it exactly as it drops an event.
+        let full = full_sink();
+        assert!(full.emit_status(&venue, b"{}").is_err());
+        assert_eq!(full.dropped(), 1);
+    }
+
+    #[test]
+    fn a_sink_with_no_use_for_a_snapshot_is_not_forced_to_pretend() {
+        // Defaulted to doing nothing, so adding this broke no sink already
+        // written — including one written outside this crate.
+        let venue = galata_wire::Venue::new("hyperliquid").unwrap();
+        assert!(NullSink.emit_status(&venue, b"{}").is_ok());
     }
 }

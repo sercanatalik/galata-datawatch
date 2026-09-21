@@ -1314,6 +1314,48 @@ one sequence, which is the whole point of the column. The question is whether a
 **payload** sequence repeats, and the archive is where payloads are.
 
 
+## `status.<venue>` on the bus — 2026-09-21
+
+Tier 4 said the snapshot rides its own subject root on a timer. It was written
+to a **file** and went nowhere else, so a dashboard watching a fleet had to read
+every host's disk.
+
+Verified against a real `nats-server`, a second process holding `status.>`:
+
+```
+  status.hyperliquid
+    "connection": "connected"
+    "subs_held": 24
+    "buffered": 66
+    "sink_dropped": 0
+```
+
+and the local file unchanged beside it, still written **first** — because the
+surface that reports a broker outage must not be a publish. Same shape as
+archive-before-normalise: the thing that survives goes first.
+
+### One channel, because backpressure is one decision
+
+Status and events share the bounded queue and the drop counter. Two queues would
+mean two capacities and two answers to *what happens when the broker is behind*,
+and the interesting case is exactly when both are backed up at once. A dropped
+snapshot is the least costly thing in that queue, because the file on disk still
+has one.
+
+### The first subscriber attempt failed, correctly
+
+```
+  Error: NotAnEnvelope("missing field `address` at line 234")
+```
+
+The example asked for `status.>` and decoded what arrived as an `Envelope`. A
+status snapshot is **not** one — it is a report about a *process*, not an
+observation of a *market* — and the decoder did exactly what it is built to do:
+*a message that will not decode is an error, never a skip.*
+
+Worth recording because the failure was the design working. A decoder that
+shrugged and skipped would have shown an empty dashboard and no reason for it.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
