@@ -329,35 +329,38 @@ source before it existed turned out to buy more than tidy refusals.
 
 ## Tier 7 — rh-chain
 
-*The venue that proves `Source::Cursor`, and the one with genuinely new
-problems.*
+*Done, and it proved the seam. Verified against the live chain throughout.*
 
-- `Source::Cursor` over `eth_getLogs`, paging by **block number** — not by the
-  `last_micros + 1ms` bump legacy uses. **Measured: twenty consecutive blocks
-  carry four distinct timestamps**, so a time cursor names about nine blocks and
-  asking for what follows skips eight of them. Done.
-- Archive segments named `Cursor::Block`, so backfill is idempotent by naming.
-- **The payload unit is the `getLogs` response, never one log** — a trade is
-  only provable by matching the stock and USDG `Transfer` inside one
-  `transactionHash`, and `normalise` must stay pure.
-- **Two frontiers.** The reader's bound is the **finalized** block — **measured
-  at 19.6 minutes and 11,678 blocks behind the head**, not the ~13 minutes this
-  line used to say. Thirteen minutes is `safe`, which can still be reorganised
-  under a fault; a bound that can move backwards is not a bound. Capture follows
-  the head, because a block later taken back still *arrived*.
-  Reorgs are rows in the gaps family: an absence you can *prove*.
-- Decoding traps: **drop 4-topic logs** (ERC-721 shares topic0 with ERC-20
-  `Transfer` — **measured at 123 of 4,362, nearly 3%**, each of which would have
-  decoded as a zero-amount transfer that never happened); per-contract decimals
-  (Stock Tokens 18, USDG 6); mint/burn is a `Transfer` to or from the zero
-  address. Done, tested against logs captured from the chain.
-- `instruments` gains **`ui_multiplier`** (ERC-8056), point-in-time via
-  `observed_at` — the cleanest corporate-action source available anywhere.
-- A provider RPC URL is a **secret**, not config. The public node has no archive
-  access and cannot backfill.
+- **`Source::Cursor` over `eth_getLogs`, paging by block.** Measured: twenty
+  consecutive blocks carry **four distinct timestamps**, so a time cursor names
+  about nine blocks and asking for what follows skips eight of them.
+- **The seam actually takes it now.** `Transport::{Stream, Cursor}` and
+  `streaming() -> Option<&dyn Streaming>`. The four websocket methods left the
+  general trait; rh-chain implements none of them rather than answering emptily.
+- **Two frontiers.** Finalized measured at **19.6 minutes and 11,678 blocks**
+  behind the head — not the ~13 minutes first written here, which is `safe`.
+- **Reorgs by parent linkage**, published through the one path. The one absence
+  this system can *prove*.
+- **Decoding traps, all confirmed in real data**: 123 of 4,362 `Transfer` logs
+  carry four topics (ERC-721), each of which would have decoded as a zero-amount
+  transfer; per-contract decimals with no default; zero-address issuance.
+- **`at_micros` is absent, and `block` is present.** A range fetch cannot know
+  per-block times without a call per block, so the time is *recoverable* rather
+  than guessed.
+- **Backoff on refusal**, found by running it: 15 rate-limit refusals in 40 s
+  became 4 in 60 s.
 
-> **Exit:** a day of blocks rebuilt twice produces identical segment names, and
-> a deliberately induced reorg appears as a row.
+### Still open in this tier
+
+- **`ui_multiplier` (ERC-8056)** and the `instruments` dataset for the chain.
+  The column exists on the tape; nothing fetches it.
+- **A provider URL as a secret.** The public node is used today and needs none;
+  a keyed provider goes through `SecretSource`, which exists.
+- **Reorg rows are not yet joined to what they contradict** — both facts are
+  recorded, and no consumer reads them together because there is no consumer.
+
+> **Exit, met:** 47,311 transfers across 32,000 blocks and 36,204 transactions,
+> rebuilt with 0 unparsed and **0 invented venue times**.
 
 ---
 
