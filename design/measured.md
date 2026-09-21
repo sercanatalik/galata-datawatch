@@ -1010,6 +1010,77 @@ A pass that got anywhere clears the penalty; one refused throughout keeps it.
 No test would have found this — it needs a real provider with a real opinion
 about how often it wants to be asked.
 
+## Three venues, three different answers about silence — 2026-09-21
+
+rh-crypto completes a set, and the set is the interesting part:
+
+```text
+  stream   a quiet market and a dead socket look identical, because
+           NOTHING HAPPENED either way
+           → never infer a gap                              invariant 3
+
+  chain    the chain hands back a different block at a height we recorded
+           → PROVE the gap                                  two hashes
+
+  poll     we asked at 12:00:05 and nothing came back
+           → BOUND the gap                                  exactly one cadence
+```
+
+The poll is the case where **our own action supplies the missing half**. A
+stream cannot tell silence from absence because it did nothing to tell them
+apart with; a poll can, because we did something and its failure is an event we
+witnessed.
+
+So a poll gap is not a softer `SessionLost`. It is **the only gap in the system
+whose width is known** rather than dated from the last thing that happened to
+arrive.
+
+Three decisions fell out of writing it, each with a test:
+
+- **Three consecutive failures are one gap three intervals wide**, not three
+  gaps. Three claims where there is one fact would make a consumer count an
+  outage three times.
+- **Nothing is claimed before the first answer** — the same rule as a
+  first-ever start, for the same reason: a gap back to the beginning of time is
+  not a fact.
+- **A clock that went backwards claims nothing.** A gap that runs backwards is
+  not a gap, and a system whose clock jumped is not one that should be inventing
+  intervals.
+
+### The signature, and where the clock stops being cosmetic
+
+```text
+  message = api_key + timestamp + path + method + body
+  timestamp = UNIX SECONDS, expiring after 30
+  key       = base64 of a RAW 32-BYTE SEED
+```
+
+Each of the three documented ways to get this wrong is refused **by name**
+rather than discovered as a `401`:
+
+| wrong thing | what it actually is | why naming it matters |
+|---|---|---|
+| milliseconds | 13 digits where 10 are wanted | fails *every* request |
+| 64 bytes | an expanded keypair | the seed is its first half |
+| starts with `0x30` | an ASN.1 SEQUENCE, so PKCS#8 | the raw seed is inside it |
+
+*Signature invalid* tells nobody anything. **This is the first place in the
+system where a drifting clock does not merely mislabel data** — past thirty
+seconds it stops capture entirely, and a `401` from skew looks exactly like a
+`401` from a revoked key.
+
+Signing is checked against **RFC 8032 test vectors**, because an implementation
+verified only against its own output is a test that a bug and its mirror image
+agree. The *message shape* is tested separately, since the vectors cannot know
+it.
+
+### What is not verified, and will not be here
+
+**No credentials were obtained and none should be.** The live endpoint has not
+been called. Everything above rests on published vectors and the documented
+message shape — which is a weaker claim than every other venue in this tree
+carries, and is worth saying plainly rather than leaving to be discovered.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

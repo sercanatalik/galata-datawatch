@@ -30,6 +30,7 @@
 
 pub mod chain;
 pub mod declaration;
+pub mod poll;
 pub mod symbols;
 pub mod transport;
 pub mod universe;
@@ -38,6 +39,7 @@ pub use chain::{BlockPaging, BlockStep, Frontier, PlanError};
 pub use declaration::{
     Budget, ConnectionPolicy, Declaration, DeclarationError, PageDirection, PageEnd, Paging,
 };
+pub use poll::{Cadence, Polled};
 pub use symbols::Symbols;
 pub use transport::{Streaming, Transport};
 

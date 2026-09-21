@@ -46,9 +46,11 @@ rand = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
 
 [features]
-default = ["capture", "hyperliquid", "bin"]
+default = ["capture", "hyperliquid", "rh-crypto", "bin"]
 # **The transport.** Everything that needs a runtime: the loop, the clock, the
 # websocket source and every adapter's HTTP client.
 #
@@ -68,10 +70,16 @@ capture = [
 ]
 # The seam itself is unconditional; an adapter is a feature.
 hyperliquid = []
+# **The signing venue.** Ed25519 and base64 are here rather than unconditional
+# so a tape reader links neither: a signature is a pure function, but it is a
+# pure function nothing reading parquet has any use for.
+rh-crypto = ["dep:ed25519-dalek", "dep:base64"]
 # The binary, and the log formatter only it needs. A library consumer taking
 # `default-features = false` gets the capture machinery without a subscriber
 # they will replace anyway.
 bin = ["capture", "dep:tracing-subscriber", "dep:galata-broker"]
+base64 = ["dep:base64"]
+ed25519-dalek = ["dep:ed25519-dalek"]
 
 [[bin]]
 name = "galata-datawatch"

@@ -50,6 +50,10 @@ rust_decimal = { version = "1", features = ["serde-str"] }
 # without waiting for the wire, which is what lets a bounded channel in front of
 # it be the only place backpressure is decided.
 async-nats = "0.50"
+# Request signing for a venue that authenticates every call. Not a default
+# feature: a signature is a pure function, and a tape reader has no use for one.
+ed25519-dalek = "3"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 # `raw_value` is load-bearing, not a convenience: a normaliser peeks at a
 # frame's channel and takes its `data` as a borrowed span, then types that span

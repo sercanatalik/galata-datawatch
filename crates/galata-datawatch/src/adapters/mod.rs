@@ -14,6 +14,11 @@ pub mod hyperliquid;
 /// makes a request.
 pub mod rh_chain;
 
+/// Robinhood Crypto. Behind the `rh-crypto` feature, which carries the
+/// signing dependencies a tape reader has no use for.
+#[cfg(feature = "rh-crypto")]
+pub mod rh_crypto;
+
 #[cfg(feature = "capture")]
 use galata_wire::Series;
 
