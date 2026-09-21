@@ -1784,6 +1784,90 @@ Which is the right answer, and not the same as *every row is confirmed*. A row
 no reorganisation contradicts is only one no **known** reorganisation
 contradicts, and the trail sees only the blocks capture actually asked for.
 
+## The codec, settled on this tree's own bytes — 2026-09-21
+
+Two constants carried *not measured yet* notes since Tier 0. There are real
+segments per dataset now, so both are answered.
+
+`cargo run --release --example codec -- <root>` is the instrument: every
+segment under a root, rewritten under each codec, with write, full-scan read
+and **windowed** read timed separately.
+
+### The archive — 12 whole `eth_getLogs` responses, 278 MB raw
+
+| codec | bytes | of raw | full read | window |
+|---|---|---|---|---|
+| uncompressed | 278,821,357 | 100.0% | 28.0 ms | 0.20 ms |
+| lz4 | 37,054,667 | 13.3% | 122.5 ms | 0.21 ms |
+| **zstd** | **16,192,334** | **5.8%** | 129.1 ms | 1.50 ms |
+
+### The tape — 37,791 typed rows
+
+| codec | bytes | of raw | full read | window |
+|---|---|---|---|---|
+| uncompressed | 3,215,766 | 100.0% | 4.7 ms | 1.32 ms |
+| lz4 | 2,708,773 | 84.2% | 5.5 ms | 1.16 ms |
+| **zstd** | **1,564,052** | **48.6%** | 11.6 ms | 1.32 ms |
+
+### What this refutes
+
+The note said:
+
+> `LZ4_RAW` decompresses markedly faster at a worse ratio, which is plainly one
+> store's trade and plainly not the other's.
+
+**Both halves fail.**
+
+On the archive lz4 is 5% faster to read and **2.3× larger**. There is no trade.
+Whole JSON frames are what a dictionary coder is for, and lz4 leaves most of it
+on the table.
+
+On the tape the ratio half is nearly right — lz4 barely compresses, 84.2%,
+because the columnar encodings already did the work — but the speed half is
+answered by the only column that matters:
+
+**The windowed read is flat: 1.16, 1.32, 1.32 ms.**
+
+A query asks for a minute inside a day, so row-group pruning decompresses one
+or two groups. **The decompression rate the note reasoned about is multiplied
+by a quantity pruning already made small.** zstd halves the file for nothing a
+reader can feel.
+
+The full-scan cost is real — 11.6 ms against 4.7 — but a full scan of the tape
+is a rebuild's shape, and the tape is a cache rebuilt from the archive anyway.
+
+So `Zstd` on both, which is what both callers already passed. **The change is
+that it is measured rather than defaulted**, and the reasoning that would have
+moved it is recorded as refuted rather than left standing to be acted on later.
+
+### What the instrument does NOT resolve
+
+**Write time.** Tape figures swung between runs — 720.9 / 401.5 / 378.2 in one
+pass, within 40 ms of each other in another — with no consistent ordering by
+codec. Three segments of 1.3 MB are dominated by file creation and the atomic
+rename. Recorded as unresolved rather than quoted, because a number from an
+instrument that does not resolve it is worse than no number. The archive is the
+one place compression is visible in the write: about 87 ms over 278 MB, for 17×
+the ratio.
+
+### And the row-group byte bound
+
+`MAX_ROW_GROUP_ROWS` asked for encoded bytes per dataset. From the tape's own
+parquet metadata:
+
+| dataset | rows | bytes/row | 16,384 rows ≈ |
+|---|---|---|---|
+| transfers | 22,946 | 35.47 | 567 KiB |
+| mints | 14,843 | 37.55 | 601 KiB |
+
+**567–601 KiB**, sane by any general guidance, and close enough between the two
+that a byte bound would change nothing for either. It stays unset — now for a
+measured reason instead of an unanswered one.
+
+What would turn it is named: **a wide dataset**. A `book` row is many times a
+transfer's width, and the row-count table was measured on `quotes`. The first
+partition of real book segments is that measurement.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
@@ -1816,10 +1900,13 @@ subscription answers it**, which is the soak's first job.
   normalisation runs either way — what changes is that one panic costs the
   batch's parses instead of one. Take the figure first.
 
-- **A byte bound on row groups.** `parquet` 60 added `set_max_row_group_bytes`,
-  which expresses `MAX_ROW_GROUP_ROWS`'s actual intent directly and is
-  row-width independent. Left unset; when both are set the smaller limit wins,
-  so enabling it later narrows groups rather than widening them.
-- **Compression per store.** The record is written every few seconds and read
-  rarely; the cache is written once per window and read constantly. Opposite
-  trades, one knob, no measurement yet.
+- ~~**A byte bound on row groups.**~~ **Measured**: 16,384 rows is 567 KiB of
+  transfers and 601 KiB of mints, so a bound would change nothing for either.
+  Still unset, and what would turn it is now named — a **wide** dataset, since
+  the row count was measured on `quotes` and a `book` row is many times a
+  transfer's width.
+- ~~**Compression per store.**~~ **Measured, and it refuted the reasoning it
+  replaced**: lz4 is 2.3× larger than zstd on the record for a 5% read saving,
+  and on the tape the *windowed* read — the one that matters — is flat across
+  every codec, because pruning bounds how much is ever decompressed. `Zstd` on
+  both, now for a reason.

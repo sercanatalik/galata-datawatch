@@ -56,19 +56,34 @@ pub const PRUNE_COLUMN: &str = "recv_micros";
 /// It costs nothing on the write path: a flush writes a few rows, which is one
 /// row group at any of these sizes.
 ///
-/// # A better instrument exists, and is not used yet
+/// # The byte bound, now measured and still unset
 ///
 /// `parquet` 60 added [`set_max_row_group_bytes`], which flushes a row group
 /// when its *estimated encoded size* crosses a threshold. That expresses this
 /// constant's actual intent — *how much gets decoded for one window* — far
-/// more directly, and it is **row-width independent**: 16,384 rows of a narrow
-/// quote is a wholly different number of bytes from 16,384 rows of a wide book
-/// message, and the table above was measured on one dataset and then applied
-/// to all of them.
+/// more directly, and it is **row-width independent**.
 ///
-/// It stays unset. The row count is what was measured, and a constant is not
-/// moved on reasoning alone in this tree. The byte bound is the right thing to
-/// measure against in the first soak that produces real segments per dataset.
+/// This asked for encoded bytes per dataset. **Measured 2026-09-21**, from the
+/// tape's own parquet metadata:
+///
+/// ```text
+///   dataset       rows    bytes/row   16,384 rows ≈
+///   ─────────────────────────────────────────────────
+///   transfers   22,946       35.47        567 KiB
+///   mints       14,843       37.55        601 KiB
+/// ```
+///
+/// **567–601 KiB**, a sane row group by any general guidance, and close enough
+/// between the two that a byte bound would change nothing for either. So it
+/// stays unset — now for a measured reason rather than an unanswered one.
+///
+/// What would turn it is named precisely: **a wide dataset**. A `book` row is
+/// many times the width of a transfer, and the row-count table above was
+/// measured on `quotes`. The first partition of real book segments is the
+/// measurement, and `cargo run --release --example codec` is the instrument.
+///
+/// When both bounds are set the smaller wins, so turning this on later narrows
+/// groups rather than widening them — the safe direction to discover.
 ///
 /// [`set_max_row_group_bytes`]: parquet::file::properties::WriterPropertiesBuilder::set_max_row_group_bytes
 pub const MAX_ROW_GROUP_ROWS: usize = 16_384;
@@ -77,19 +92,68 @@ pub const MAX_ROW_GROUP_ROWS: usize = 16_384;
 ///
 /// Declarable because the two stores have opposite read/write ratios: a record
 /// is written every few seconds and read rarely, while a cache is written once
-/// per window and read constantly. `LZ4_RAW` decompresses markedly faster at a
-/// worse ratio, which is plainly one store's trade and plainly not the other's.
+/// per window and read constantly.
 ///
-/// **No default is changed on someone else's benchmark.** Both current callers
-/// declare [`Codec::Zstd`]; the measurement that would turn this is a soak that
-/// does not exist yet.
+/// # Measured 2026-09-21, and the reasoning it refutes
+///
+/// This carried a note saying *`LZ4_RAW` decompresses markedly faster at a
+/// worse ratio, which is plainly one store's trade and plainly not the
+/// other's*. **Both halves fail on this tree's bytes.**
+///
+/// The archive — 12 segments, each one whole `eth_getLogs` response, 278 MB
+/// raw:
+///
+/// ```text
+///   codec          bytes     of raw   full read   window
+///   ───────────────────────────────────────────────────────
+///   uncompressed  278.8 MB   100.0%      28.0 ms   0.20 ms
+///   lz4            37.1 MB    13.3%     122.5 ms   0.21 ms
+///   zstd           16.2 MB     5.8%     129.1 ms   1.50 ms   ← chosen
+/// ```
+///
+/// lz4 is **not meaningfully faster** — 5% — and is **2.3× larger**. There is
+/// no trade here: whole JSON frames are what a dictionary coder is for, and
+/// lz4 leaves most of it on the table.
+///
+/// The tape — 3 segments, 37,791 typed rows:
+///
+/// ```text
+///   codec          bytes     of raw   full read   window
+///   ───────────────────────────────────────────────────────
+///   uncompressed    3.2 MB   100.0%       4.7 ms   1.32 ms
+///   lz4             2.7 MB    84.2%       5.5 ms   1.16 ms
+///   zstd            1.6 MB    48.6%      11.6 ms   1.32 ms   ← chosen
+/// ```
+///
+/// **The windowed read is flat across all three**, and that is the whole
+/// finding. A query asks for a minute inside a day, so row-group pruning
+/// decompresses one or two groups; the decompression *rate* the old note
+/// reasoned about is multiplied by a quantity pruning already made small. zstd
+/// halves the file for nothing a reader can feel. The full-scan cost is real
+/// but it is a rebuild's shape, and the tape is a cache that gets rebuilt from
+/// the archive anyway.
+///
+/// **Write time is not resolved by this instrument** and the figures are left
+/// out rather than quoted: three segments of 1.3 MB are dominated by file
+/// creation and the atomic rename, and tape write times swung between runs
+/// with no consistent ordering by codec. The archive is the one place
+/// compression is visible in the write — about 87 ms over 278 MB for 17× the
+/// ratio.
+///
+/// `cargo run --release --example codec -- <root>` in `galata-datawatch`
+/// re-runs all of it over any store's segments.
+///
+/// [`Codec::Lz4`] stays. It is not wrong for a store that does not exist yet;
+/// it is wrong for these two, and this says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Codec {
-    /// Zstandard at the library's default level. Better ratio.
+    /// Zstandard at the library's default level. **Measured best for both
+    /// stores in this tree** — see the type's documentation.
     #[default]
     Zstd,
-    /// LZ4 raw. Faster to decompress, worse ratio.
+    /// LZ4 raw. Worse ratio, and **not measurably faster on either store
+    /// here**: pruning bounds how much is ever decompressed.
     Lz4,
     /// None, for a measurement that wants the codec out of the picture.
     Uncompressed,
