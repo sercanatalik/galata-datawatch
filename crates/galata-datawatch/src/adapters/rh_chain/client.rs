@@ -76,6 +76,36 @@ pub enum ChainError {
 }
 
 impl ChainError {
+    /// **Would a smaller range have worked?**
+    ///
+    /// A node caps `eth_getLogs` two ways: by block span, and by how many rows
+    /// the query matched. The second cannot be satisfied by any fixed span —
+    /// a busy stretch of chain produces more logs per block — so it is
+    /// discovered from the refusal and answered by narrowing.
+    ///
+    /// **Measured 2026-09-21, in a soak:** a 1,000-block range refused with
+    /// `logs matched by query exceeds limit of 50000`, eighteen times, because
+    /// the cursor retried it unchanged. It was never going to work.
+    ///
+    /// A timed-out query is here for the same reason: less to gather is less
+    /// to time out on. A `429` is **not** — the range was fine and we were
+    /// too quick, which the backoff already answers, and narrowing would make
+    /// *more* requests at exactly the wrong moment.
+    pub fn is_narrowable(&self) -> bool {
+        let ChainError::Rpc { detail, .. } = self else {
+            return false;
+        };
+        let said = detail.to_ascii_lowercase();
+        if said.contains("429") || said.contains("too many requests") {
+            return false;
+        }
+        said.contains("exceeds limit")
+            || said.contains("timed out")
+            || said.contains("too large")
+            || said.contains("response size")
+            || said.contains("query returned more than")
+    }
+
     /// **The only way to build a [`ChainError::Http`].**
     ///
     /// Measured on reqwest 0.13.5: a failed request's `Display` carries the

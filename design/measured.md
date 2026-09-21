@@ -2177,6 +2177,68 @@ It matters because a rebuild over an un-repaired archive partition doubles
 those rows **silently**: the duplicated payloads keep their sequences, so
 nothing downstream overlaps either.
 
+## A soak found a livelock in the chain cursor — 2026-09-21
+
+Twenty-five minutes of rh-chain capture beside a healthy hyperliquid one. The
+chain stopped advancing:
+
+```
+  a range failed from=63352032 to=63353031
+    error=rh-chain eth_getLogs: the node said
+      {"code":-32000,"message":"logs matched by query exceeds limit of 50000"}
+```
+
+**Eighteen times, the same range**, until the process was killed.
+
+The cursor deliberately does not advance past a failed range — advancing turns
+a retryable hole into a permanent one, silently. That rule is right for a
+timeout or a `429`. **It is wrong for this one**: a 1,000-block span holding
+more than 50,000 logs holds more than 50,000 logs on every retry, for ever.
+
+### The node states a row cap, and no block span satisfies it
+
+`MAX_BLOCK_SPAN = 1_000` was documented as *conservative against a public node
+that states no limit and enforces one by timing out*. The node does state a
+limit, in the error — and **it is a row limit**. A busy stretch of chain
+produces more logs per block, so no fixed span is right for both a quiet
+stretch and a busy one.
+
+Asked of the live node, on the exact range that hung:
+
+| span | result |
+|---|---|
+| 1,000 | **refused** — exceeds limit of 50000 |
+| 500 | ok, **26,224 logs** |
+| 250 | ok, 13,611 logs |
+| 125 | ok, 6,120 logs |
+
+**One halving clears it.** The loop was one arithmetic operation away from
+carrying on, and instead stood still.
+
+### What changed
+
+The refusal is classified. *Exceeds limit* and *timed out* are narrowable —
+less to gather is less to time out on. A `429` is **not**: the range was
+acceptable and the request was too soon, which the backoff already answers, and
+narrowing there would make *more* requests at exactly the wrong moment.
+
+The span halves on a narrowable refusal and doubles back towards the declared
+cap after a clean pass — doubling rather than restoring, because a busy stretch
+is a stretch and going straight back would refuse again on the next pass over
+the same neighbourhood.
+
+Narrowing has a floor. At one block the provider cannot serve this chain at
+all, and capture says so and exits rather than spinning. **A `Gap` would have
+been the wrong row**: its bounds are venue time, a `getLogs` response carries
+none, and inventing one is what this tree refuses everywhere else.
+
+### The rule the soak illustrates
+
+The cursor's *do not advance past a failure* rule was correct and **incomplete**
+— it distinguished failed from succeeded and not retryable from unretryable.
+A loop that cannot tell those apart either loses data or stops, and this one
+stopped, which is the better of the two and still not right.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

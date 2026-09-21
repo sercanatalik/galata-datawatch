@@ -42,6 +42,16 @@ pub struct Pass {
     pub failed: u32,
     /// Reorganisations published.
     pub reorgs: u32,
+    /// The span the next pass should use, where the provider refused this
+    /// one's for its size. `None` means it was not refused that way.
+    pub narrow_to: Option<u64>,
+    /// The span this pass used, where it was narrowed below the declared one.
+    ///
+    /// **A node caps `eth_getLogs` by rows as well as by blocks**, and no fixed
+    /// span satisfies a row cap — a busy stretch produces more logs per block.
+    /// Reported so an operator can see the loop adapting rather than guess why
+    /// a pass covered less.
+    pub narrowed_to: Option<u64>,
     /// Where the cursor was moved back to, where a reorganisation moved it.
     ///
     /// **The re-read is bounded by the trail's depth**, which is bounded by
@@ -59,8 +69,12 @@ impl Pass {
             Some(block) => format!(", rewound to {block}"),
             None => String::new(),
         };
+        let narrowed = match self.narrowed_to.or(self.narrow_to) {
+            Some(span) => format!(", span narrowed to {span}"),
+            None => String::new(),
+        };
         format!(
-            "{} blocks in {} requests ({} failed, {} reorgs{rewound})",
+            "{} blocks in {} requests ({} failed, {} reorgs{rewound}{narrowed})",
             self.blocks, self.requests, self.failed, self.reorgs
         )
     }
@@ -78,6 +92,24 @@ impl Pass {
 fn rewind_to(cursor: Option<u64>, from_block: u64) -> u64 {
     let target = from_block.saturating_sub(1);
     cursor.map_or(target, |c| c.min(target))
+}
+
+/// The span to try after the provider refused this one for its size.
+///
+/// Halved, with a floor of one block. **Never the same span again** — the
+/// blocks hold what they hold, so a retry unchanged is the livelock a soak
+/// found: eighteen identical refusals of one range in twenty-five minutes.
+fn narrowed(span: u64) -> u64 {
+    (span / 2).max(1)
+}
+
+/// The span to try after a clean pass, moving back towards the declared one.
+///
+/// **Doubling rather than restoring**, because a busy stretch of chain is a
+/// stretch and not the whole chain: going straight back to the declared span
+/// would refuse again on the very next pass over the same neighbourhood.
+fn widened(span: u64, declared: u64) -> u64 {
+    (span.saturating_mul(2)).min(declared)
 }
 
 impl Capture {
@@ -134,17 +166,29 @@ impl Capture {
         let reference = self.venue_reference();
         let mut refreshed_at: Option<i64> = None;
 
+        // **The span adapts to what the provider will actually serve.**
+        //
+        // The declared `max_span` is a block cap. A node also caps by ROWS, and
+        // no fixed span satisfies that — a busy stretch produces more logs per
+        // block. So the row cap is discovered from the refusal and answered by
+        // halving, then given back after a clean pass.
+        let mut span = paging.max_span.max(1);
+
         while !shutdown.is_cancelled() {
             let mut last_pass_failed = false;
             if let Some(reference) = reference.as_ref() {
                 self.refresh_reference(&client, reference, &mut refreshed_at)
                     .await?;
             }
+            let stepping = BlockPaging {
+                max_span: span,
+                earliest: paging.earliest,
+            };
             match self
                 .one_pass(
                     &client,
                     &venue,
-                    &paging,
+                    &stepping,
                     &mut trail,
                     &mut cursor,
                     backfill,
@@ -153,6 +197,31 @@ impl Capture {
                 .await
             {
                 Ok(pass) => {
+                    if let Some(narrower) = pass.narrow_to {
+                        // **Never retried unchanged.** The refusal says the
+                        // range held more than the node will return, and it
+                        // will hold just as much next time.
+                        if span <= 1 {
+                            return Err(CaptureError::Provider(format!(
+                                "this provider will not serve a single block near {}, so \
+                                 narrowing has nowhere left to go. Its row cap is below what \
+                                 one block of this chain holds — a different provider, or a \
+                                 raised cap, is the only way past it",
+                                cursor.map(|c| c + 1).unwrap_or_default()
+                            )));
+                        }
+                        span = narrower;
+                        tracing::warn!(
+                            venue = venue.as_str(),
+                            span,
+                            "the provider refused the range for its size; narrowing"
+                        );
+                    } else if pass.failed == 0 && span < paging.max_span {
+                        // Given back gradually. A busy stretch is a stretch,
+                        // not the whole chain.
+                        span = widened(span, paging.max_span);
+                        tracing::debug!(venue = venue.as_str(), span, "widening again");
+                    }
                     if pass.blocks > 0 || pass.reorgs > 0 {
                         tracing::info!(venue = venue.as_str(), "{}", pass.report());
                     }
@@ -228,6 +297,21 @@ impl Capture {
             let now = self.now();
             let payload = match client.logs(step.from, step.to, now).await {
                 Ok(payload) => payload,
+                // **The range was too big, not too soon.** Retrying it
+                // unchanged cannot work: the blocks hold what they hold. The
+                // pass stops here, the cursor does not advance, and the next
+                // one plans the same ground in halves.
+                Err(error) if error.is_narrowable() => {
+                    tracing::warn!(
+                        from = step.from,
+                        to = step.to,
+                        %error,
+                        "the range was refused for its size"
+                    );
+                    pass.failed += 1;
+                    pass.narrow_to = Some(narrowed(step.blocks()));
+                    break;
+                }
                 Err(error) => {
                     // **The cursor does not advance.** Advancing past a failed
                     // range turns a retryable hole into a permanent one,
@@ -356,6 +440,71 @@ impl Capture {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_size_refusal_never_retries_the_same_span() {
+        // The livelock, in one assertion: the next span is always smaller.
+        let mut span = 1_000u64;
+        for _ in 0..20 {
+            let next = narrowed(span);
+            assert!(next < span || span == 1, "{span} -> {next}");
+            span = next;
+        }
+        // And it stops at a block rather than at zero, which would plan nothing.
+        assert_eq!(span, 1);
+        assert_eq!(narrowed(1), 1);
+    }
+
+    #[test]
+    fn a_clean_pass_widens_gradually_and_never_past_the_declaration() {
+        assert_eq!(widened(250, 1_000), 500);
+        assert_eq!(widened(500, 1_000), 1_000);
+        // **Not past what the venue declared.** The adaptation is downward
+        // from a declared cap, never an argument for exceeding it.
+        assert_eq!(widened(1_000, 1_000), 1_000);
+        assert_eq!(widened(u64::MAX, 1_000), 1_000);
+    }
+
+    #[test]
+    fn a_size_refusal_halves_the_span_and_a_rate_limit_does_not() {
+        use crate::adapters::rh_chain::client::ChainError;
+        let rpc = |detail: &str| ChainError::Rpc {
+            venue: "rh-chain",
+            method: "eth_getLogs",
+            detail: detail.to_string(),
+        };
+        // **Measured in a soak**, eighteen times on one range.
+        assert!(
+            rpc(r#"{"code":-32000,"message":"logs matched by query exceeds limit of 50000"}"#)
+                .is_narrowable()
+        );
+        // Less to gather is less to time out on.
+        assert!(rpc(r#"{"code":-32000,"message":"log query timed out"}"#).is_narrowable());
+        // **Not this one.** The range was fine and we were too quick, which
+        // the backoff answers — and narrowing would make MORE requests at
+        // exactly the wrong moment.
+        assert!(!rpc(r#"{"code":429,"message":"Too Many Requests"}"#).is_narrowable());
+        assert!(!rpc(r#"{"code":-32000,"message":"header not found"}"#).is_narrowable());
+    }
+
+    #[test]
+    fn a_pass_that_narrowed_says_so() {
+        let pass = Pass {
+            blocks: 0,
+            requests: 1,
+            failed: 1,
+            reorgs: 0,
+            rewound: None,
+            narrow_to: Some(500),
+            narrowed_to: None,
+        };
+        assert!(
+            pass.report().contains("span narrowed to 500"),
+            "{}",
+            pass.report()
+        );
+        assert!(!Pass::default().report().contains("narrowed"));
+    }
     use super::*;
 
     #[test]
@@ -389,6 +538,8 @@ mod tests {
             failed: 0,
             reorgs: 1,
             rewound: Some(4_099),
+            narrow_to: None,
+            narrowed_to: None,
         };
         assert!(pass.report().contains("1 reorgs"), "{}", pass.report());
         assert!(
