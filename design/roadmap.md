@@ -176,32 +176,42 @@ different shape from the one planned here.
 
 ## Tier 3 — the tape, and the maintenance jobs
 
-*The product. Until this exists, the archive is opaque bytes nobody can query.*
+*The product. Done, except the watcher.*
 
-- **`tape/`** — the datasets, `kind=/venue=/date=`, rows sorted
-  `(ticker, at_micros)` within a segment. **Ticker is never a directory.**
-- **`venue` becomes a column**, not only a partition level. Legacy's archive
-  carries it both ways and its tape does not; a tape segment read without
-  `hive_partitioning=true` silently merges three venues' BTC.
-- **The `quotes` dataset** — HL `bbo` and rh-crypto `best_bid_ask` share one
-  shape: `bid_px` · `ask_px` · `bid_sz?` · `ask_sz?` · `bid_spread?` ·
-  `ask_spread?`. Nullable means *this venue never states it*, never *it was
-  missing*. Cross-venue BTC becomes one predicate on one table.
-- **`rebuild/`** — archive → reader → replay → ingest → tape. Not a second
-  feed: the nine venue-addressed datasets are a *projection*, which is what
-  makes parity a property rather than a promise. Whole closed grid cells only;
-  a window must divide 86,400.
-- **`reader/`** — the bounded view. `view()` takes no bound argument; the bound
-  is the minimum durable frontier across scopes.
-- **`retain/`** — dry-run by default; `--delete` behind an explicit flag.
-- **bins** `galata-compact` · `galata-tape-rebuild` · `galata-retain` ·
-  `galata-watch`, with the **exit-code taxonomy legacy owed and never paid**:
-  `0` done · `1` broken · `2` bad argument · `3` held / nothing to do.
-- `check_layout` — wrong addressing, ticker-as-directory, overlapping ranges.
+- **`tape/`** — `kind=/date=`, rows sorted `(venue, ticker, at_micros)`, named by
+  stream-sequence range. **Ticker is never a directory.**
+- **`venue` is a column and NOT a partition level.** The roadmap said "a column,
+  not *only* a partition level"; measured on DuckDB 1.5.5, a value carried both
+  ways has a value that **depends on a reader flag**. One fact, one place.
+- **The `quotes` dataset** — a pushed `bbo` and a polled best-bid-ask in one
+  shape. Verified: cross-venue BTC is one predicate on one table.
+- **`rebuild/`** — archive → **the one path** → tape. Determinism proved
+  byte-for-byte on a frozen copy of a real archive.
+- **`reader/`** — `view()` takes **no bound argument**. The bound is the minimum
+  durable frontier across scopes, and on the first real tape it came out ten
+  sequences short of the maximum, which is the invariant earning its keep.
+- **`retain/`** — no horizon has a default; dry-run by default; `--delete`
+  explicit; **unknown means untouched**.
+- **bins** `galata-compact` · `galata-tape-rebuild` · `galata-retain`, with the
+  **exit-code taxonomy legacy owed and never paid**: `0` done · `1` broken ·
+  `2` bad argument · `3` held / nothing to do. Verified, all three.
+- `check_layout` — a ticker directory, a **venue** directory, an unknown
+  dataset, a date the calendar refuses, overlapping ranges.
 
-> **Exit:** `SELECT * FROM read_parquet('tape/kind=quotes/**/*.parquet')` in
-> DuckDB returns six instruments across their venues, and
-> `galata-tape-rebuild <date>` run twice writes identical segment names.
+### Still open in this tier
+
+- **`galata-watch`** — the watcher that judges what the status surface reports.
+  Not built. The status file reports and never judges, deliberately, and the
+  component that judges is a different one; nothing yet is it.
+- **A `--replace` flag for the rebuild.** Writing over a partition leaves the
+  old segments in place and `check_layout` reports the overlap, which is honest
+  but means a re-run needs a manual `rm`. Deleting as a side effect of a rebuild
+  should require saying so.
+
+> **Exit, met:** `SELECT * FROM read_parquet('tape/kind=quotes/**/*.parquet')`
+> in DuckDB returns six instruments with their venues **and needs no flags**,
+> and `galata-tape-rebuild` run twice over a frozen archive writes identical
+> segment names and identical bytes.
 
 ---
 
