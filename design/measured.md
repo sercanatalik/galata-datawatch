@@ -1081,6 +1081,55 @@ been called. Everything above rests on published vectors and the documented
 message shape — which is a weaker claim than every other venue in this tree
 carries, and is worth saying plainly rather than leaving to be discovered.
 
+## Two venues, one query — 2026-09-21
+
+The Tier 8 exit criterion, and the point of the `quotes` dataset:
+
+```sql
+SELECT venue, ticker, bid_px, ask_px, bid_sz, bid_spread, ask_spread
+FROM read_parquet('tape/kind=quotes/**/*.parquet') WHERE ticker = 'BTC'
+```
+```
+  hyperliquid  BTC  81213.00  81214.00  15.826  NULL   NULL
+  rh-crypto    BTC  81190.50  81235.50   0.500  22.50  22.50
+```
+
+Two adapters, two transports — a pushed `bbo` frame and a polled
+`best_bid_ask` — **one shape**. And the `NULL`s are the load-bearing part:
+they mean *this venue never states it*, not *it was missing*. An exchange
+states sizes and no spread; a broker states a spread and one quantity.
+
+Which makes the question anyone actually has into one predicate:
+
+```sql
+SELECT venue, ask_px AS pay_to_buy FROM … WHERE ticker='BTC' ORDER BY ask_px LIMIT 1
+→ hyperliquid  81214.00
+```
+
+The broker's ask is 21.50 higher and its bid 22.50 lower — the spread it
+states, visible as the reason rather than inferred from the numbers.
+
+### A documented disagreement, carried rather than resolved
+
+One published description of `best_bid_ask` lists a top-level `price`. A bug
+report against a client library says the endpoint **structurally has no
+`price` field**.
+
+This tree has been here before: Hyperliquid's `bbo` was documented as
+*"functionally equivalent to `l2Book` with `nLevels: 1`"* — true of meaning,
+false of shape — and every frame failed to normalise until a live run showed
+the real form.
+
+So nothing here requires `price`. The prices relied on are the two
+spread-inclusive ones, which are the **tradeable** numbers anyway — what you
+would actually pay and actually receive. A field the venue did not state is
+**absent**, never zero, because zero is a price.
+
+**Unverified against the live endpoint**, which needs credentials. Until then
+the shape is a hypothesis with a test, not a measurement — a weaker claim than
+every other venue here carries, and the record is the thing that will settle it
+when someone does run it.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -19,6 +19,7 @@
 //! witnessed.
 
 pub mod sign;
+pub mod wire;
 
 /// The venue's name, as it appears in a partition and on a subject.
 pub const VENUE: &str = "rh-crypto";
