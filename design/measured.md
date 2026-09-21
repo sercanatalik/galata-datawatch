@@ -416,6 +416,62 @@ any name is compared. The two prunings work on the segments; nothing yet prunes
 the *directory walk* by date, and a `date=` partition is right there in the
 path. Not fixed here, and the figure is recorded so the fix has a baseline.
 
+## The date pruning, and the bound — 2026-09-21
+
+### 25 s → 12 ms
+
+Deciding there was nothing to rebuild for an empty date was **25 seconds** over
+a 17,000-segment archive, because the partition walk read every file name before
+comparing anything. Pruning `date=` directories that cannot overlap the range,
+before opening them:
+
+```
+  empty date, 17,000 segments    25 s  →  0.012 s
+```
+
+Two thousand times, and the change is a conditional on a directory name. The
+knowledge lives in the store that writes the layout rather than in
+`galata-segments`, because a segment store that knew one caller's partitioning
+scheme would be wrong for the next.
+
+### The bound is the minimum, and here is it costing something
+
+Opened over the five datasets of a real rebuild:
+
+```
+  scopes: kind=quotes, kind=candles, kind=funding, kind=marks, kind=trades
+  bound:  stream_seq <= 285041          the rebuild wrote 285051 payloads
+```
+
+**Ten short of the greatest.** One dataset's last commit lagged the others by
+ten sequences, and the bound took the lesser. A view taken at the maximum would
+have claimed coverage that one dataset does not have — complete for four,
+silently holed for the fifth, with an absent row and a not-yet-written row
+looking identical.
+
+That is the whole argument for the minimum, and it is not hypothetical: it cost
+ten rows on the first real tape this was pointed at.
+
+### A unit mismatch the design did not survive
+
+This was written intending *"a window past the bound is refused, not
+truncated"*. It does not survive contact with the units.
+
+A tape segment is named by the **sequence** range it covers, so a sequence is
+what the store can state about itself. A window is in **venue time**. The tape
+holds no mapping between them, so the window *selects* and the bound
+*restricts*, both per row — and refusing a window past the bound is not offered,
+because deriving the time it would need (the greatest `at_micros` below the
+bound, say) would state a completeness the tape cannot know.
+
+A smaller thing fell out of it, worth writing down because it will surprise
+somebody: **a row with no venue time is filed by our clock**, because a row must
+land in some partition. The time filter keeps it — it is not *at* any time — but
+the `date=` pruning reaches it only where the window also covers the day it was
+received. The alternative is scanning every partition on every read in case one
+holds a timeless row, which is the pruning thrown away for a case that is rare
+by construction.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

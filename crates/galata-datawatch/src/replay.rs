@@ -71,7 +71,7 @@ pub fn read_range(
     to_micros: i64,
 ) -> Result<Vec<Payload>, ReplayError> {
     let mut out = Vec::new();
-    for partition in galata_segments::partitions(root) {
+    for partition in partitions_in_range(root, from_micros, to_micros) {
         // The failure rows NAME payloads; they are not payloads. Replaying them
         // would ingest an error message as though it were a venue frame.
         if partition.ends_with("failures") {
@@ -187,6 +187,80 @@ fn strings<'a>(
             path: path.to_path_buf(),
             column,
         })
+}
+
+/// The partitions that could hold a receipt range, **without descending into
+/// the ones that cannot**.
+///
+/// `galata_segments::partitions` reads every directory entry under the root to
+/// decide which directories hold segments — which for a day of this venue is
+/// tens of thousands of file names, **measured at 25 seconds** to conclude
+/// there was nothing to rebuild for an empty date.
+///
+/// The archive writes `date=YYYY-MM-DD` and that is a UTC day, so a directory
+/// whose day cannot overlap the range is skipped before it is opened. The
+/// knowledge lives here rather than in `galata-segments` because it is a fact
+/// about **this store's layout**, and a segment store that knew one caller's
+/// partitioning scheme would be wrong for the next.
+fn partitions_in_range(root: &Path, from_micros: i64, to_micros: i64) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk(root, from_micros, to_micros, &mut out);
+    out.sort();
+    out
+}
+
+fn walk(dir: &Path, from_micros: i64, to_micros: i64, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut has_segments = false;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let is_dir = entry
+            .file_type()
+            .map(|t| t.is_dir() || (t.is_symlink() && entry.path().is_dir()))
+            .unwrap_or(false);
+        if is_dir {
+            let path = entry.path();
+            if covers(&path, from_micros, to_micros) {
+                walk(&path, from_micros, to_micros, out);
+            }
+        } else if !has_segments
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| galata_segments::Cursor::parse(n).is_some())
+        {
+            // One is enough to know this is a partition. The names are read
+            // again by `list_segments`, and reading them twice to count them
+            // is the other half of the same waste.
+            has_segments = true;
+        }
+    }
+    if has_segments {
+        out.push(dir.to_path_buf());
+    }
+}
+
+/// Whether a directory's own day can overlap the range.
+///
+/// **Only a `date=` component answers this.** Anything else — `venue=`,
+/// `kind=`, or a directory nobody planned — is descended into, because a
+/// pruning that guessed would skip data.
+fn covers(path: &Path, from_micros: i64, to_micros: i64) -> bool {
+    const DAY: i64 = 86_400_000_000;
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return true;
+    };
+    let Some(date) = name.strip_prefix("date=") else {
+        return true;
+    };
+    let Some(midnight) = crate::calendar::midnight_of(date) else {
+        // A directory named `date=` something that is not a date. Descended
+        // into rather than skipped: `check_layout` reports it, and a reader
+        // that silently dropped it would make a malformed partition look empty.
+        return true;
+    };
+    midnight < to_micros && midnight.saturating_add(DAY) > from_micros
 }
 
 /// A scope names a subtree **at component boundaries**.
@@ -388,5 +462,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         written(dir.path(), vec![payload(1, DAY, "candles", "BTC")]);
         assert_eq!(read_all(dir.path()).unwrap()[0].kind, "candles");
+    }
+
+    #[test]
+    fn a_date_partition_outside_the_range_is_never_opened() {
+        // Measured at 25 seconds to conclude "nothing to rebuild" over a
+        // 17,000-segment tree, because the walk read every file name first.
+        let dir = tempfile::tempdir().unwrap();
+        for (seq, recv) in [(1u64, 10 * DAY), (2, 20 * DAY)] {
+            written(dir.path(), vec![payload(seq, recv, "quotes", "BTC")]);
+        }
+
+        let all = partitions_in_range(dir.path(), i64::MIN, i64::MAX);
+        assert_eq!(all.len(), 2, "both days are partitions");
+
+        let one = partitions_in_range(dir.path(), 20 * DAY, 21 * DAY);
+        assert_eq!(one.len(), 1);
+        assert!(
+            one[0]
+                .to_string_lossy()
+                .contains(&crate::calendar::date_of(20 * DAY))
+        );
+
+        assert!(partitions_in_range(dir.path(), 500 * DAY, 501 * DAY).is_empty());
+    }
+
+    #[test]
+    fn a_day_that_straddles_the_edge_is_kept() {
+        // The range is half-open and the day is a whole one, so a range ending
+        // one microsecond into a day still needs that day.
+        let dir = tempfile::tempdir().unwrap();
+        written(dir.path(), vec![payload(1, 20 * DAY + 5, "quotes", "BTC")]);
+        assert_eq!(
+            partitions_in_range(dir.path(), 19 * DAY, 20 * DAY + 1).len(),
+            1
+        );
+        assert_eq!(partitions_in_range(dir.path(), 19 * DAY, 20 * DAY).len(), 0);
+    }
+
+    #[test]
+    fn a_partition_level_that_is_not_a_date_is_always_descended_into() {
+        // A pruning that guessed would skip data.
+        let dir = tempfile::tempdir().unwrap();
+        written(dir.path(), vec![payload(1, 20 * DAY, "quotes", "BTC")]);
+        let found = partitions_in_range(dir.path(), 20 * DAY, 21 * DAY);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].to_string_lossy().contains("venue=hyperliquid"));
+        assert!(found[0].to_string_lossy().contains("kind=quotes"));
     }
 }

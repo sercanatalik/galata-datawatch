@@ -36,11 +36,13 @@
 //! up.
 
 pub mod layout;
+pub mod reader;
 pub mod rebuild;
 pub mod schema;
 pub mod writer;
 
 pub use layout::{LayoutProblem, check_layout, partition_of};
+pub use reader::{Bound, ReadError, Reader, Window};
 pub use rebuild::{Rebuilt, rebuild};
 pub use schema::{PRUNE_ON, schema_for};
 pub use writer::{Row, Tape, TapeError};
