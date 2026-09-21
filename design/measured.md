@@ -2455,6 +2455,85 @@ answered it one way, this tree the other, each with a test, and neither answer
 has ever been exercised. Now recorded as that rather than presented as settled:
 the first venue that actually refuses a subscription is what settles it.
 
+## The handover lost a second of every instrument, every eight minutes — 2026-09-21
+
+The legacy review reached `capture/session.rs`, where legacy says:
+
+> The replacement is subscribed and delivering. **Only now** may the one it
+> replaces be closed.
+
+This tree has the whole state machine, and three separate doc comments
+promising exactly that — on `ConnectionPolicy::RotateAhead`, on
+`Act::OpenReplacement`, and on `Capture::run`. **The loop did the opposite.**
+
+```rust
+Act::OpenReplacement | Act::CloseReplaced => {
+    // Reconnecting from the top of this loop opens and
+    // subscribes the replacement before this one stops delivering;
+    // the handover is therefore covered and publishes no gap.
+    self.coverage.handover_completed(now);
+    break;
+}
+```
+
+Both acts collapsed into one, breaking to reconnect **the single socket it
+holds** — and `StreamSource::connect` replaces any connection it held, so the
+old one closes before the new one exists. `handover_completed` then advanced
+every pair's coverage to that instant, which is what suppressed the gap.
+
+### Measured, in the record the soak already had
+
+Hyperliquid rotates every **eight minutes** (`ROTATE_AFTER_SECS = 8 * 60`,
+inside a measured lifetime of 10 m 24 s). Arrival gaps in `kind=quotes`:
+
+| minutes into run | lost |
+|---|---|
+| 8.01 | 935 ms |
+| 16.01 | 765 ms |
+| 24.03 | 1,292 ms |
+
+**Three rotations, three holes, each at an exact boundary — and the run
+reported zero gaps.** The clean soak reported two entries above was clean
+because the loop said so.
+
+### And after
+
+A ten-minute run across one rotation, same query:
+
+```text
+  minutes into run   largest gap
+  ───────────────────────────────
+      7.938            458 ms
+      7.999            437 ms
+      8.007            459 ms   ← the rotation
+      8.107            458 ms
+```
+
+**The rotation is no longer visible.** 459 ms against a 450 ms noise floor,
+where before it was 935 ms against the same floor. The largest gap anywhere in
+the run is 561 ms, at 6.51 minutes, which is a quiet market.
+
+### The duplicate I predicted did not happen
+
+Holding two subscribed sockets should mean the replacement receives frames the
+old one also delivered, for the length of the overlap. Near the handover:
+
+```text
+  990 payloads, 990 distinct bodies, 0 repeats
+```
+
+Because `act()` returns `CloseReplaced` on the very next tick, the overlap is a
+single loop iteration — the replacement is subscribed and taken over inside a
+few milliseconds, and the venue sends it nothing in between. Recorded because
+**a predicted cost that does not appear is worth as much as one that does**,
+and the prediction would otherwise stand as a reason not to do this.
+
+### What this says about a promise written three times
+
+The claim was in three doc comments and one policy type, each stating it as
+settled. None of them was checked against the record, and the record had the
+answer the whole time — in a query of eleven lines over data already captured.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

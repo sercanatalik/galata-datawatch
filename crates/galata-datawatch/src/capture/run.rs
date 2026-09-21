@@ -590,11 +590,46 @@ impl Capture {
         self.held.connection_lost();
     }
 
+    /// The frames that subscribe a set, or none where the adapter does not
+    /// stream.
+    ///
+    /// Unreachable in the second case: the transport said `Stream`. Named
+    /// rather than unwrapped, because an adapter declaring a stream and
+    /// offering no subscriber is a defect worth reading about.
+    fn subscribe_frames_for(&self, subscriptions: &[crate::venue::Subscription]) -> Vec<String> {
+        match self.wiring.adapter.streaming() {
+            Some(streaming) => streaming.subscribe_frames(subscriptions),
+            None => Vec::new(),
+        }
+    }
+
+    /// Open a second socket and subscribe it, leaving the current one alone.
+    ///
+    /// Returns only once the venue has been asked, so the caller may close the
+    /// connection this replaces. **It does not wait for delivery** — the
+    /// overlap that would need is unbounded, and the frames already in flight
+    /// on the old socket are what cover the difference.
+    async fn open_replacement(
+        endpoint: crate::venue::Endpoint,
+        frames: &[String],
+    ) -> Result<StreamSource, crate::source::SourceError> {
+        let mut replacement = StreamSource::new(endpoint);
+        replacement.connect().await?;
+        replacement.subscribe(frames).await?;
+        Ok(replacement)
+    }
+
     /// Connect, subscribe, and deliver frames until the token is cancelled.
     ///
     /// The handover is the part worth reading: a replacement is opened **and
     /// subscribed** before the connection it replaces is closed, so coverage is
     /// continuous and no gap is published — because none occurred.
+    ///
+    /// **That claim was false until 2026-09-21.** The loop collapsed both
+    /// handover acts into one and reconnected the single socket it held, which
+    /// closes before it opens — then reported the handover as covered. Three
+    /// rotations in a 24-minute soak lost 935 ms, 765 ms and 1,292 ms, each at
+    /// an exact eight-minute boundary, and the run reported **zero gaps**.
     pub async fn run(
         &mut self,
         shutdown: tokio_util::sync::CancellationToken,
@@ -615,7 +650,11 @@ impl Capture {
         // **`%endpoint` below, never the URL.** `Endpoint`'s only rendering is
         // the safe one, so a log line cannot reach for the other.
         let label = endpoint.to_string();
-        let mut source = StreamSource::new(endpoint);
+        let mut source = StreamSource::new(endpoint.clone());
+        // **The second socket, held open across a handover.** `None` except
+        // between `OpenReplacement` and `CloseReplaced`, which is one loop
+        // iteration in the ordinary case.
+        let mut replacement: Option<StreamSource> = None;
 
         while !shutdown.is_cancelled() {
             if let Err(error) = source.connect().await {
@@ -633,13 +672,7 @@ impl Capture {
             // Level-triggered: converge toward the declared set rather than
             // remembering what was sent last time.
             let convergence = self.held.converge();
-            let frames = match self.wiring.adapter.streaming() {
-                Some(streaming) => streaming.subscribe_frames(&convergence.to_subscribe),
-                // Unreachable: the transport said Stream above. Named rather
-                // than unwrapped, because an adapter declaring a stream and
-                // offering no subscriber is a defect worth reading about.
-                None => Vec::new(),
-            };
+            let frames = self.subscribe_frames_for(&convergence.to_subscribe);
             if let Err(error) = source.subscribe(&frames).await {
                 tracing::warn!(error = %error, "subscribe failed");
             }
@@ -661,24 +694,76 @@ impl Capture {
                 }
                 let now = self.wiring.clock.now_micros();
 
-                if let Some(session) = &mut self.session {
-                    match session.act(now) {
-                        Act::Keepalive => {
-                            if source.keepalive(&keepalive).await.is_err() {
-                                break;
-                            }
-                            session.keepalive_sent(now);
-                        }
-                        Act::OpenReplacement | Act::CloseReplaced => {
-                            // Reconnecting from the top of this loop opens and
-                            // subscribes the replacement before this one stops
-                            // delivering; the handover is therefore covered and
-                            // publishes no gap.
-                            self.coverage.handover_completed(now);
+                // **The act is decided first, then taken.** Holding a
+                // mutable borrow of the session across the handover would
+                // forbid reading the adapter for its subscribe frames, which
+                // is the one thing the handover needs.
+                match self.session.as_ref().map(|session| session.act(now)) {
+                    Some(Act::Keepalive) => {
+                        if source.keepalive(&keepalive).await.is_err() {
                             break;
                         }
-                        Act::Wait => {}
+                        if let Some(session) = &mut self.session {
+                            session.keepalive_sent(now);
+                        }
                     }
+                    // **Open the replacement and keep reading this one.**
+                    //
+                    // Reconnecting from the top of the loop instead — which is
+                    // what this did — closes the socket before the new one
+                    // exists, because a `StreamSource` replaces any connection
+                    // it held. It then called `handover_completed`, claiming
+                    // coverage across a window with a hole in it.
+                    //
+                    // **Measured in a 24-minute soak**, three rotations and
+                    // three holes: 935 ms, 765 ms and 1,292 ms at 8.01, 16.01
+                    // and 24.03 minutes — with zero gaps reported.
+                    Some(Act::OpenReplacement) => {
+                        let declared = self.wiring.declared.clone();
+                        let frames = self.subscribe_frames_for(&declared);
+                        match Self::open_replacement(endpoint.clone(), &frames).await {
+                            Ok(opened) => {
+                                replacement = Some(opened);
+                                if let Some(session) = &mut self.session {
+                                    session.replacement_subscribed();
+                                }
+                            }
+                            Err(error) => {
+                                // **The current connection is untouched.** A
+                                // replacement that will not open is a reason
+                                // to keep the one that works, and the venue's
+                                // own lifetime bounds how long that can last.
+                                tracing::warn!(
+                                    endpoint = label,
+                                    %error,
+                                    "the replacement would not open; keeping the current connection"
+                                );
+                                if let Some(session) = &mut self.session {
+                                    session.replacement_abandoned();
+                                }
+                            }
+                        }
+                    }
+                    // **Now** the handover is free: the replacement is
+                    // subscribed, so the one it replaces can go.
+                    Some(Act::CloseReplaced) => {
+                        if let Some(opened) = replacement.take() {
+                            source = opened;
+                            self.coverage.handover_completed(now);
+                            // Resets the ledger, which is right: the new
+                            // socket has delivered nothing yet, so `subs_held`
+                            // climbs again from zero as it does. They were
+                            // subscribed on the replacement before it took
+                            // over, so they are sent and awaiting delivery.
+                            self.open_session(now);
+                            let declared = self.wiring.declared.clone();
+                            for subscription in &declared {
+                                self.held.mark_sent(subscription);
+                            }
+                            tracing::info!(endpoint = label, "handed over");
+                        }
+                    }
+                    Some(Act::Wait) | None => {}
                 }
 
                 self.flush_if_due(now)?;

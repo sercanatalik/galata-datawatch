@@ -117,6 +117,16 @@ impl Session {
         self.replacement = Replacement::Subscribed;
     }
 
+    /// The replacement could not be opened, so there is none in flight.
+    ///
+    /// **The current connection is kept.** A replacement that will not open is
+    /// a reason to hold on to the one that works — and the venue's own
+    /// lifetime is the bound on how long that can last, which is why
+    /// `rotate_after_secs` is strictly inside it.
+    pub fn replacement_abandoned(&mut self) {
+        self.replacement = Replacement::None;
+    }
+
     /// Whether a handover is under way.
     pub fn rotating(&self) -> bool {
         self.replacement != Replacement::None
