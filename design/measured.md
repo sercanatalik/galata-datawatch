@@ -2733,6 +2733,63 @@ A fix that makes an existing flaw *more visible* is not a regression, but it is
 not finished either. Sharing the window was right; it exposed a second thing
 borrowing that window for a question it could not answer.
 
+## The store's own claims: two hold, one was unstated — 2026-09-21
+
+The audit, turned from the status surface onto the record.
+
+### `stream_seq` survives a crash
+
+The Tier 3 fix was verified on **two clean restarts**. Re-checked on the
+harder case, across the `kill -9` from the entry above:
+
+```text
+  1,819 payloads, 1,819 distinct sequences, 0 collisions
+```
+
+### No venue time is invented
+
+Across 117,451 rows, `at_micros` is **never** equal to `recv_micros` and
+**never** ahead of it. The minimum venue-to-receipt difference is 239 ms for
+quotes and trades and 392 ms for candles — all positive, all plausible. If a
+time were being manufactured from our clock, those would be zero.
+
+### And a third that is true, and nobody had said how much
+
+`at_micros` is nullable on purpose — *an event the venue did not timestamp is
+not at any venue time, and giving it ours would make a latency of zero out of
+an absence of information*. Correct, and the size of it was never written
+down:
+
+| dataset | rows | with no venue time |
+|---|---|---|
+| `marks` | 8,538 | **100.0%** |
+| `funding` | 9,546 | **89.4%** |
+| `quotes` | 49,141 | 0.0% |
+| `trades` | 31,653 | 0.0% |
+
+`marks` and the live half of `funding` come from one channel that carries no
+timestamp at all; funding's other 1,008 rows come from the historical walk,
+which does.
+
+**The design is right and the consequence is a trap.** `Reader::view` keeps
+such a row once its partition is in range — that is tested. But the README
+invites a reader to query the parquet directly, and a hand-written
+`WHERE at_micros BETWEEN …` drops **every row of `marks`** and says nothing.
+
+So the README now says how to read the store before it says how to build it,
+which it never did: the null venue times, and the redelivery from the entry
+above. Both are things a consumer meets on their first real query.
+
+### What the audit looks like from here
+
+Six claims examined across the surface and the store. **Four were wrong**, all
+four in the direction of claiming more than was true. **Two were right**, and
+one of those — `buffered` — right to the microsecond.
+
+The four wrong ones shared a shape: the code matched its own comment, and the
+comment was the thing that was wrong. None was findable by reading. Each took
+a query of about a dozen lines against data already on disk.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -42,6 +42,24 @@ fn common() -> Vec<Field> {
         // **Nullable on purpose.** An event the venue did not timestamp is not
         // *at* any venue time, and giving it ours would make a latency of zero
         // out of an absence of information.
+        //
+        // **Measured 2026-09-21**, so the cost of that is known rather than
+        // theoretical:
+        //
+        // ```text
+        //   marks      8,538 rows    100.0% have no venue time
+        //   funding    9,546 rows     89.4%
+        //   quotes    49,141 rows      0.0%
+        //   trades    31,653 rows      0.0%
+        // ```
+        //
+        // `marks` and the live half of `funding` both come from one channel
+        // that carries no timestamp at all; funding's other 1,008 rows come
+        // from the historical walk, which does.
+        //
+        // [`crate::tape::Reader`] keeps such a row once the partition holding
+        // it is in range. **A hand-written `WHERE at_micros BETWEEN …` does
+        // not** — it drops every row of `marks` and says nothing.
         Field::new("at_micros", DataType::Int64, true),
         Field::new("recv_micros", DataType::Int64, false),
         Field::new("stream_seq", DataType::UInt64, false),

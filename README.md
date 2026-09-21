@@ -70,6 +70,27 @@ archive's unit is the capture — a venue's bytes are retained, replayed or
 dropped as a subtree. The tape's unit is the dataset, so *this dataset across
 every venue* is one prefix.
 
+## Reading the tape
+
+```sql
+SELECT * FROM read_parquet('var/tape/kind=quotes/**/*.parquet');
+```
+
+Two things to know before filtering it.
+
+**`at_micros` is null where the venue did not timestamp the event**, which is
+not rare: measured over a 24-minute run, 100% of `marks` and 89% of `funding`
+carry no venue time, against 0% of `quotes` and `trades`. Giving those rows our
+receipt time would turn an absence of information into a latency of zero, so
+the column is left null — and a `WHERE at_micros BETWEEN …` drops all of
+`marks` without saying so. Filter on `recv_micros`, or use the bounded reader,
+which keeps such a row once the partition holding it is in range.
+
+**An execution can arrive twice.** A venue that sends recent history on
+subscribe redelivers it on every reconnection — measured at 1.55% of a
+24-minute run, once per session rotation. Both receipts are recorded because
+both arrived; group on `trade_id` to count each execution once.
+
 ## Building
 
 ```sh
