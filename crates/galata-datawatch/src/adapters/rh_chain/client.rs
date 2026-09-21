@@ -17,19 +17,25 @@ use super::erc8056::{self, Answers};
 use super::{CHAIN_ID, METADATA_CHANNEL, VENUE};
 use crate::adapters::rh_chain::trail::Seen;
 use crate::record::{Payload, PayloadAddress};
+use crate::venue::Endpoint;
 
 /// Why a call to the chain failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ChainError {
     /// The request could not be made.
+    ///
+    /// **Build it with [`ChainError::http`]**, never as a struct literal: the
+    /// URL has to be removed before the error is stored, and a redaction
+    /// applied where an error is *printed* has to be applied at every print
+    /// site — the one that is missed is the one that runs.
     #[error("{venue} {method}: {source}")]
     Http {
         /// Which venue.
         venue: &'static str,
         /// Which call.
         method: &'static str,
-        /// Why.
+        /// Why. **Already stripped of its URL.**
         #[source]
         source: reqwest::Error,
     },
@@ -55,36 +61,56 @@ pub enum ChainError {
     },
     /// The provider is serving a different chain.
     #[error(
-        "the provider at {url} serves chain {found}, and this adapter is {CHAIN_ID}. Its blocks \
-         would be real and not ours"
+        "{provider} serves chain {found}, and this adapter is {CHAIN_ID}. Its blocks would be \
+         real and not ours"
     )]
     WrongChain {
-        /// Where.
-        url: String,
+        /// **The endpoint's safe label**, which for a held provider is the
+        /// variable that supplied it — and which is what an operator needs in
+        /// order to fix it. This is the error that fires when a provider is
+        /// freshly pasted and wrong, so it is the last place a URL should be.
+        provider: String,
         /// What it said it was.
         found: u64,
     },
+}
+
+impl ChainError {
+    /// **The only way to build a [`ChainError::Http`].**
+    ///
+    /// Measured on reqwest 0.13.5: a failed request's `Display` carries the
+    /// whole URL — path *and* query — and a keyed provider keeps its key in
+    /// the path. `without_url` removes it and costs nothing diagnostic: the
+    /// source chain still reports `client error (Connect) | dns error | …`.
+    fn http(method: &'static str, source: reqwest::Error) -> ChainError {
+        ChainError::Http {
+            venue: VENUE,
+            method,
+            source: source.without_url(),
+        }
+    }
 }
 
 /// A JSON-RPC client for one chain.
 #[derive(Debug, Clone)]
 pub struct ChainClient {
     http: reqwest::Client,
-    url: String,
+    endpoint: Endpoint,
 }
 
 impl ChainClient {
     /// A client for an endpoint.
-    pub fn new(url: impl Into<String>) -> ChainClient {
+    pub fn new(endpoint: Endpoint) -> ChainClient {
         ChainClient {
             http: reqwest::Client::new(),
-            url: url.into(),
+            endpoint,
         }
     }
 
-    /// Where it points.
-    pub fn url(&self) -> &str {
-        &self.url
+    /// Where it points — **safely**, which for a held provider is the variable
+    /// that supplied it rather than the URL.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
     }
 
     /// **Refuse a provider pointed at a different chain.**
@@ -96,7 +122,7 @@ impl ChainClient {
         let found = self.number("eth_chainId", vec![]).await?;
         if found != CHAIN_ID {
             return Err(ChainError::WrongChain {
-                url: self.url.clone(),
+                provider: self.endpoint.to_string(),
                 found,
             });
         }
@@ -295,24 +321,18 @@ impl ChainClient {
     ) -> Result<Vec<u8>, ChainError> {
         let response = self
             .http
-            .post(&self.url)
+            // **The one place the URL is exposed.** It goes to the client and
+            // nowhere else.
+            .post(self.endpoint.expose())
             .json(body)
             .send()
             .await
-            .map_err(|source| ChainError::Http {
-                venue: VENUE,
-                method,
-                source,
-            })?;
+            .map_err(|source| ChainError::http(method, source))?;
         response
             .bytes()
             .await
             .map(|b| b.to_vec())
-            .map_err(|source| ChainError::Http {
-                venue: VENUE,
-                method,
-                source,
-            })
+            .map_err(|source| ChainError::http(method, source))
     }
 }
 
@@ -416,5 +436,68 @@ mod tests {
         // empty range.
         let error = ChainClient::result(&serde_json::json!({}), "eth_getLogs").unwrap_err();
         assert!(error.to_string().contains("no `result`"), "{error}");
+    }
+
+    /// **The measurement this whole redaction exists for.**
+    ///
+    /// Against reqwest 0.13.5, an unredacted failure says:
+    ///
+    /// ```text
+    ///   error sending request for url
+    ///     (https://nonexistent-provider.invalid/v2/SUPERSECRETKEY123?api_key=ALSOSECRET)
+    /// ```
+    ///
+    /// The key is in the **path**, so stripping the query string would leave it
+    /// there. This asserts the real request path, not a hand-built error.
+    #[tokio::test]
+    async fn a_failed_request_to_a_keyed_provider_says_nothing_about_it() {
+        // `reqwest::Client::new` panics without one installed; the binaries do
+        // it at startup, and a test is its own process.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let keyed = "http://nonexistent-provider.invalid/v2/SUPERSECRETKEY123?api_key=ALSOSECRET";
+        let client = ChainClient::new(Endpoint::held(
+            "GALATA_RHCHAIN_RPC_URL",
+            crate::config::Secret::new(keyed),
+        ));
+        let error = client
+            .frontier(crate::venue::Frontier::Head)
+            .await
+            .unwrap_err();
+
+        // Every rendering, including the whole source chain — which is where a
+        // redaction applied only at the top would leak.
+        let mut said = format!("{error} | {error:?}");
+        let mut source: Option<&dyn std::error::Error> = std::error::Error::source(&error);
+        while let Some(e) = source {
+            said.push_str(&format!(" | {e}"));
+            source = e.source();
+        }
+
+        assert!(!said.contains("SUPERSECRETKEY123"), "{said}");
+        assert!(!said.contains("ALSOSECRET"), "{said}");
+        assert!(!said.contains("nonexistent-provider"), "{said}");
+        // And the diagnosis survives: `without_url` costs nothing here.
+        assert!(
+            said.contains("rh-chain") && said.contains("eth_blockNumber"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn the_wrong_chain_refusal_names_the_variable_rather_than_the_provider() {
+        // The error that fires when a provider is freshly pasted and wrong —
+        // so the last place a URL should be.
+        let error = ChainError::WrongChain {
+            provider: Endpoint::held(
+                "GALATA_RHCHAIN_RPC_URL",
+                crate::config::Secret::new("https://x/v2/KEY"),
+            )
+            .to_string(),
+            found: 42161,
+        };
+        let said = error.to_string();
+        assert!(!said.contains("KEY"), "{said}");
+        assert!(said.contains("GALATA_RHCHAIN_RPC_URL"), "{said}");
+        assert!(said.contains("42161"), "{said}");
     }
 }

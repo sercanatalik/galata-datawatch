@@ -251,7 +251,7 @@ mod tests {
         }
         fn transport(&self) -> Transport {
             Transport::Poll {
-                rest_url: rh_crypto::REST_URL,
+                rest_url: crate::venue::Endpoint::public(rh_crypto::REST_URL),
                 path: rh_crypto::BEST_BID_ASK_PATH,
                 interval_micros: 5 * SECOND,
             }

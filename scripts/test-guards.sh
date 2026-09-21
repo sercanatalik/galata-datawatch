@@ -162,6 +162,29 @@ prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
 
+# Three rules, three plants. A guard with three rules and one proof is a guard
+# two thirds of which nobody has seen fail.
+
+# 1. No error message carries a URL. Plants for itself, before the tests.
+prove "check-endpoint-reach (an error message carries a URL)" \
+      ./scripts/check-endpoint-reach.sh \
+      crates/galata-datawatch/src/source/mod.rs own
+
+# 2. A reqwest::Error built as a struct literal, skipping the redaction.
+prove "check-endpoint-reach (a reqwest::Error stored unredacted)" \
+      ./scripts/check-endpoint-reach.sh \
+      crates/galata-datawatch/src/adapters/rh_chain/client.rs \
+      replace '.map_err(|source| ChainError::http(method, source))?;' \
+      '.map_err(|source| ChainError::Http { venue: VENUE, method, source })?;'
+
+# 3. expose() somewhere that does not connect.
+prove "check-endpoint-reach (expose outside a connect site)" \
+      ./scripts/check-endpoint-reach.sh \
+      crates/galata-datawatch/src/capture/cursor.rs \
+      replace '        let client = ChainClient::new(rpc_url);' \
+      '        let _planted = rpc_url.expose().to_string();
+        let client = ChainClient::new(rpc_url);'
+
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)
 present=$(find scripts -maxdepth 1 -name 'check-*.sh' ! -name 'check-all.sh' | wc -l | tr -d ' ')

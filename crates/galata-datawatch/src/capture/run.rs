@@ -58,6 +58,11 @@ pub enum CaptureError {
         endpoint: String,
     },
     /// The provider would not answer, or answered wrongly.
+    ///
+    /// **Build it with [`CaptureError::provider`]**, which flattens the cause
+    /// chain into the string. A bare `to_string()` keeps only the top line,
+    /// and since redaction took the URL out of that line it no longer
+    /// distinguishes DNS from TLS from refused.
     #[error("the provider refused: {0}")]
     Provider(String),
     /// The venue is not polled.
@@ -117,6 +122,30 @@ pub struct Capture {
     /// A walk, while one is running. Cleared when it ends, so the surface never
     /// claims a backfill that finished.
     walking: Option<WalkStatus>,
+}
+
+impl CaptureError {
+    /// A provider failure, **with its causes**.
+    ///
+    /// An error that crosses into a `String` loses its source chain, and the
+    /// chain is where the diagnosis is: `error sending request` on its own
+    /// says nothing, `… : client error (Connect) : dns error` says everything.
+    pub fn provider(error: &dyn std::error::Error) -> CaptureError {
+        let mut said = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            let text = cause.to_string();
+            // **A cause already stated is not stated twice.** An error whose
+            // own message interpolates `{source}` — which is most of them, and
+            // rightly, because a single-line log needs it — would otherwise
+            // repeat its first cause verbatim.
+            if !said.ends_with(&text) {
+                said.push_str(&format!(": {text}"));
+            }
+            source = cause.source();
+        }
+        CaptureError::Provider(said)
+    }
 }
 
 impl Capture {
@@ -563,10 +592,8 @@ impl Capture {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<(), CaptureError> {
         // **Dispatch on what the venue IS**, rather than assuming a socket.
-        let (url, keepalive) = match self.wiring.adapter.transport() {
-            crate::venue::Transport::Stream { ws_url, keepalive } => {
-                (ws_url.to_string(), keepalive)
-            }
+        let (endpoint, keepalive) = match self.wiring.adapter.transport() {
+            crate::venue::Transport::Stream { ws_url, keepalive } => (ws_url, keepalive),
             // A cursor venue has no socket to open. Refusing here is the point
             // of the transport declaration: the alternative is opening one and
             // sending it nothing.
@@ -577,11 +604,14 @@ impl Capture {
             }
         };
         let mut backoff = crate::source::Backoff::default();
-        let mut source = StreamSource::new(&url);
+        // **`%endpoint` below, never the URL.** `Endpoint`'s only rendering is
+        // the safe one, so a log line cannot reach for the other.
+        let label = endpoint.to_string();
+        let mut source = StreamSource::new(endpoint);
 
         while !shutdown.is_cancelled() {
             if let Err(error) = source.connect().await {
-                tracing::warn!(url, error = %error, "connect failed");
+                tracing::warn!(endpoint = label, error = %error, "connect failed");
                 let wait = backoff.next_wait();
                 tokio::select! {
                     _ = shutdown.cancelled() => break,

@@ -58,6 +58,12 @@ pub enum ResolveError {
     /// The adapter refused its configuration.
     #[error("{0}")]
     Construct(#[from] ConstructError),
+    /// A named secret could not be read.
+    ///
+    /// **The variable's name is in the error; its value never is** — the whole
+    /// reason `Secret` exists.
+    #[error("{0}")]
+    Secret(crate::config::ConfigError),
     /// The configuration names something the venue does not list, or the
     /// listing could not be read.
     #[error("{detail}")]
@@ -127,9 +133,11 @@ impl AdapterConfig {
     /// **The only place a venue's name becomes a variant**, which is what keeps
     /// the boundary checkable.
     #[cfg_attr(not(feature = "hyperliquid"), allow(unused_variables))]
+    #[allow(unused_variables)]
     pub fn from_declared(
         name: &str,
         venue: &crate::config::VenueConfig,
+        secrets: &dyn crate::config::SecretSource,
     ) -> Result<AdapterConfig, ResolveError> {
         match name {
             #[cfg(feature = "hyperliquid")]
@@ -147,6 +155,17 @@ impl AdapterConfig {
                 candle_interval: venue.candle.clone(),
             })),
             rh_chain::VENUE => Ok(AdapterConfig::RhChain(rh_chain::Config {
+                // **Held where one is named, public where none is.** A
+                // variable that is named and unset refuses here rather than
+                // falling back to the public node — a silent fallback is how a
+                // process runs for a week against the wrong provider.
+                rpc_url: match &venue.rpc_url_var {
+                    Some(var) => crate::venue::Endpoint::held(
+                        var,
+                        secrets.secret(var).map_err(ResolveError::Secret)?,
+                    ),
+                    None => crate::venue::Endpoint::public(rh_chain::PUBLIC_RPC),
+                },
                 instruments: venue
                     .instruments
                     .iter()
@@ -338,5 +357,86 @@ impl History {
                 )),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ConfigError, Secret, SecretSource, VenueConfig};
+
+    /// A secret source that answers one name and refuses the rest.
+    struct OneSecret(&'static str, &'static str);
+
+    impl SecretSource for OneSecret {
+        fn secret(&self, name: &str) -> Result<Secret, ConfigError> {
+            if name == self.0 {
+                Ok(Secret::new(self.1))
+            } else {
+                Err(ConfigError::SecretAbsent {
+                    name: name.to_string(),
+                })
+            }
+        }
+    }
+
+    fn chain_venue(rpc_url_var: Option<&str>) -> VenueConfig {
+        VenueConfig {
+            market: "mainnet".into(),
+            series: vec![galata_wire::Series::Transfers],
+            candle: "1m".into(),
+            instruments: vec![crate::config::InstrumentDecl {
+                ticker: "NVDA".into(),
+                dex: None,
+                contract: Some("0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec".into()),
+                decimals: Some(18),
+            }],
+            rpc_url_var: rpc_url_var.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn no_variable_means_the_public_node() {
+        let AdapterConfig::RhChain(config) = AdapterConfig::from_declared(
+            rh_chain::VENUE,
+            &chain_venue(None),
+            &OneSecret("UNUSED", "x"),
+        )
+        .unwrap() else {
+            panic!("a chain");
+        };
+        // A reader with no provider account runs exactly as before.
+        assert_eq!(config.rpc_url.to_string(), rh_chain::PUBLIC_RPC);
+        assert!(!config.rpc_url.is_held());
+    }
+
+    #[test]
+    fn a_named_variable_is_held_and_never_printed() {
+        let keyed = "https://arb-mainnet.g.alchemy.com/v2/SUPERSECRETKEY";
+        let AdapterConfig::RhChain(config) = AdapterConfig::from_declared(
+            rh_chain::VENUE,
+            &chain_venue(Some("GALATA_RHCHAIN_RPC_URL")),
+            &OneSecret("GALATA_RHCHAIN_RPC_URL", keyed),
+        )
+        .unwrap() else {
+            panic!("a chain");
+        };
+        assert!(config.rpc_url.is_held());
+        assert_eq!(config.rpc_url.expose(), keyed);
+        assert!(!format!("{:?}", config.rpc_url).contains("SUPERSECRETKEY"));
+    }
+
+    #[test]
+    fn a_named_variable_that_is_unset_refuses_by_name_and_does_not_fall_back() {
+        // **Not the public node.** A silent fallback is how a process runs for
+        // a week against a provider nobody chose.
+        let error = AdapterConfig::from_declared(
+            rh_chain::VENUE,
+            &chain_venue(Some("GALATA_RHCHAIN_RPC_URL")),
+            &OneSecret("SOMETHING_ELSE", "x"),
+        )
+        .unwrap_err();
+        let said = error.to_string();
+        assert!(said.contains("GALATA_RHCHAIN_RPC_URL"), "{said}");
     }
 }

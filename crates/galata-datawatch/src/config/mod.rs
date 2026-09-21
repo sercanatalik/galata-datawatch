@@ -303,6 +303,17 @@ pub struct VenueConfig {
     pub candle: String,
     /// The instruments.
     pub instruments: Vec<InstrumentDecl>,
+    /// The variable holding this venue's endpoint, **on a chain venue**.
+    ///
+    /// **The name of a variable, never a URL.** This file is committed, and a
+    /// keyed provider carries its key in the URL path — so a field that
+    /// accepted a URL would be a field one `_var` suffix away from committing
+    /// a credential to git.
+    ///
+    /// Absent means the venue's public default, which needs no key and which
+    /// every reader can reach.
+    #[serde(default)]
+    pub rpc_url_var: Option<String>,
 }
 
 /// Everything the process was told.
@@ -433,6 +444,26 @@ impl Config {
                 field: "broker.queue",
                 value: broker.queue.to_string(),
                 bound: "1..=1000000 — the events a broker stall may swallow before they drop",
+            });
+        }
+
+        // **A NATS URL may carry `nats://user:pass@host`, and this one must
+        // not.** The password has a variable of its own, so userinfo here is
+        // a credential in a committed file — and the connect line logs this
+        // URL, which is only safe because of this refusal.
+        if let Some(broker) = &self.broker
+            && broker
+                .url
+                .split_once("://")
+                .is_some_and(|(_, rest)| rest.split('/').next().is_some_and(|a| a.contains('@')))
+        {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "broker.url",
+                // **Not the URL.** Echoing it back would put the credential in
+                // the refusal that exists to keep it out.
+                value: "<holds userinfo>".to_string(),
+                bound: "no user:password in the URL — the password is named by password_var",
             });
         }
 
@@ -678,6 +709,31 @@ instruments = [
         assert_eq!(broker.queue, 8192);
         // There is no field a secret could be written into.
         assert!(!format!("{broker:?}").to_lowercase().contains("password\":"));
+    }
+
+    #[test]
+    fn a_broker_url_carrying_a_password_is_refused_without_echoing_it() {
+        let err = load(&format!(
+            "{GOOD}\n[broker]\nurl = \"nats://u:hunter2@host:4222\"\nuser = \"u\"\n\
+             password_var = \"V\"\nqueue = 8\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("broker.url"), "{err}");
+        assert!(err.contains("password_var"), "{err}");
+        // The refusal that exists to keep a credential out does not print it.
+        assert!(!err.contains("hunter2"), "{err}");
+    }
+
+    #[test]
+    fn a_path_containing_an_at_sign_is_not_userinfo() {
+        // The check looks at the AUTHORITY only. A `@` after the first `/` is
+        // part of a path and refusing it would be a rule that is wrong.
+        load(&format!(
+            "{GOOD}\n[broker]\nurl = \"nats://host:4222/a@b\"\nuser = \"u\"\n\
+             password_var = \"V\"\nqueue = 8\n"
+        ))
+        .unwrap();
     }
 
     #[test]

@@ -35,7 +35,7 @@ use crate::normalise::{Normalise, NormaliseError};
 use crate::record::{Payload, PayloadAddress};
 
 use crate::venue::{
-    Adapter, BlockPaging, Budget, ConnectionPolicy, Declaration, Paging, Transport,
+    Adapter, BlockPaging, Budget, ConnectionPolicy, Declaration, Endpoint, Paging, Transport,
 };
 
 /// How far behind the head finality runs, in blocks.
@@ -82,13 +82,29 @@ pub struct Instrument {
 /// What this adapter is built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    /// Where to ask.
+    ///
+    /// [`PUBLIC_RPC`] unless a provider was configured, in which case it is
+    /// **held** — a keyed provider carries its key in the URL path.
+    pub rpc_url: Endpoint,
     /// What to capture.
     pub instruments: Vec<Instrument>,
+}
+
+impl Default for Config {
+    /// The public node, which needs no key and which every reader can reach.
+    fn default() -> Config {
+        Config {
+            rpc_url: Endpoint::public(PUBLIC_RPC),
+            instruments: Vec::new(),
+        }
+    }
 }
 
 /// The chain, across the seam.
 #[derive(Debug)]
 pub struct RhChain {
+    rpc_url: Endpoint,
     declaration: Declaration,
     tickers: BTreeMap<String, Ticker>,
     decimals: BTreeMap<String, u32>,
@@ -105,6 +121,7 @@ impl RhChain {
             decimals.insert(contract, instrument.decimals);
         }
         Ok(RhChain {
+            rpc_url: config.rpc_url.clone(),
             declaration: Declaration {
                 // **Nothing is pushed.** The chain is asked.
                 streams: Vec::new(),
@@ -122,6 +139,10 @@ impl RhChain {
                 // No socket, so no lifetime and no rotation.
                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 0 },
                 ws_url: "",
+                // **The declaration's own field stays the public default.**
+                // It is a compiled-in identity used for reporting; the
+                // endpoint that is actually dialled is `rpc_url` above, which
+                // is the one that can be held.
                 rest_url: PUBLIC_RPC,
             },
             tickers,
@@ -212,7 +233,7 @@ impl Adapter for RhChain {
     /// **A cursor, and no keepalive field to fill in emptily.**
     fn transport(&self) -> Transport {
         Transport::Cursor {
-            rpc_url: PUBLIC_RPC,
+            rpc_url: self.rpc_url.clone(),
             chain_id: CHAIN_ID,
             paging: BlockPaging {
                 max_span: MAX_BLOCK_SPAN,
@@ -286,6 +307,7 @@ mod tests {
 
     fn chain() -> RhChain {
         RhChain::new(Config {
+            rpc_url: Endpoint::public(PUBLIC_RPC),
             instruments: vec![Instrument {
                 ticker: "NVDA".into(),
                 contract: "0x0BD7D308F8E1639FAB988DF18A8011F41EACAD73".into(),

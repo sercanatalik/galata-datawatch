@@ -357,10 +357,17 @@ source before it existed turned out to buy more than tidy refusals.
 
 ### Still open in this tier
 
-- **`ui_multiplier` (ERC-8056)** and the `instruments` dataset for the chain.
-  The column exists on the tape; nothing fetches it.
-- **A provider URL as a secret.** The public node is used today and needs none;
-  a keyed provider goes through `SecretSource`, which exists.
+- ~~**`ui_multiplier` (ERC-8056)** and the `instruments` dataset for the
+  chain.~~ **Done.** Polled, not evented — 50,000 blocks carry no update log
+  under any candidate signature — so `Adapter::reference` declares which
+  symbols and how often, and the cursor loop reads them before the first block
+  of a pass. NVDA's multiplier is 1.0008; a reverting contract records absent,
+  never 1.0.
+- ~~**A provider URL as a secret.**~~ **Done.** `rpc_url_var` names a variable
+  and there is deliberately no `rpc_url` field; an `Endpoint` prints a public
+  URL and withholds a held one; `without_url()` at construction closed five
+  sites that would have logged a key. Measured: reqwest's `Display` carries
+  the whole URL, path and query.
 - **Reorg rows are not yet joined to what they contradict** — both facts are
   recorded, and no consumer reads them together because there is no consumer.
 

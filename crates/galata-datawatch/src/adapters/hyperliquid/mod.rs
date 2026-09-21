@@ -31,7 +31,7 @@ use crate::normalise::{Normalise, NormaliseError};
 use crate::record::{Payload, PayloadAddress};
 use crate::venue::{
     Adapter, Budget, ConnectionPolicy, Construct, ConstructError, Credential, Declaration,
-    Keepalive, Paging, Subscription, Symbols,
+    Endpoint, Keepalive, Paging, Subscription, Symbols,
 };
 
 /// The venue's name, as it appears in a partition and on a subject.
@@ -333,7 +333,7 @@ impl Adapter for Hyperliquid {
 
     fn transport(&self) -> crate::venue::Transport {
         crate::venue::Transport::Stream {
-            ws_url: self.declaration.ws_url,
+            ws_url: Endpoint::public(self.declaration.ws_url),
             // A protocol Ping is refused by this venue as a bad message; it
             // wants a JSON frame of its own.
             keepalive: Keepalive::Frame(wire::ping_frame().to_string()),

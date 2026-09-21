@@ -41,7 +41,7 @@ pub use declaration::{
 };
 pub use poll::{Cadence, Polled};
 pub use symbols::Symbols;
-pub use transport::{Streaming, Transport};
+pub use transport::{Endpoint, Streaming, Transport};
 
 pub use universe::UniverseError;
 

@@ -73,6 +73,39 @@ instruments = [
   { ticker = "GOLD",   dex = "xyz" },
 ]
 
+# A CHAIN VENUE IS NOT DECLARED HERE EITHER, AND ITS PROVIDER IS A SECRET.
+#
+# The public node needs no key, so with no block at all `rh-chain` would reach
+# it. To capture the chain:
+#
+#   [venue.rh-chain]
+#   market = "mainnet"
+#   candle = "1m"
+#   series = ["transfers"]
+#   # THE NAME OF A VARIABLE, never a URL. Absent means the public node.
+#   #
+#   # A keyed provider puts its key in the URL PATH --
+#   # https://arb-mainnet.g.alchemy.com/v2/<KEY> -- so the URL is the
+#   # credential, and there is deliberately NO `rpc_url` field to put it in:
+#   # that field would be one `_var` suffix away from committing a key here.
+#   #
+#   # Named and unset REFUSES rather than falling back to the public node. A
+#   # silent fallback is how a process runs for a week against a provider
+#   # nobody chose.
+#   rpc_url_var = "GALATA_RHCHAIN_RPC_URL"
+#   instruments = [
+#     # BOTH REQUIRED. A chain instrument with no contract is unaddressable,
+#     # and stock tokens carry 18 decimals while USDG carries 6 -- so a
+#     # default would be wrong by a factor of a trillion for one of them.
+#     { ticker = "NVDA", contract = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec", decimals = 18 },
+#   ]
+#
+# MEASURED 2026-09-21: NVDA's ERC-8056 uiMultiplier is 1.0007751591646306, so a
+# raw token amount understates shares by 0.0775%. The multiplier is recorded
+# hourly as its own dated fact and NEVER applied at capture -- rows written
+# before and after a corporate action would otherwise carry amounts computed
+# under different multipliers with nothing saying which.
+
 # NOR IS [watch], AND THAT MEANS ONLY STRUCTURAL PROBLEMS ARE CHECKED.
 #
 # The status surface REPORTS AND NEVER JUDGES -- a threshold inside capture
@@ -103,6 +136,9 @@ instruments = [
 #
 #   [broker]
 #   url = "nats://127.0.0.1:4222"
+#   # A URL CARRYING `user:password@` IS REFUSED AT LOAD. The password has a
+#   # variable of its own, so userinfo here would be a credential in a
+#   # committed file -- and the connect line logs this URL.
 #   # Nothing connects anonymously.
 #   user = "datawatch"
 #   # THE NAME OF A VARIABLE, never a secret. This file is committed.

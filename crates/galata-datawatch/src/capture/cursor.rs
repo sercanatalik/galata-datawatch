@@ -71,7 +71,7 @@ impl Capture {
                 paging,
                 finality_lag,
                 ..
-            } => (rpc_url.to_string(), paging, finality_lag),
+            } => (rpc_url, paging, finality_lag),
             other => {
                 return Err(CaptureError::NotACursor {
                     endpoint: other.endpoint().to_string(),
@@ -79,12 +79,12 @@ impl Capture {
             }
         };
 
-        let client = ChainClient::new(&rpc_url);
+        let client = ChainClient::new(rpc_url);
         // **Before anything is captured.** A provider serving another chain
         // answers every request correctly, and its blocks are real and not
         // ours.
         if let Err(error) = client.check_chain_id().await {
-            return Err(CaptureError::Provider(error.to_string()));
+            return Err(CaptureError::provider(&error));
         }
 
         let venue = self.venue().clone();
@@ -181,7 +181,7 @@ impl Capture {
         let head = client
             .frontier(Frontier::Head)
             .await
-            .map_err(|e| CaptureError::Provider(e.to_string()))?;
+            .map_err(|e| CaptureError::provider(&e))?;
 
         // A cold start begins a declared distance behind the head rather than
         // at genesis: the public node keeps no archive, and asking for the
@@ -197,7 +197,7 @@ impl Capture {
         let mut pass = Pass::default();
         for step in paging
             .plan(from, head)
-            .map_err(|e| CaptureError::Provider(e.to_string()))?
+            .map_err(|e| CaptureError::provider(&e))?
         {
             let now = self.now();
             let payload = match client.logs(step.from, step.to, now).await {

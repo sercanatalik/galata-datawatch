@@ -48,10 +48,13 @@ pub enum Frame {
 #[non_exhaustive]
 pub enum SourceError {
     /// The connection could not be established.
-    #[error("connecting to {url}: {reason}")]
+    #[error("connecting to {endpoint}: {reason}")]
     Connect {
-        /// Where.
-        url: String,
+        /// **The endpoint's safe label**, not its URL. A websocket venue's
+        /// address is a compiled-in identity today, but the rule this tree
+        /// holds is that *no* error message carries an endpoint — a rule with
+        /// an exception is a rule nobody can check.
+        endpoint: String,
         /// Why.
         reason: String,
     },

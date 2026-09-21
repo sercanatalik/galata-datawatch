@@ -14,28 +14,36 @@ use galata_wire::Origin;
 use super::VENUE;
 use crate::record::{Payload, PayloadAddress};
 
+/// The one path this client asks for.
+const INFO_PATH: &str = "/info";
+
 /// Why a request to the venue failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FetchError {
     /// The request could not be made.
-    #[error("{venue} {url}: {source}")]
+    ///
+    /// **Build it with [`FetchError::http`]**, never as a struct literal.
+    #[error("{venue} {path}: {source}")]
     Http {
         /// Which venue.
         venue: &'static str,
-        /// Which endpoint.
-        url: String,
-        /// Why.
+        /// **The path asked for, not the URL.** This venue's endpoint is a
+        /// compiled-in public address today, but an error type that holds a
+        /// URL is one configuration change away from holding a key — and the
+        /// path is the part that actually says which call failed.
+        path: &'static str,
+        /// Why. **Already stripped of its URL.**
         #[source]
         source: reqwest::Error,
     },
     /// The venue answered with a failure.
-    #[error("{venue} {url}: the venue answered {status}")]
+    #[error("{venue} {path}: the venue answered {status}")]
     Status {
         /// Which venue.
         venue: &'static str,
-        /// Which endpoint.
-        url: String,
+        /// The path asked for.
+        path: &'static str,
         /// What it said.
         status: u16,
     },
@@ -47,6 +55,20 @@ pub enum FetchError {
         /// What was wrong.
         detail: String,
     },
+}
+
+impl FetchError {
+    /// **The only way to build a [`FetchError::Http`].**
+    ///
+    /// reqwest's `Display` carries the whole URL, path and query; `without_url`
+    /// removes it without losing the source chain that says why.
+    fn http(venue: &'static str, source: reqwest::Error) -> FetchError {
+        FetchError::Http {
+            venue,
+            path: INFO_PATH,
+            source: source.without_url(),
+        }
+    }
 }
 
 /// The info endpoint.
@@ -162,20 +184,18 @@ impl Client {
     async fn post(&self, body: &serde_json::Value) -> Result<Vec<u8>, FetchError> {
         let response = self
             .http
+            // **The one place the URL is used.** It goes to the client and
+            // nowhere else — not into an error, not into a log.
             .post(&self.info_url)
             .json(body)
             .send()
             .await
-            .map_err(|source| FetchError::Http {
-                venue: VENUE,
-                url: self.info_url.clone(),
-                source,
-            })?;
+            .map_err(|source| FetchError::http(VENUE, source))?;
         let status = response.status();
         if !status.is_success() {
             return Err(FetchError::Status {
                 venue: VENUE,
-                url: self.info_url.clone(),
+                path: INFO_PATH,
                 status: status.as_u16(),
             });
         }
@@ -183,11 +203,7 @@ impl Client {
             .bytes()
             .await
             .map(|b| b.to_vec())
-            .map_err(|source| FetchError::Http {
-                venue: VENUE,
-                url: self.info_url.clone(),
-                source,
-            })
+            .map_err(|source| FetchError::http(VENUE, source))
     }
 }
 

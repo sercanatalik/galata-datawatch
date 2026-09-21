@@ -12,7 +12,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{Frame, SourceError};
-use crate::venue::Keepalive;
+use crate::venue::{Endpoint, Keepalive};
 
 /// How long a read waits before yielding [`Frame::Idle`] so timers can run.
 const POLL_WINDOW: Duration = Duration::from_millis(200);
@@ -23,22 +23,23 @@ type Socket =
 /// A websocket connection to a venue.
 #[derive(Debug)]
 pub struct StreamSource {
-    url: String,
+    endpoint: Endpoint,
     socket: Option<Socket>,
 }
 
 impl StreamSource {
     /// An unconnected source for a venue's endpoint.
-    pub fn new(url: impl Into<String>) -> StreamSource {
+    pub fn new(endpoint: Endpoint) -> StreamSource {
         StreamSource {
-            url: url.into(),
+            endpoint,
             socket: None,
         }
     }
 
-    /// Where this connects.
-    pub fn url(&self) -> &str {
-        &self.url
+    /// Where this connects — **safely**. A public endpoint prints; a held one
+    /// names the variable that supplied it.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
     }
 
     /// Whether a connection is open.
@@ -48,10 +49,12 @@ impl StreamSource {
 
     /// Open a connection, replacing any it held.
     pub async fn connect(&mut self) -> Result<(), SourceError> {
-        let (socket, _) = tokio_tungstenite::connect_async(&self.url)
+        // **The one place the URL is exposed.** It goes to the dialer and
+        // nowhere else.
+        let (socket, _) = tokio_tungstenite::connect_async(self.endpoint.expose())
             .await
             .map_err(|e| SourceError::Connect {
-                url: self.url.clone(),
+                endpoint: self.endpoint.to_string(),
                 reason: e.to_string(),
             })?;
         self.socket = Some(socket);
@@ -140,9 +143,9 @@ mod tests {
     fn an_unconnected_source_is_closed_rather_than_idle() {
         // Closed and Idle mean different things to the loop: one is a reason
         // to reconnect and one is a reason to do nothing.
-        let source = StreamSource::new("wss://example.invalid");
+        let source = StreamSource::new(Endpoint::public("wss://example.invalid"));
         assert!(!source.is_connected());
-        assert_eq!(source.url(), "wss://example.invalid");
+        assert_eq!(source.endpoint().to_string(), "wss://example.invalid");
     }
 
     #[test]

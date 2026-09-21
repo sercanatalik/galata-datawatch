@@ -21,7 +21,7 @@
 
 use galata_datawatch::adapters::{self, AdapterConfig};
 use galata_datawatch::calendar::midnight_of;
-use galata_datawatch::config::{Adapters, Config, FileSource};
+use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource};
 use galata_datawatch::tape;
 
 /// Done.
@@ -119,7 +119,11 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
 
     // **No network.** The adapter is built for its `normalise`, which is a pure
     // function of the bytes — the whole reason that seam has no async on it.
-    let adapter = adapters::build(AdapterConfig::from_declared(&venue_name, venue)?)?;
+    let adapter = adapters::build(AdapterConfig::from_declared(
+        &venue_name,
+        venue,
+        &EnvSecrets,
+    )?)?;
     let scope = format!("venue={venue_name}");
 
     let report = tape::rebuild_with(

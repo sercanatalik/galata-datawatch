@@ -1587,6 +1587,107 @@ each is filled from what a token contract knows rather than left to a default:
 | `venue_index` | `NULL` | a chain addresses by contract, never by position in a list |
 | `active` | did it answer at all | a contract that answers nothing is not one we can call listed |
 
+## A provider URL is the credential — 2026-09-21
+
+A keyed RPC provider puts its key in the **path**:
+
+```
+  https://arb-mainnet.g.alchemy.com/v2/<KEY>
+  https://<slug>.arbitrum-mainnet.quiknode.pro/<TOKEN>/
+```
+
+so the widespread remedy — strip the query string — protects nothing here.
+
+**Measured, reqwest 0.13.5**, a failed POST to a URL carrying a key in both
+places:
+
+| formatting | what it says |
+|---|---|
+| `Display` | `error sending request for url (https://…/v2/SUPERSECRETKEY123?api_key=ALSOSECRET)` |
+| `Debug` | the same, plus `url: "…"` as a field |
+| `without_url()` `Display` | `error sending request` |
+| `without_url()` source chain | `client error (Connect) \| dns error \| failed to lookup address information…` |
+
+**Redaction costs nothing diagnostic.** The source chain — the part that says
+*why* — survives intact. The only thing lost is the URL, which the operator
+configured and already knows.
+
+### Where it would have leaked
+
+| site | what it did |
+|---|---|
+| `ChainError::Http` | formats `{source}` — reqwest's Display, with the URL — and the cursor loop logs it on **every** refused range. The same loop already recorded fifteen refusals in forty seconds. |
+| `ChainError::WrongChain` | interpolated the URL by hand, and it is the error that fires when a provider is *misconfigured* — precisely when the URL is freshly pasted |
+| `FetchError::{Http,Status}` | a `url: String` field in the message |
+| `SourceError::Connect` | the same |
+| `capture/run.rs` | `tracing::warn!(url, …)` on a failed connect |
+
+Five sites, none of which held a secret **yet**.
+
+### And the redaction made a refusal worse before it made it better
+
+With the URL gone, the top line of a failed boot was:
+
+```
+  the provider refused: rh-chain eth_chainId: error sending request
+```
+
+DNS, TLS and connection-refused are indistinguishable there. `main` returning a
+`Result` prints an error's `Debug` and nothing beneath it, and
+`CaptureError::Provider(e.to_string())` had already flattened the chain away.
+Both fixed — the binary prints causes, and `Provider` carries them:
+
+```
+  the provider refused: rh-chain eth_chainId: error sending request:
+    client error (Connect): dns error: error resolving DNS:
+    failed to lookup address information: nodename nor servname provided
+```
+
+**The lesson is the general one:** a redaction that removes a line's only
+content has to put the real content back, or the next person disables the
+redaction to debug something.
+
+### The variable name, not the host
+
+A held endpoint renders as `the provider named by GALATA_RHCHAIN_RPC_URL`.
+
+Not the host: QuickNode puts an identifying slug in the **hostname**, so
+"scheme + host" is a rule that is right for Alchemy and wrong for QuickNode.
+Not `<held>`: that says a thing is hidden, where the variable name says where
+to look — and it is already committed in the configuration file.
+
+### There is no `rpc_url` field, deliberately
+
+Only `rpc_url_var`. A field that accepted a URL would sit one `_var` suffix
+away from the safe one, in a committed file. A named variable that is **unset
+refuses** rather than falling back to the public node, because a silent
+fallback is how a process runs for a week against a provider nobody chose:
+
+```
+$ galata-datawatch rh-chain
+GALATA_RHCHAIN_RPC_URL is not set. Nothing connects anonymously, and no
+default is invented
+```
+
+### The rule is absolute because an exception is uncheckable
+
+`Stream` and `Poll` endpoints are compiled-in public addresses that could
+safely print. They became `Endpoint` anyway. A guard that said *no URL in an
+error message, except the ones that are fine* is a guard nobody can run — and
+the exception is where the next keyed URL gets added.
+
+`check-endpoint-reach.sh` holds three rules and each was watched failing on its
+own plant: a URL in an `#[error]` message, a `reqwest::Error` stored without
+`without_url()`, and `expose()` called outside a connect site.
+
+### One adjacent hole, closed while here
+
+A NATS URL may carry `nats://user:pass@host`, the broker's password already has
+a variable of its own, and the connect line logs the URL. Userinfo in
+`broker.url` now refuses at load — and the refusal **does not echo the URL**,
+since a refusal that exists to keep a credential out of a file should not print
+it.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

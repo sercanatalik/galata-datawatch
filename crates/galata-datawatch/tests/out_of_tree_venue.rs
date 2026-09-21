@@ -111,7 +111,7 @@ impl Adapter for Bazaar {
 
     fn transport(&self) -> Transport {
         Transport::Stream {
-            ws_url: self.declaration.ws_url,
+            ws_url: galata_datawatch::venue::Endpoint::public(self.declaration.ws_url),
             keepalive: Keepalive::Protocol,
         }
     }

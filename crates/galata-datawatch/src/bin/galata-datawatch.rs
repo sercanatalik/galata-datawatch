@@ -29,7 +29,29 @@ impl Adapters for Resolver {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // **The whole chain, not just the top.** `main` returning a
+            // `Result` prints the error's `Debug` and nothing under it, which
+            // was tolerable while the top line carried a URL and stopped being
+            // so when redaction took it out: `error sending request` alone does
+            // not distinguish DNS from TLS from refused. The cause is in the
+            // source chain, and this is what prints it.
+            eprint!("{error}");
+            let mut source = error.source();
+            while let Some(cause) = source {
+                eprint!(": {cause}");
+                source = cause.source();
+            }
+            eprintln!();
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     // **One crypto provider, installed explicitly, before anything can build a
     // client.**
     //
@@ -71,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(&venue_name)
         .ok_or_else(|| format!("{venue_name} is not a venue this configuration declares"))?;
 
-    let adapter_config = AdapterConfig::from_declared(&venue_name, venue)?;
+    let adapter_config = AdapterConfig::from_declared(&venue_name, venue, &EnvSecrets)?;
 
     let declared: Vec<Subscription> = venue
         .instruments
