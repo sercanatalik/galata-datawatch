@@ -851,6 +851,54 @@ Worth recording because the failure mode is the dangerous direction: a fixture
 whose expected value was guessed is a fixture that tests the guess. The
 assertion now carries the full raw integer as well as the scaled decimal.
 
+## The one absence that can be proved — 2026-09-21
+
+Every gap this system writes is **inferred from an event it witnessed**: a
+session lost, a crash, a restart. None is inferred from silence, because on a
+stream *nothing arrived* and *nothing happened* are the same picture. That is
+invariant 3.
+
+A chain reorganisation is the single exception in the whole design. When the
+chain replaces a block, the rows captured from the old one describe something
+that **provably did not happen**, and the proof is two hashes at one height.
+
+### Detection costs nothing, because the evidence was already fetched
+
+```text
+  captured:  … ─[A]─[B]─[C]
+  arriving:           [D] parentHash = C   the chain agrees
+  arriving:           [D] parentHash = X   X is not the C we hold — a fork
+```
+
+Every block carries its parent's hash. The alternative — remember hashes,
+re-fetch them, compare — costs a request per block to learn the same thing
+later. Linkage knows at the moment the replacement arrives, which is as early as
+it can be known.
+
+**Verified against the real chain**: six consecutive blocks, real hashes, every
+`parentHash` linking to its predecessor, and the detector silent throughout.
+That test matters more than the positive one — a detector whose cost of being
+wrong is *a false alarm on every block* has to be shown staying quiet.
+
+### What is deliberately not claimed
+
+- **A first sight is not a fork.** A trail with nothing to link against cannot
+  tell one from the other, and claiming one would be an inference dressed as a
+  proof — in the one module whose entire value is that it does not infer.
+- **The depth is not guessed.** An arriving block names only its parent, so the
+  claim is exactly what the evidence supports: *this height changed, here are
+  the two hashes.*
+- **Rows from orphaned blocks are not deleted.** Those bytes arrived, and the
+  record records arrivals. The reorganisation is a second fact recorded beside
+  them. Deleting would make the record a thing that changes, which is the one
+  property it must not have.
+
+### And one false alarm avoided by asking
+
+Nodes disagree about hex case. A comparison that was case-sensitive would report
+a fork because one node said `0xAA` and another `0xaa` — on every block. The
+comparison is case-insensitive and there is a test that says why.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

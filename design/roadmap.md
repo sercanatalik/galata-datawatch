@@ -333,17 +333,24 @@ source before it existed turned out to buy more than tidy refusals.
 problems.*
 
 - `Source::Cursor` over `eth_getLogs`, paging by **block number** — not by the
-  `last_micros + 1ms` bump legacy uses, which would skip blocks on a chain whose
-  block times are documented as *sub-second and irregular*.
+  `last_micros + 1ms` bump legacy uses. **Measured: twenty consecutive blocks
+  carry four distinct timestamps**, so a time cursor names about nine blocks and
+  asking for what follows skips eight of them. Done.
 - Archive segments named `Cursor::Block`, so backfill is idempotent by naming.
 - **The payload unit is the `getLogs` response, never one log** — a trade is
   only provable by matching the stock and USDG `Transfer` inside one
   `transactionHash`, and `normalise` must stay pure.
-- **Two frontiers.** The reader's bound is the **finalized** block (~13 min),
-  not the head. Reorgs are rows in the gaps family: an absence you can *prove*.
+- **Two frontiers.** The reader's bound is the **finalized** block — **measured
+  at 19.6 minutes and 11,678 blocks behind the head**, not the ~13 minutes this
+  line used to say. Thirteen minutes is `safe`, which can still be reorganised
+  under a fault; a bound that can move backwards is not a bound. Capture follows
+  the head, because a block later taken back still *arrived*.
+  Reorgs are rows in the gaps family: an absence you can *prove*.
 - Decoding traps: **drop 4-topic logs** (ERC-721 shares topic0 with ERC-20
-  `Transfer`); per-contract decimals (Stock Tokens 18, USDG 6); mint/burn is a
-  `Transfer` to or from the zero address.
+  `Transfer` — **measured at 123 of 4,362, nearly 3%**, each of which would have
+  decoded as a zero-amount transfer that never happened); per-contract decimals
+  (Stock Tokens 18, USDG 6); mint/burn is a `Transfer` to or from the zero
+  address. Done, tested against logs captured from the chain.
 - `instruments` gains **`ui_multiplier`** (ERC-8056), point-in-time via
   `observed_at` — the cleanest corporate-action source available anywhere.
 - A provider RPC URL is a **secret**, not config. The public node has no archive

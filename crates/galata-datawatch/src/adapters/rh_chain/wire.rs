@@ -54,7 +54,7 @@ pub struct Log {
 }
 
 /// Why a log could not be read.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecodeError {
     /// Not a transfer at all.

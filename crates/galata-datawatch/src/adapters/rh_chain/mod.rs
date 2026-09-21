@@ -10,6 +10,8 @@
 //!    four distinct timestamps. See [`crate::source::cursor`].
 //! 2. **There are two frontiers.** What arrived, and what cannot be taken back.
 
+pub mod normalise;
+pub mod trail;
 pub mod wire;
 
 /// The venue's name, as it appears in a partition and on a subject.
