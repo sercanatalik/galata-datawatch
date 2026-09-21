@@ -345,7 +345,7 @@ impl Config {
     /// **The one door.** A file, a document, or anything else that can say what
     /// the text is and where it came from — all of them cross the same
     /// validation, because a source that deserialised straight to this type
-    /// would skip [`Config::validate`], which is where the bounds and the
+    /// would skip `Config::validate`, which is where the bounds and the
     /// unknown-key and unknown-venue refusals live.
     pub fn load(source: &dyn ConfigSource, adapters: &dyn Adapters) -> Result<Config, ConfigError> {
         let (text, origin) = source.read()?;

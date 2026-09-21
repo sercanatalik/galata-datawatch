@@ -1,7 +1,7 @@
 //! The capture process: the loop that owns the clock, and everything it drives.
 //!
 //! **The loop owns the clock.** Every timestamp reaching a payload, a gap or a
-//! status message originates from a [`Clock`] injected here; no component below
+//! status message originates from a [`Clock`](crate::capture::Clock) injected here; no component below
 //! reads one, and `scripts/check-clock-discipline.sh` asserts it. That is what
 //! lets rotation, flush and staleness be driven at controlled times without
 //! waiting.

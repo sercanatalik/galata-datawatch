@@ -28,7 +28,7 @@
 //! dependency to be vault-backed**, which is what lets it publish without one.
 //!
 //! What must *not* happen is a vault SDK's convenient `deserialize` straight to
-//! a typed value: it skips [`Config::validate`], where the bounds, the
+//! a typed value: it skips `Config::validate`, where the bounds, the
 //! unknown-key refusal and the unknown-venue refusal live. The text goes through
 //! the same door a file's does. One door.
 

@@ -10,8 +10,8 @@
 //!
 //! # What holds the ordering
 //!
-//! [`record::Archive::append`] is `pub(crate)`, so no other crate can reach
-//! past [`ingest`]. `scripts/check-ingest-callers.sh` asserts no other module
+//! `Archive::append` is `pub(crate)`, so no other crate can reach
+//! past [`ingest()`](crate::ingest::ingest). `scripts/check-ingest-callers.sh` asserts no other module
 //! in this crate does either — which is the half the compiler cannot see.
 //!
 //! # What is not here

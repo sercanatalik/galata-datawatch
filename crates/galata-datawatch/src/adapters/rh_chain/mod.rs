@@ -7,7 +7,7 @@
 //! The two things that make this venue different from an exchange:
 //!
 //! 1. **History pages by block, not by time.** Twenty consecutive blocks carry
-//!    four distinct timestamps. See [`crate::source::cursor`].
+//!    four distinct timestamps. See [`crate::venue::chain`].
 //! 2. **There are two frontiers.** What arrived, and what cannot be taken back.
 
 /// **Behind the `capture` feature**: it makes requests.
