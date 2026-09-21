@@ -1130,6 +1130,52 @@ the shape is a hypothesis with a test, not a measurement — a weaker claim than
 every other venue here carries, and the record is the thing that will settle it
 when someone does run it.
 
+## The component that judges — 2026-09-21
+
+The status surface was built in Tier 1 to **report and never judge**, on an
+argument that named its own missing half:
+
+> A threshold inside the capture process cannot be changed without a deploy,
+> and is wrong for the next instrument anyway. The component that judges is a
+> different one, and it can be changed without stopping capture.
+
+That different one did not exist, so the decision was half made: capture refused
+to judge and nothing else judged either. `galata-watch` is the other half.
+
+### A heartbeat is a claim; a file on disk is a fact
+
+```
+  3572 segments in a closed partition (expected at most 64)
+    — var/soak4/archive/venue=hyperliquid/kind=candles/date=2026-09-20
+  the newest segment is 8706 s old (expected at most 300 s)
+    — var/soak4/archive
+```
+
+Both findings are true of the real nine-hour archive, and both are **checkable**:
+the number, the bound and the path. An alert saying *compaction overdue* makes
+somebody go and find out; this has already done that.
+
+All four exit codes verified against real trees: `0` nothing to report (13
+partitions, no thresholds declared), `1` findings, `2` bad argument, `3` nothing
+to check — and the last is separate on purpose, because *an empty archive* is
+what capture having silently stopped looks like.
+
+### The first real run found the watcher's own bug
+
+Against the nine-hour archive it reported **46 overlapping-range findings**, all
+false. The cause was mine: it ran the **tape's** layout check against the
+**archive**.
+
+Twenty-four gaps written in one flush all carry the same microsecond, so their
+segments have identical time ranges — which the tape's rule, *sequence ranges
+must not overlap*, reads as forty-six redeliveries. They are nothing of the
+kind. The archive distinguishes those segments by **pid and flush sequence**
+precisely so that writing many at one instant is legal.
+
+Two stores, two shapes, two rules, and one of them was applied to the other.
+The test that now pins it writes two segments at the same instant and asserts
+silence.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

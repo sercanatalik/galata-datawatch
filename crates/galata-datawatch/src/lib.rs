@@ -38,6 +38,7 @@ pub mod sink;
 pub mod source;
 pub mod tape;
 pub mod venue;
+pub mod watch;
 
 #[cfg(test)]
 mod tests;

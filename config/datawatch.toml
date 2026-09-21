@@ -73,6 +73,26 @@ instruments = [
   { ticker = "GOLD",   dex = "xyz" },
 ]
 
+# NOR IS [watch], AND THAT MEANS ONLY STRUCTURAL PROBLEMS ARE CHECKED.
+#
+# The status surface REPORTS AND NEVER JUDGES -- a threshold inside capture
+# cannot be changed without a deploy and is wrong for the next instrument
+# anyway. `galata-watch` is the component that judges, and its bounds are the
+# operator's:
+#
+#   [watch]
+#   # A CLOSED partition holding more segments than this means compaction is
+#   # overdue. Today's partition is exempt: it is supposed to hold many small
+#   # segments, which is what flush_secs = 2 buys.
+#   max_segments_in_closed_partition = 64
+#   # How old the newest segment may be before the record is stale.
+#   max_record_age_secs = 300
+#
+# With no block it still reports a ticker that became a directory, because that
+# is not a matter of degree. It watches THE RECORD, not the scheduler: a
+# heartbeat is a claim, and a closed partition holding 3,572 segments is a fact
+# on disk.
+
 # THE BROKER IS NOT DECLARED HERE EITHER, AND CAPTURE RUNS ANYWAY.
 #
 # The record does not depend on the broker: with no `[broker]` block, events

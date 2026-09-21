@@ -187,6 +187,24 @@ pub struct Capture {
     pub walk_cap: u32,
 }
 
+/// What the operator considers worth telling somebody about.
+///
+/// **Optional, and with no defaults.** Same argument as retention: a bound
+/// right for one venue's cadence is wrong for the next, and a threshold nobody
+/// chose is one nobody will believe when it fires. With no block, only
+/// structural problems are checked — a ticker that became a directory is not a
+/// matter of degree.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Watch {
+    /// The most segments a **closed** partition may hold before compaction is
+    /// overdue. A partition still being written to is exempt: it is supposed to
+    /// hold many small segments, which is what a two-second flush buys.
+    pub max_segments_in_closed_partition: Option<usize>,
+    /// How old the newest segment may be before the record is stale.
+    pub max_record_age_secs: Option<u64>,
+}
+
 /// Where events go, if anywhere.
 ///
 /// **Optional.** The record does not depend on the broker, so a configuration
@@ -300,6 +318,9 @@ pub struct Config {
     pub retention: Retention,
     /// Where events go. Absent means nowhere, and capture runs anyway.
     pub broker: Option<Broker>,
+    /// What is worth reporting, if anything. Absent means structural only.
+    #[serde(default)]
+    pub watch: Watch,
     /// What to capture, per venue.
     pub venue: BTreeMap<String, VenueConfig>,
 }

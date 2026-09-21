@@ -90,6 +90,10 @@ name = "galata-tape-rebuild"
 required-features = ["bin"]
 
 [[bin]]
+name = "galata-watch"
+required-features = ["bin"]
+
+[[bin]]
 name = "galata-retain"
 required-features = ["bin"]
 
