@@ -105,9 +105,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // width the stream does not push would have to state its own need. The
         // width is carried for every item and used where the series has one;
         // funding pages forward and has none.
-        let live_interval = adapter.live_interval_micros().ok_or_else(|| {
-            "this venue pushes no bar width, so no walk may resume from the record".to_string()
-        })?;
+        let streams = adapter.transport().is_stream();
+        // **Only a streaming venue has a bar width to resume from.** A chain
+        // has none, and asking it for one before noticing that is how a
+        // cursor venue got refused for not being a stream.
+        let live_interval = if streams {
+            adapter.live_interval_micros().ok_or_else(|| {
+                "this venue pushes no bar width, so no walk may resume from the record".to_string()
+            })?
+        } else {
+            // Unused: a cursor venue takes the branch below before any walk is
+            // planned.
+            0
+        };
         let walk_items: Vec<(Series, WalkInterval)> = declared_series
             .iter()
             .filter(|series| adapter.declaration().serves_historically(**series))
@@ -179,9 +189,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // What was not covered while this process was not running, published
         // before anything else — so the record never claims coverage it does
         // not have.
+        let adapter_transport = capture.venue_transport();
+
         let gaps = capture.report_restart_gap();
         if gaps > 0 {
             tracing::info!(gaps, "published the window this process was not covering");
+        }
+
+        // **A cursor venue is a different program.** No walk, no session, no
+        // rotation: the cursor loop IS the backfill, because asking for old
+        // blocks and asking for new ones is the same call at a different
+        // position.
+        if !adapter_transport.is_stream() {
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let signal = shutdown.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                signal.cancel();
+            });
+            return capture
+                .run_cursor(
+                    shutdown,
+                    config.capture.cold_start_days as u64 * BLOCKS_PER_DAY,
+                )
+                .await
+                .map_err(Box::<dyn std::error::Error>::from);
         }
 
         // The history, before the live loop and after the restart gap — so a
@@ -283,3 +315,10 @@ async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Recei
         tracing::warn!(%error, "the broker did not take the last of the buffer");
     }
 }
+
+/// Blocks a day holds on a chain making about nine a second.
+///
+/// **Measured, not documented**, and used only to turn a declared
+/// `cold_start_days` into a block count — the one place this system converts
+/// between the two units, and it says so.
+const BLOCKS_PER_DAY: u64 = 9 * 60 * 60 * 24;

@@ -33,6 +33,7 @@ pub fn known() -> Vec<&'static str> {
     [
         #[cfg(feature = "hyperliquid")]
         hyperliquid::VENUE,
+        rh_chain::VENUE,
     ]
     .to_vec()
 }
@@ -71,6 +72,8 @@ pub enum AdapterConfig {
     /// Hyperliquid.
     #[cfg(feature = "hyperliquid")]
     Hyperliquid(hyperliquid::Config),
+    /// Robinhood Chain.
+    RhChain(rh_chain::Config),
 }
 
 /// Whether a venue supplies a series, by either route.
@@ -88,6 +91,10 @@ pub fn supplies(venue: &str, series: galata_wire::Series) -> bool {
         hyperliquid::VENUE => declaration_of_hyperliquid()
             .map(|d| d.supplies(series))
             .unwrap_or(false),
+        rh_chain::VENUE => matches!(
+            series,
+            galata_wire::Series::Transfers | galata_wire::Series::Mints
+        ),
         _ => false,
     }
 }
@@ -133,6 +140,41 @@ impl AdapterConfig {
                     })
                     .collect(),
                 candle_interval: venue.candle.clone(),
+            })),
+            rh_chain::VENUE => Ok(AdapterConfig::RhChain(rh_chain::Config {
+                instruments: venue
+                    .instruments
+                    .iter()
+                    .map(|i| {
+                        // **Both refused when absent, by name.** A chain
+                        // instrument with no contract is unaddressable, and one
+                        // with no decimals would be scaled by a guess that is
+                        // wrong by a factor of a trillion for half the tokens
+                        // on this chain.
+                        let contract = i.contract.clone().ok_or_else(|| ResolveError::Unknown {
+                            name: format!(
+                                "{} declares no `contract`, and a chain instrument is \
+                                     addressed by one",
+                                i.ticker
+                            ),
+                            known: known().join(", "),
+                        })?;
+                        let decimals = i.decimals.ok_or_else(|| ResolveError::Unknown {
+                            name: format!(
+                                "{} declares no `decimals`. Stock tokens carry 18 and USDG \
+                                 carries 6, so there is no default that is not wrong for one \
+                                 of them",
+                                i.ticker
+                            ),
+                            known: known().join(", "),
+                        })?;
+                        Ok(rh_chain::Instrument {
+                            ticker: i.ticker.clone(),
+                            contract,
+                            decimals,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ResolveError>>()?,
             })),
             other => Err(ResolveError::Unknown {
                 name: other.to_string(),
@@ -181,6 +223,12 @@ pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> 
             }
             Ok(())
         }
+        // A chain has no instrument universe to check against: a contract
+        // either emits logs or it does not, and asking produces an empty
+        // answer rather than a refusal. The chain-id check at boot is the
+        // equivalent guard, and it lives in the loop because it needs the
+        // provider.
+        AdapterConfig::RhChain(_) => Ok(()),
     }
 }
 
@@ -193,6 +241,7 @@ pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
         AdapterConfig::Hyperliquid(c) => {
             Ok(Box::new(hyperliquid::Hyperliquid::new(c, None)?) as Box<dyn Adapter>)
         }
+        AdapterConfig::RhChain(c) => Ok(Box::new(rh_chain::RhChain::new(c)?) as Box<dyn Adapter>),
     }
 }
 
@@ -227,6 +276,13 @@ impl History {
                 let adapter = hyperliquid::Hyperliquid::new(c.clone(), None)?;
                 Ok(History::Hyperliquid(adapter.client()))
             }
+            // A chain has no *historical walk* separate from its capture: the
+            // cursor loop IS the backfill, because asking for old blocks and
+            // asking for new ones is the same call at a different position.
+            AdapterConfig::RhChain(_) => Err(ResolveError::Unknown {
+                name: "rh-chain has no separate history walk; its cursor loop backfills".into(),
+                known: known().join(", "),
+            }),
         }
     }
 

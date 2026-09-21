@@ -257,6 +257,20 @@ pub struct InstrumentDecl {
     /// The builder-deployed dex it lives on, where it is not on the main one.
     #[serde(default)]
     pub dex: Option<String>,
+    /// The contract that emits its events, **on a chain venue**.
+    ///
+    /// A separate field rather than reusing `dex`, which is a different thing
+    /// that happens to be a string. Two meanings in one field is a field whose
+    /// validation cannot say which one is wrong.
+    #[serde(default)]
+    pub contract: Option<String>,
+    /// How that contract counts, **on a chain venue**.
+    ///
+    /// No default here, and none downstream: stock tokens carry 18 and USDG
+    /// carries 6, so a default is right for one and wrong for the other by a
+    /// factor of a trillion.
+    #[serde(default)]
+    pub decimals: Option<u32>,
 }
 
 /// One venue to capture from.

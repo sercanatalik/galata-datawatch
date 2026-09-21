@@ -964,6 +964,52 @@ Worth noting because the wall was built to stop a *reader linking a websocket
 stack*, and what it actually caught first was a module in the wrong layer. The
 same mistake wearing a different hat.
 
+## The cursor loop, against the live chain — 2026-09-21
+
+A minute of capture from Robinhood Chain's public node, rebuilt and queried:
+
+```
+  32 payloads → 96,512 rows in 2 segments (0 unparsed)
+
+  venue     ticker      rows   first_block   last_block   transactions   venue_times
+  rh-chain  TOKEN0BD7  47,311   67,883,240   67,915,239        36,204             0
+```
+
+**`venue_times: 0` is the point.** The column is a count of non-null venue
+times, and it is zero by design: a `getLogs` response cannot know per-block
+timestamps without a call per block, so none was invented. The block number is
+there instead, so the time is recoverable. A query proving a negative is a
+better assurance than a comment claiming one.
+
+Mints split 24,501 issuances against 24,700 redemptions, with exact decimal
+totals — the numbers crossed JSON, parquet and DuckDB without a float anywhere.
+
+### The run found a defect the tests could not
+
+The public node rate-limits, and the first run met it:
+
+```
+  15 × {"code":429,"message":"Too Many Requests"} in 40 seconds
+```
+
+The loop behaved correctly — it failed the pass, **did not advance the cursor**,
+and kept going, which is the invariant that stops a retryable hole becoming a
+permanent one. But it retried at the declared pace of 500 ms, which is precisely
+what provoked the refusal. **A rate-limited loop that does not slow down never
+recovers**, and adds load to a node already saying stop.
+
+The remedy for being told to slow down is to slow down. The same `Backoff` the
+reconnect path uses:
+
+```
+  before   15 refusals in 40 s
+  after     4 refusals in 60 s
+```
+
+A pass that got anywhere clears the penalty; one refused throughout keeps it.
+No test would have found this — it needs a real provider with a real opinion
+about how often it wants to be asked.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

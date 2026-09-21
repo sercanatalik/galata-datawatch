@@ -12,6 +12,8 @@
 
 pub mod clock;
 pub mod coverage;
+#[cfg(feature = "capture")]
+pub mod cursor;
 pub mod run;
 pub mod session;
 pub mod status;
@@ -20,6 +22,8 @@ pub mod walk;
 
 pub use clock::{Clock, SystemClock, TestClock};
 pub use coverage::Coverage;
+#[cfg(feature = "capture")]
+pub use cursor::Pass;
 pub use run::{Capture, CaptureError, Fetch, WalkRequest, Wiring};
 pub use session::{Act, Session};
 pub use status::{Connection, PairState, PairStatus, Status, StatusFile};

@@ -48,6 +48,18 @@ pub enum CaptureError {
         /// What it declared.
         endpoint: String,
     },
+    /// The venue pushes, and this loop asks.
+    #[error(
+        "{endpoint} is not a cursor endpoint. This loop asks by position; a venue that pushes \
+         needs the streaming loop"
+    )]
+    NotACursor {
+        /// What it declared.
+        endpoint: String,
+    },
+    /// The provider would not answer, or answered wrongly.
+    #[error("the provider refused: {0}")]
+    Provider(String),
 }
 
 /// Everything the loop is given.
@@ -455,6 +467,32 @@ impl Capture {
     /// The coverage ledger.
     pub fn coverage_mut(&mut self) -> &mut Coverage {
         &mut self.coverage
+    }
+
+    /// What carries this venue's bytes.
+    pub fn venue_transport(&self) -> crate::venue::Transport {
+        self.wiring.adapter.transport()
+    }
+
+    /// The venue's stated request budget, for pacing.
+    pub fn budget(&self) -> crate::venue::Budget {
+        self.wiring.adapter.declaration().budget
+    }
+
+    /// Record an event this process generated, then emit it — **through the one
+    /// path**, durable before it is emitted.
+    pub fn record_generated_event(
+        &mut self,
+        venue: &str,
+        envelope: Envelope,
+    ) -> Result<(), CaptureError> {
+        record_generated(
+            &mut self.archive,
+            self.wiring.sink.as_ref(),
+            venue,
+            envelope,
+        )?;
+        Ok(())
     }
 
     /// The venue.
