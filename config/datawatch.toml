@@ -36,10 +36,21 @@ walk_cap = 200
 market = "mainnet"
 candle = "1m"
 # `quotes` is the venue's `bbo` channel rather than `l2Book`: it carries sizes
-# (it is `l2Book` at one level a side) and it is emitted ONLY when the top of
-# book changes on a block, so its rate is bounded by block cadence and by
-# change — where the public `l2Book` is a throttled snapshot on a timer
+# (it is `l2Book` at one level a side) and it is emitted when the top of book
+# changes, where the public `l2Book` is a throttled snapshot on a timer
 # whatever happened.
+#
+# MEASURED 2026-09-21, BOTH CHANNELS ON ONE SOCKET FOR 75 s: bbo is 4.0x the
+# BYTES and 43x the messages of l2Book. Event-driven is the COST here, not the
+# saving — the top of book changes far more often than every 5.27 s.
+#
+# What it buys is the dataset itself: bbo showed 43x as many distinct tops. A
+# snapshot every 5.27 s shows one top in 43 and cannot say what happened
+# between them, and "the top of book as it moved" is what `quotes` IS.
+#
+# The bill: 6.72 KiB/s over six instruments, 567 MiB/day raw, 32.9 MiB/day at
+# the archive's measured zstd ratio — 5.5 MiB/day/ticker, against the
+# predecessor's 44 MB/day/ticker for candles.
 series = ["trades", "quotes", "candles", "funding"]
 instruments = [
   # The main perp dex. Continuous — this venue never closes.

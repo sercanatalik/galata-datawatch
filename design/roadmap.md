@@ -30,14 +30,22 @@ Tier 2 and the broker at Tier 4.
 
 ## What is still open
 
-- **Tier 7's entry question.** Capture rh-chain at the head, or only at
-  finality? Recommended: at the head, with the reader bounded at finalized and
-  reorgs written as rows. Not yet confirmed.
-- **`bbo` volume.** Unmeasured, and possibly larger than the `l2Book` it
-  replaces: the public book is a throttled snapshot every **5.27 s**, while
-  `bbo` is event-driven. Tier 1's soak answers it.
-- **Retention.** Absence of a `[retention]` block means keep everything, which
-  is the legacy answer and is reversible.
+- ~~**Tier 7's entry question.**~~ **Confirmed**, and the last piece landed
+  2026-09-21: capture at the head, the reader bounded at finalized, reorgs as
+  rows — *and* `crate::reorg` to apply them. Capturing at the head means the
+  record holds rows the chain later replaces; until something said **which**, a
+  reader had the contradiction and no way to use it.
+- ~~**`bbo` volume.**~~ **Measured, and the worry was right**: both channels on
+  one socket for 75 s put `bbo` at **4.0× the bytes** and 43× the messages of
+  `l2Book`. Event-driven is the cost, not the saving. It is still the right
+  choice, for the other reason — 43× as many distinct tops, and *the top of
+  book as it moved* is what the dataset is. 5.5 MiB/day/ticker compressed,
+  against the predecessor's 44 MB/day/ticker for candles.
+- **Retention — a decision, not a question.** Absence of a `[retention]` block
+  means keep everything. Nothing measurable resolves how long market data is
+  worth keeping; it is the operator's, which is why no horizon has a default,
+  `galata-retain` exits 3 with no block, and `--delete` is explicit. The only
+  thing that changes it is a storage bill.
 
 ---
 

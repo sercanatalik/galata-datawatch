@@ -2006,6 +2006,71 @@ rather than after.
 The badges are verified present in the generated HTML for `capture`,
 `hyperliquid` and `rh-crypto`.
 
+## `bbo` is 4x the bytes of the book it replaced — 2026-09-21
+
+The roadmap deferred this to a soak: *unmeasured, and possibly larger than the
+`l2Book` it replaces.* Both channels, same three coins, one socket, 75 seconds:
+
+| channel | messages | bytes | msg/s | KiB/s | mean |
+|---|---|---|---|---|---|
+| `bbo` | 1,806 | 257,880 | 24.08 | **3.36** | 143 B |
+| `l2Book` | 42 | 64,687 | 0.56 | 0.84 | 1,540 B |
+
+**4.0× the bytes, 43× the messages.** The worry was right.
+
+### Two independent cross-checks
+
+- `l2Book` arrived once every **5.36 s** per coin, against the **5.27 s**
+  throttle measured separately back in Tier 1.
+- Scaled to six instruments this is 6.72 KiB/s; the 90-second archive capture
+  recorded **5.3 KiB/s** for `quotes` across its six — the same number from a
+  different instrument on a different market minute.
+
+A figure that two unrelated measurements agree on is a figure.
+
+### The config stated the reason backwards
+
+It said `bbo` *is emitted ONLY when the top of book changes on a block, so its
+rate is **bounded** by block cadence and by change* — which reads as an
+argument that it is cheaper. **It is not.** The top of book changes far more
+often than every 5.27 s, so event-driven is the **cost**.
+
+What it buys is the dataset. `bbo` showed **43× as many distinct tops**; a
+snapshot every 5.27 s shows one top in 43 and cannot say what happened between
+them. *The top of book as it moved* is what `quotes` is, not a sample of it.
+
+So the choice stands and the reasoning is corrected: **4× the bytes for 43× the
+resolution.**
+
+### The bill
+
+```text
+  6 instruments, quotes    6.72 KiB/s    567 MiB/day raw
+  at zstd 5.8% (measured)                 32.9 MiB/day
+                                           5.5 MiB/day/ticker
+```
+
+The predecessor's candles were 44 MB/day/ticker. Full-resolution quotes cost
+**an eighth of that**, which is what makes the trade easy.
+
+## Tier 7's entry question, closed — 2026-09-21
+
+> Capture rh-chain at the head, or only at finality? Recommended: at the head,
+> with the reader bounded at finalized and reorgs written as rows. **Not yet
+> confirmed.**
+
+| the recommendation | what holds it |
+|---|---|
+| capture at the head | `one_pass` plans from the cursor to `eth_blockNumber` |
+| reader bounded at finalized | the measured 11,678-block lag on `Transport::Cursor` |
+| reorgs written as rows | `Event::Reorg` through the one path |
+| …and usable | `crate::reorg` — **which only landed today** |
+
+The last row is why this stayed open rather than merely unticked. **Capturing
+at the head means the record holds rows the chain later replaces**, and until
+something said *which*, a reader held the contradiction with no way to apply
+it. That was the missing piece.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
