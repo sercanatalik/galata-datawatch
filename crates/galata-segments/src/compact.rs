@@ -233,20 +233,81 @@ fn closed_partitions(root: &Path, today: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// **Segments an interrupted compaction left behind**, in one partition.
+///
+/// A compaction writes its replacement and syncs it **before** removing
+/// anything, so a crash in that window costs a duplicate read and never a
+/// loss. This is what that state looks like on disk, and
+/// [`compact_partition`] removes it before merging anything — so a resumed
+/// compaction finishes the interrupted one rather than merging the duplicate
+/// in again.
+///
+/// **Nesting is not overlap, and only this one is diagnostic.** Two segments
+/// sharing a range is ordinary in the archive: twenty-four gaps flushed in one
+/// microsecond carry the same time range and are told apart by pid and flush
+/// sequence. But *containment* cannot arise that way — a live writer flushes in
+/// receipt order and a tape in sequence order, so segments written normally
+/// **abut and never contain one another**. Finding one inside another is
+/// therefore finding an interruption, in either store.
+///
+/// Exposed so a watcher can say the partition needs a sweep, in the window
+/// between the crash and the sweep that repairs it. A rebuild over an
+/// un-repaired partition doubles those rows **silently**: the duplicated
+/// payloads keep their original sequences, so nothing downstream overlaps
+/// either.
+pub fn nested(dir: &Path) -> Vec<PathBuf> {
+    superseded(&list_segments(dir))
+}
+
 /// Segments a wider segment in the same partition already holds.
 ///
 /// An ordered sweep rather than a cross-product: comparing every segment
 /// against every other has billions of steps at a day-partition's segment
 /// count.
 fn superseded(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
+    // **A container must be seen before what it contains**, or the sweep walks
+    // past the narrow one and only catches what follows the wide one.
+    //
+    // The ordinary listing sorts by `(first, last)` ascending, so `[100,199]`
+    // precedes `[100,299]` and escapes. Sorting the LAST position descending
+    // puts the widest segment starting at each position first. Done on a copy:
+    // every other caller wants the listing in range order.
+    let mut ordered: Vec<(Cursor, PathBuf)> = listed.to_vec();
+    ordered.sort_by_key(|(c, _)| {
+        (
+            c.variant(),
+            c.first_position(),
+            std::cmp::Reverse(c.last_position()),
+        )
+    });
+
     let mut doomed = Vec::new();
     let mut widest: Option<(Cursor, PathBuf)> = None;
-    for (cursor, path) in listed {
+    for (cursor, path) in &ordered {
         match &widest {
+            // **STRICTLY wider, in at least one direction.**
+            //
+            // `<=` and `>=` alone call an IDENTICAL range contained — and on
+            // the archive an identical range is legal and common: twenty-four
+            // gaps flushed in one microsecond share `[t, t]` and are told
+            // apart by pid and flush sequence. They hold DIFFERENT ROWS.
+            //
+            // Treating one as superseded removed it **without merging it**,
+            // because this runs before the merge — five rows of eight, gone
+            // from the record, which is the one store that cannot be rebuilt.
+            //
+            // The cost of strictness is a corner that stays undetected: a
+            // compaction interrupted in a partition whose segments all share
+            // one range leaves a replacement with that same range, and this
+            // will not see it. That is a duplicate read. **Failing to spot an
+            // interruption costs a duplicate; deleting an unmerged segment
+            // costs the rows.**
             Some((w, w_path))
                 if w.variant() == cursor.variant()
                     && w.first_position() <= cursor.first_position()
                     && w.last_position() >= cursor.last_position()
+                    && (w.first_position() < cursor.first_position()
+                        || w.last_position() > cursor.last_position())
                     && w_path != path =>
             {
                 doomed.push(path.clone());

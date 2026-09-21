@@ -22,7 +22,7 @@ pub mod reader;
 pub mod writer;
 
 pub use compact::{
-    Compacted, HOLD_FILE, Hold, compact_closed, compact_partition, hold, overdue_closed,
+    Compacted, HOLD_FILE, Hold, compact_closed, compact_partition, hold, nested, overdue_closed,
 };
 pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;

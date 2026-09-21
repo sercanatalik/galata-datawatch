@@ -2100,6 +2100,83 @@ absent. Without it a `Num` serialises as a JSON number, and the loss happens in
 the consumer's parser rather than here, which is worse: the bytes this tree
 wrote were right.
 
+## Compaction was destroying rows, and the legacy review found it — 2026-09-21
+
+A mechanical diff of the legacy datawatch slice against this tree: **183 of its
+254 public names carried over**, most of the rest being trading-system types
+the re-cut deliberately dropped — `VenueFill`, `AccountTruth`,
+`FILL_ARCHIVE_SCHEMA`. One looked like a real capability: `finish_interrupted`.
+
+It turned out to be **present and better placed** — folded into
+`compact_partition`, which removes what a replacement already holds *before*
+merging, so resumption is automatic rather than a call somebody has to
+remember. An improvement on legacy, not a gap.
+
+But reading that code to confirm it found two defects in it.
+
+### One: an identical range is not containment, and compaction deleted it
+
+`superseded` marked a segment contained by a wider one:
+
+```rust
+  w.first <= c.first && w.last >= c.last
+```
+
+**`<=` and `>=` alone call an *identical* range contained.** On the archive an
+identical range is legal and common — this tree already learned it once:
+twenty-four gaps flushed in one microsecond share `[t, t]` and are told apart
+by pid and flush sequence. **They hold different rows.**
+
+And `compact_partition` removes the doomed set *before* it merges anything, so
+the removed segment was never merged in. Proved with real rows:
+
+```
+  two flushes at t=100, 3 rows and 5 rows
+  after compact_partition:  3 rows
+  assertion failed: left 3, right 8
+```
+
+**Five rows of eight, gone from the archive** — the one store that cannot be
+rebuilt. `galata-compact` does this today on any partition holding two flushes
+that share a microsecond, which the gap path produces routinely.
+
+The fix is strict containment: wider in at least one direction. The cost is a
+corner that stays undetected — a compaction interrupted in a partition whose
+segments all share one range leaves a replacement with that same range, and
+this will not see it. **Failing to spot an interruption costs a duplicate read;
+deleting an unmerged segment costs the rows.**
+
+### Two: the sweep walked past a container's first victim
+
+`superseded` is an ordered sweep, which needs a container to be seen before
+what it contains. The listing sorts by `(first, last)` **ascending**, so
+`[100,199]` precedes `[100,299]` and escaped.
+
+Worse than missing one: compaction would then merge the container back in with
+a segment it already held, **doubling those rows**. Fixed by sorting the last
+position descending, on a copy — every other caller wants range order.
+
+### And the window before repair is no longer silent
+
+Compaction repairs an interruption on its next sweep. Between the crash and the
+sweep, nothing said it was there.
+
+`galata-watch` covers the tape, via `check_layout`'s overlapping-sequence rule.
+For the archive it deliberately does not — running the tape's rule there was
+this watcher's first mistake, and the real archive found it: those same
+twenty-four gaps were reported as forty-six redeliveries.
+
+**That lesson is right and it closed the door on a different check that is
+sound.** Nesting is not overlap. Two segments sharing a range is ordinary here;
+one *containing* another cannot arise from concurrent flushes at all, because a
+writer flushes in receipt order and a tape in sequence order, so segments
+written normally abut. `galata-watch` now reports containment on **both**
+stores and still reports overlap on only one.
+
+It matters because a rebuild over an un-repaired archive partition doubles
+those rows **silently**: the duplicated payloads keep their sequences, so
+nothing downstream overlaps either.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

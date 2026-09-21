@@ -136,6 +136,37 @@ pub fn watch(
     let partitions = galata_segments::partitions(archive_root);
     report.checked = partitions.len();
 
+    // **Nesting, unconditionally, and on BOTH stores** — which is not the
+    // overlap rule refused above.
+    //
+    // Two segments sharing a range is ordinary here: those twenty-four gaps
+    // share a microsecond and are told apart by pid and flush sequence. One
+    // segment *containing* another cannot arise that way at all — a live
+    // writer flushes in receipt order and a tape in sequence order, so
+    // segments written normally abut. Containment is an interrupted
+    // compaction, and nothing else.
+    //
+    // Compaction repairs it on its next sweep. This is the window before that,
+    // in which a rebuild would double those rows **silently**: the duplicated
+    // payloads keep their sequences, so nothing downstream overlaps either.
+    for root in [archive_root, tape_root] {
+        for partition in galata_segments::partitions(root) {
+            let nested = galata_segments::nested(&partition);
+            if !nested.is_empty() {
+                report.findings.push(Finding {
+                    observed: format!(
+                        "{} segment(s) a wider one in this partition already holds",
+                        nested.len()
+                    ),
+                    expected: "segments that abut — containment is an interrupted compaction, \
+                               which `galata-compact` finishes"
+                        .into(),
+                    at: partition.clone(),
+                });
+            }
+        }
+    }
+
     if let Some(max) = thresholds.max_segments_in_closed_partition {
         // **Closed only.** A partition still being written to is supposed to
         // hold many small segments; that is what `flush_secs = 2` buys.
@@ -176,6 +207,98 @@ mod tests {
             std::fs::create_dir_all(root.path().join(dir)).unwrap();
         }
         root
+    }
+
+    /// Segment files, named only — `check_layout` and `nested` read the names.
+    fn segments(root: &std::path::Path, partition: &str, names: &[&str]) {
+        let dir = root.join(partition);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in names {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+    }
+
+    #[test]
+    fn segments_that_abut_are_not_an_interrupted_compaction() {
+        // The ordinary archive: one flush after another, ranges abutting.
+        // **Separate roots.** The archive puts `venue=` above `kind=` and the
+        // tape carries the venue as a column, so one directory cannot be both
+        // — handing it as both is what `check_layout` correctly complains
+        // about.
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tempfile::tempdir().unwrap();
+        segments(
+            archive.path(),
+            "venue=hyperliquid/kind=trades/date=2026-09-20",
+            &["t-100_199_4711_1.parquet", "t-200_299_4711_2.parquet"],
+        );
+        let report = watch(
+            archive.path(),
+            tape.path(),
+            "2026-09-21",
+            &Thresholds::default(),
+            300,
+        );
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    #[test]
+    fn two_segments_sharing_a_range_are_not_either() {
+        // **The lesson this watcher learned the hard way.** Twenty-four gaps
+        // flushed in one microsecond carry the same time range and are told
+        // apart by pid and flush sequence. The tape's *ranges must not
+        // overlap* rule called forty-six of those redeliveries; they are not.
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tempfile::tempdir().unwrap();
+        segments(
+            archive.path(),
+            "venue=hyperliquid/kind=gaps/date=2026-09-20",
+            &["t-100_100_4711_1.parquet", "t-100_100_4711_2.parquet"],
+        );
+        let report = watch(
+            archive.path(),
+            tape.path(),
+            "2026-09-21",
+            &Thresholds::default(),
+            300,
+        );
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    #[test]
+    fn a_segment_inside_another_is_reported() {
+        // Containment cannot come from concurrent flushes — a writer flushes
+        // in receipt order, so segments abut. This is a compaction that wrote
+        // its replacement and died before removing what it replaced.
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tempfile::tempdir().unwrap();
+        segments(
+            archive.path(),
+            "venue=hyperliquid/kind=trades/date=2026-09-20",
+            &[
+                "t-100_299_4711_9.parquet",
+                "t-100_199_4711_1.parquet",
+                "t-200_299_4711_2.parquet",
+            ],
+        );
+        let report = watch(
+            archive.path(),
+            tape.path(),
+            "2026-09-21",
+            &Thresholds::default(),
+            300,
+        );
+        let said = report
+            .findings
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(said.contains("already holds"), "{said}");
+        // Both of the narrow ones, not one.
+        assert!(said.contains("2 segment"), "{said}");
+        // And it says what to do about it.
+        assert!(said.contains("galata-compact"), "{said}");
     }
 
     #[test]

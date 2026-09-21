@@ -477,3 +477,120 @@ fn todays_partition_is_never_overdue() {
     assert!(overdue_closed(root.path(), "2026-09-20", 5).is_empty());
     assert!(overdue_closed(root.path(), "2026-09-19", 5).is_empty());
 }
+
+/// **The archive's legal case must survive COMPACTION**, not just the check.
+///
+/// Two flushes in one microsecond hold different rows. If compaction treats
+/// one as superseded it is removed WITHOUT BEING MERGED, and those rows are
+/// gone — from the record, which is the one store that cannot be rebuilt.
+#[test]
+fn compacting_two_flushes_in_one_microsecond_loses_no_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    // Same microsecond, different flush, different rows.
+    write_segment(
+        dir.path(),
+        time(100, 100, 1),
+        &batch(100, 3, 0),
+        Codec::Zstd,
+    )
+    .unwrap();
+    write_segment(
+        dir.path(),
+        time(100, 100, 2),
+        &batch(100, 5, 0),
+        Codec::Zstd,
+    )
+    .unwrap();
+
+    compact_partition(dir.path(), Codec::Zstd).unwrap();
+
+    let rows: usize = list_segments(dir.path())
+        .iter()
+        .map(|(_, path)| {
+            read_segment(path)
+                .unwrap()
+                .iter()
+                .map(|b| b.num_rows())
+                .sum::<usize>()
+        })
+        .sum();
+    assert_eq!(rows, 8, "compaction must not drop a flush it did not merge");
+}
+
+/// **The archive's legal case must survive compaction.**
+///
+/// Twenty-four gaps flushed in one microsecond carry the SAME time range and
+/// are told apart by pid and flush sequence. Neither holds the other's rows,
+/// so neither may be treated as superseded by it.
+#[test]
+fn two_flushes_in_one_microsecond_are_both_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    for seq in [1u64, 2] {
+        let cursor = galata_segments::Cursor::Time {
+            first_micros: 100,
+            last_micros: 100,
+            pid: 4711,
+            seq,
+        };
+        std::fs::write(dir.path().join(cursor.file_name()), b"x").unwrap();
+    }
+    assert!(
+        galata_segments::nested(dir.path()).is_empty(),
+        "identical ranges are not containment: {:?}",
+        galata_segments::nested(dir.path())
+    );
+}
+
+/// **A container must be found however the listing sorts it.**
+///
+/// The ordinary listing sorts by `(first, last)` ascending, so a narrow
+/// segment starting where its container starts precedes it — and an ordered
+/// sweep that trusted that order walked straight past it. What followed was
+/// worse than missing one: compaction would then merge the container back in
+/// with the segment it already held, doubling those rows.
+#[test]
+fn a_narrow_segment_before_its_container_is_still_found() {
+    let dir = tempfile::tempdir().unwrap();
+    write_segment(
+        dir.path(),
+        time(100, 199, 1),
+        &batch(100, 2, 1),
+        Codec::Zstd,
+    )
+    .unwrap();
+    write_segment(
+        dir.path(),
+        time(200, 299, 2),
+        &batch(200, 2, 1),
+        Codec::Zstd,
+    )
+    .unwrap();
+    // The replacement an interrupted compaction had already written.
+    write_segment(
+        dir.path(),
+        time(100, 299, 9),
+        &batch(100, 4, 1),
+        Codec::Zstd,
+    )
+    .unwrap();
+
+    // BOTH narrow segments, not just the one that sorts after the container.
+    assert_eq!(galata_segments::nested(dir.path()).len(), 2);
+
+    compact_partition(dir.path(), Codec::Zstd).unwrap();
+    let rows: usize = list_segments(dir.path())
+        .iter()
+        .map(|(_, p)| {
+            read_segment(p)
+                .unwrap()
+                .iter()
+                .map(|b| b.num_rows())
+                .sum::<usize>()
+        })
+        .sum();
+    // The replacement's four rows, with nothing merged back in on top.
+    assert_eq!(
+        rows, 4,
+        "a resumed compaction must not double the partition"
+    );
+}
