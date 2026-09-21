@@ -1688,6 +1688,102 @@ a variable of its own, and the connect line logs the URL. Userinfo in
 since a refusal that exists to keep a credential out of a file should not print
 it.
 
+## A reorganisation now supersedes what it contradicts — 2026-09-21
+
+`Event::Reorg` has been recorded since Tier 7 and **nothing acted on it**. Two
+things were missing, and each made the other useless.
+
+### The cursor did not rewind
+
+It published the reorganisation and kept advancing, so the rows for a replaced
+range were the *old chain's* and nothing ever replaced them. The record held a
+claim it had itself already contradicted.
+
+Published indexers — Envio, QuickNode Streams, the reorg-safety trackers —
+converge on one answer: **mark superseded, rewind to the divergence, re-index
+forward, never hard-delete.** The first and third are this tree's shape
+already: the archive is append-only and the reorg row is a fact *about* the
+record rather than an edit *to* it.
+
+So the cursor now goes back to `from_block - 1`. The trail already dropped the
+replaced heights, so no second reorganisation is invented for the same blocks.
+The re-read is **bounded by finality — 11,678 blocks, about twelve
+thousand-block ranges at worst — and reported rather than capped**, because a
+cap would silently leave part of a replaced range unread, which is the failure
+the rewind exists to prevent.
+
+### Which makes the join need two clauses
+
+Once the cursor rewinds, the same blocks appear twice:
+
+```
+  seq  block  what
+  ───  ─────  ────────────────────────────────────────────
+  100   4100  transfer          ← old chain
+  101   4101  transfer          ← old chain
+  150      —  REORG 4100..4101  ← the divergence is recorded
+  151   4100  transfer          ← new chain, SAME BLOCK
+  152   4101  transfer          ← new chain, SAME BLOCK
+```
+
+A block-range test alone marks all four superseded. The rule is:
+
+```
+  reorg.from_block <= row.block <= reorg.to_block
+  row.stream_seq   <  reorg.stream_seq
+```
+
+**The sequence clause is what makes the rewind safe, and the rewind is what
+makes the sequence clause necessary.** Neither works alone — which is why both
+landed in one change.
+
+Verified in DuckDB over the documented query, which gives the same answer as
+the Rust join:
+
+```
+┌───────┬────────────┬───────────┬───────────────┐
+│ block │ stream_seq │   note    │ superseded_by │
+├───────┼────────────┼───────────┼───────────────┤
+│ 4099  │ 99         │ untouched │ NULL          │
+│ 4100  │ 100        │ old       │ 0xaa          │
+│ 4101  │ 101        │ old       │ 0xaa          │
+│ 4100  │ 151        │ new       │ NULL          │
+│ 4101  │ 152        │ new       │ NULL          │
+└───────┴────────────┴───────────┴───────────────┘
+```
+
+The SQL lives beside the implementation as `reorg::AS_SQL`, with a test
+asserting it states both clauses — a second implementation of a rule does not
+fail when it drifts, it disagrees.
+
+### Derived, never a column
+
+A `superseded` column would have to be written by editing rows already durable,
+which this store does not do. Deriving costs nothing: `kind=reorgs` is the
+smallest dataset in the tree.
+
+It is also **honest about time**. A row is superseded *as of the
+reorganisations known so far*. A stored column reads as a permanent property;
+a derived one reads as what it is.
+
+### Found while writing the consumer
+
+**A tape that has never reorganised has no `kind=reorgs` partition, and the
+bounded view refuses a scope with no frontier** — correctly, since it will not
+invent one. So the join's first act is to check whether that directory exists
+at all, and say *this venue has never recorded a reorganisation* rather than
+printing a zero. Run against the live capture:
+
+```
+0 reorganisation(s) in the window
+transfers: 22946 rows
+nothing to join — this venue has never recorded a reorganisation
+```
+
+Which is the right answer, and not the same as *every row is confirmed*. A row
+no reorganisation contradicts is only one no **known** reorganisation
+contradicts, and the trail sees only the blocks capture actually asked for.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

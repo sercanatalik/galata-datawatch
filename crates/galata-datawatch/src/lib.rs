@@ -30,6 +30,7 @@ pub mod config;
 pub mod ingest;
 pub mod normalise;
 pub mod record;
+pub mod reorg;
 pub mod replay;
 pub mod retain;
 pub mod sink;

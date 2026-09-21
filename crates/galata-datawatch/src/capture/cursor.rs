@@ -42,16 +42,42 @@ pub struct Pass {
     pub failed: u32,
     /// Reorganisations published.
     pub reorgs: u32,
+    /// Where the cursor was moved back to, where a reorganisation moved it.
+    ///
+    /// **The re-read is bounded by the trail's depth**, which is bounded by
+    /// finality — 11,678 blocks on this chain, or about twelve thousand-block
+    /// ranges at worst. Reported rather than capped: a cap would silently
+    /// leave part of a replaced range unread, which is the failure this whole
+    /// rewind exists to prevent.
+    pub rewound: Option<u64>,
 }
 
 impl Pass {
     /// A line an operator can act on.
     pub fn report(&self) -> String {
+        let rewound = match self.rewound {
+            Some(block) => format!(", rewound to {block}"),
+            None => String::new(),
+        };
         format!(
-            "{} blocks in {} requests ({} failed, {} reorgs)",
+            "{} blocks in {} requests ({} failed, {} reorgs{rewound})",
             self.blocks, self.requests, self.failed, self.reorgs
         )
     }
+}
+
+/// Where the cursor goes when a reorganisation replaced blocks from
+/// `from_block` onwards.
+///
+/// The block **before** the divergence, because the cursor names the last block
+/// read and the next pass plans from `cursor + 1`.
+///
+/// **A cursor only ever moves backward here.** The trail is bounded by
+/// finality, so a reorganisation ahead of the cursor cannot happen — and this
+/// does not depend on that being true.
+fn rewind_to(cursor: Option<u64>, from_block: u64) -> u64 {
+    let target = from_block.saturating_sub(1);
+    cursor.map_or(target, |c| c.min(target))
 }
 
 impl Capture {
@@ -221,8 +247,26 @@ impl Capture {
             match client.header_at(step.to).await {
                 Ok(header) => {
                     pass.requests += 1;
-                    if let Some(reorg) = self.advance_trail(trail, &header, venue) {
-                        pass.reorgs += reorg;
+                    if let Some(from_block) = self.advance_trail(trail, &header, venue) {
+                        pass.reorgs += 1;
+                        // **Rewind to the divergence and stop this pass.**
+                        //
+                        // Publishing the reorganisation and advancing past it
+                        // leaves the record holding the old chain's rows for
+                        // those blocks with nothing that replaces them. The
+                        // replacement rows enter with a HIGHER stream sequence,
+                        // which is what `crate::reorg` uses to tell them apart.
+                        //
+                        // `min` because a cursor only ever moves backward here:
+                        // the trail is bounded by finality so a reorganisation
+                        // ahead of the cursor cannot happen, and this does not
+                        // depend on that being true.
+                        let rewound = rewind_to(*cursor, from_block);
+                        *cursor = Some(rewound);
+                        // The break matters: falling through would set the
+                        // cursor to `step.to` below and undo the rewind.
+                        pass.rewound = Some(rewound);
+                        break;
                     }
                 }
                 Err(error) => {
@@ -265,13 +309,14 @@ impl Capture {
         Ok(())
     }
 
-    /// Advance the trail, publishing a reorganisation if the chain disagrees.
+    /// Advance the trail, publishing a reorganisation if the chain disagrees,
+    /// and returning **the first block it replaced** so the caller can rewind.
     fn advance_trail(
         &mut self,
         trail: &mut BlockTrail,
         header: &Header,
         venue: &Venue,
-    ) -> Option<u32> {
+    ) -> Option<u64> {
         match trail.advance(&header.seen()) {
             Advance::Extended | Advance::NotLinked => None,
             Advance::Reorganised(reorg) => {
@@ -299,11 +344,58 @@ impl Capture {
                         new_hash: reorg.new_hash,
                     }),
                 );
+                let from_block = reorg.from_block;
                 if let Err(error) = self.record_generated_event(venue.as_str(), envelope) {
                     tracing::warn!(%error, "a reorganisation could not be recorded; it is still a fact");
                 }
-                Some(1)
+                Some(from_block)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rewind_lands_before_the_divergence() {
+        // The cursor names the last block READ, and the next pass plans from
+        // `cursor + 1` — so landing on `from_block` itself would skip it.
+        assert_eq!(rewind_to(Some(5_000), 4_100), 4_099);
+    }
+
+    #[test]
+    fn a_rewind_never_moves_the_cursor_forward() {
+        // A reorganisation ahead of the cursor cannot happen, because the trail
+        // is bounded by finality. This does not depend on that being true.
+        assert_eq!(rewind_to(Some(100), 4_100), 100);
+    }
+
+    #[test]
+    fn a_reorganisation_at_genesis_does_not_underflow() {
+        assert_eq!(rewind_to(Some(10), 0), 0);
+        assert_eq!(rewind_to(None, 0), 0);
+    }
+
+    #[test]
+    fn a_pass_that_rewound_says_so() {
+        // An operator reading one line needs to know the cursor went backwards;
+        // a block count that fell is otherwise indistinguishable from a quiet
+        // chain.
+        let pass = Pass {
+            blocks: 40,
+            requests: 3,
+            failed: 0,
+            reorgs: 1,
+            rewound: Some(4_099),
+        };
+        assert!(pass.report().contains("1 reorgs"), "{}", pass.report());
+        assert!(
+            pass.report().contains("rewound to 4099"),
+            "{}",
+            pass.report()
+        );
+        assert!(!Pass::default().report().contains("rewound"));
     }
 }

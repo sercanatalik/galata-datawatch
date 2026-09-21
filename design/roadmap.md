@@ -368,8 +368,11 @@ source before it existed turned out to buy more than tidy refusals.
   URL and withholds a held one; `without_url()` at construction closed five
   sites that would have logged a key. Measured: reqwest's `Display` carries
   the whole URL, path and query.
-- **Reorg rows are not yet joined to what they contradict** — both facts are
-  recorded, and no consumer reads them together because there is no consumer.
+- ~~**Reorg rows are not yet joined to what they contradict.**~~ **Done**, and
+  it needed the cursor to rewind first: without that, the replaced blocks had
+  no replacement and the join had nothing to distinguish. `crate::reorg` tests
+  block range **and** stream sequence, because after a rewind the same blocks
+  appear twice. Derived, never a column — the archive is append-only.
 
 > **Exit, met:** 47,311 transfers across 32,000 blocks and 36,204 transactions,
 > rebuilt with 0 unparsed and **0 invented venue times**.
