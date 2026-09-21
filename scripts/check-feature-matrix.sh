@@ -16,7 +16,12 @@
 # on its own is a venue the README's `cargo add --features <venue>` line cannot
 # actually deliver.
 #
-# Only the library is built, and only `cargo check`: this runs on every
+# Measured 2026-09-21, warm: the nine original combinations take 6.9s and the
+# five added ones 0.9s. On a cold runner the `--all-targets` run is the expensive
+# one, because it is the first thing in the gate to compile the examples and the
+# test targets at all — a cost the gate had never paid, not one this invents.
+#
+# Mostly the library is built, and only `cargo check`: this runs on every
 # `check-all` and the point is the type check, not a linked binary.
 #
 # Usage: check-feature-matrix.sh [check|plant] [root]
@@ -45,8 +50,14 @@ PLANTPY
     exit 0
 fi
 
-# The combinations worth holding: each venue alone, each venue with the
-# runtime, the runtime with no venue, and nothing at all.
+# The combinations worth holding: each venue alone, each venue with the runtime,
+# the runtime with no venue, the BINARY feature with and without each venue, and
+# nothing at all.
+#
+# `bin` was missing until 2026-09-21, and its absence is why this guard was green
+# while `cargo build -p galata-datawatch` — no flags at all — did not compile. The
+# cursor branch called a method behind `rh-chain`, which is not a default feature.
+# `bin` alone is the shape that defect had: the runtime and the wiring, no venue.
 COMBINATIONS=(
     ""
     "capture"
@@ -57,15 +68,34 @@ COMBINATIONS=(
     "capture,rh-chain"
     "capture,rh-crypto"
     "hyperliquid,rh-chain,rh-crypto"
+    "bin"
+    "bin,hyperliquid"
+    "bin,rh-chain"
+    "bin,rh-crypto"
 )
 
+# The one combination checked with EVERY target. The five binaries, the eleven
+# examples and the test targets are compiled here and nowhere else in the gate.
+#
+# Only here, and not under the narrow combinations, because the examples import
+# `adapters::hyperliquid`, `rh_chain` and `rh_crypto` directly: `--all-targets`
+# against a single-venue feature set fails on the examples' own imports rather
+# than on anything about the crate's feature graph, and a guard that fails for a
+# reason it is not about is a guard people learn to override.
+ALL_TARGETS_COMBINATION="bin,hyperliquid,rh-chain,rh-crypto"
+
 failed=0
-for features in "${COMBINATIONS[@]}"; do
-    args=(check --quiet -p galata-datawatch --lib --no-default-features)
+for features in "${COMBINATIONS[@]}" "$ALL_TARGETS_COMBINATION"; do
+    if [[ "$features" == "$ALL_TARGETS_COMBINATION" ]]; then
+        scope=(--all-targets)
+    else
+        scope=(--lib)
+    fi
+    args=(check --quiet -p galata-datawatch "${scope[@]}" --no-default-features)
     [[ -n "$features" ]] && args+=(--features "$features")
     if ! output=$(cd "$ROOT" && cargo "${args[@]}" 2>&1); then
         label="${features:-<none>}"
-        echo "check-feature-matrix: galata-datawatch does not build with features: $label" >&2
+        echo "check-feature-matrix: galata-datawatch does not build with features: $label (${scope[*]})" >&2
         echo "$output" | grep -E "^error" | head -3 | sed 's/^/  /' >&2
         failed=1
     fi

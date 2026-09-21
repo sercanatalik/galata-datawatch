@@ -216,6 +216,21 @@ prove "check-feature-matrix (a venue-less build stops compiling)" \
       ./scripts/check-feature-matrix.sh \
       crates/galata-datawatch/src/adapters/mod.rs own
 
+# The SECOND plant, and it is the defect this guard was widened for: the cursor
+# branch called a method behind `rh-chain` with no gate, and `cargo build` with
+# no flags did not compile while this guard was green. `cfg(all())` is always
+# true, so the branch compiles unconditionally while BLOCKS_PER_DAY beside it
+# stays gated — which is exactly how it failed.
+#
+# `replace` takes the FIRST occurrence, which is the cursor branch. If that ever
+# stops being first the plant lands on the constant instead, the guard stays
+# green, and `prove` says so loudly rather than passing.
+prove "check-feature-matrix (the cursor branch loses its feature gate)" \
+      ./scripts/check-feature-matrix.sh \
+      crates/galata-datawatch/src/boot.rs \
+      replace '#[cfg(feature = "rh-chain")]' \
+      '#[cfg(all())]'
+
 # A publishable crate must say how docs.rs builds it. REPLACE, not append:
 # appending lands in whatever table came last, which is not [package].
 prove "check-release-hygiene (no docs.rs metadata)" \
