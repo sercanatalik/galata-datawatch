@@ -2239,6 +2239,38 @@ The cursor's *do not advance past a failure* rule was correct and **incomplete**
 A loop that cannot tell those apart either loses data or stops, and this one
 stopped, which is the better of the two and still not right.
 
+## Compaction is transparent to a rebuild — 2026-09-21
+
+The compaction fix above was proved by unit tests on a constructed case. This
+is the same code over the soak's real archive.
+
+Two identical snapshots of it. One compacted, one left alone, then both
+rebuilt over the same window:
+
+```
+  compaction        3,403 segments -> 8
+  archive rows      86,384 -> 86,384          nothing lost
+  rebuild from A    86,379 payloads -> 151,819 rows, 15 segments, 0 unparsed
+  rebuild from B    86,379 payloads -> 151,819 rows, 15 segments, 0 unparsed
+  all 15 tape segments                        BYTE-IDENTICAL
+```
+
+**A tape built from a compacted archive is bit-for-bit the tape built from the
+uncompacted one.** That is the property worth having: compaction is a storage
+decision, and a storage decision that changed what a reader sees would not be
+one.
+
+### The soak did not reproduce the bug, and that is worth saying
+
+The archive it produced holds **zero** partitions with two segments sharing a
+time range, so the row-destroying case never arose here. It needs events
+*generated* in one flush — the gap path writes a batch that shares a
+microsecond — and this soak had no gaps.
+
+So the real archive validates the fix without exercising the defect. **A clean
+run over real data is not evidence that a bug is absent**, only that this run
+did not meet it, and the unit tests are what hold that one.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
