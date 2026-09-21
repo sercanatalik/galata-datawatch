@@ -15,7 +15,7 @@ use arrow::array::{Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use galata_datawatch::calendar::midnight_of;
 use galata_datawatch::reorg::{self, Reorganised, Row, Standing};
-use galata_datawatch::tape::{Reader, Window};
+use galata_datawatch::tape::{self, Reader, Window};
 use galata_wire::Kind;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,9 +29,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // **A tape with no `kind=reorgs` at all is the ordinary case**, and it is
     // not an error: a chain that has not reorganised since capture began has
-    // no such partition, and the bounded view refuses a scope with no frontier
-    // rather than inventing one. So the scope is included only if it exists.
-    let ever_reorganised = std::path::Path::new(&root).join("kind=reorgs").is_dir();
+    // written nothing there, and the bounded view refuses a scope with no
+    // frontier rather than inventing one.
+    //
+    // **Asked of the store, not of the filesystem.** This used to stat the
+    // directory, which reimplemented a rule the store owns — and got it
+    // subtly wrong, because a partition can exist and hold nothing.
+    let declared = [kind_scope(kind), "kind=reorgs"];
+    let ever_reorganised = !tape::unwritten(std::path::Path::new(&root), &declared)
+        .iter()
+        .any(|scope| scope == "kind=reorgs");
     let mut scopes = vec![kind_scope(kind)];
     if ever_reorganised {
         scopes.push("kind=reorgs");

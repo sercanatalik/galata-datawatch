@@ -58,14 +58,20 @@ use galata_wire::Kind;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReadError {
-    /// A declared scope has written nothing.
+    /// One or more declared scopes have written nothing.
     #[error(
-        "scope `{scope}` has written nothing, so this root has no bound. A view taken without it \
-         would be complete for the other scopes and silently holed for this one"
+        "{} of the declared scopes have written nothing, so this root has no bound: {}. A view \
+         taken without them would be complete for the other scopes and silently holed for these",
+        scopes.len(),
+        scopes.join(", ")
     )]
     NoFrontier {
-        /// Which scope.
-        scope: String,
+        /// **All** of them, not the first one found.
+        ///
+        /// Naming one at a time makes a misconfiguration take as many runs to
+        /// discover as there are scopes wrong in it: fix, re-run, meet the
+        /// next. The listing costs one pass either way.
+        scopes: Vec<String>,
     },
     /// Nothing was declared.
     #[error(
@@ -119,12 +125,9 @@ impl Bound {
         if scopes.is_empty() {
             return Err(ReadError::NoScopes);
         }
-        for scope in scopes {
-            if galata_segments::last_durable_for_scope(root, scope).is_none() {
-                return Err(ReadError::NoFrontier {
-                    scope: (*scope).to_string(),
-                });
-            }
+        let unwritten = unwritten(root, scopes);
+        if !unwritten.is_empty() {
+            return Err(ReadError::NoFrontier { scopes: unwritten });
         }
         let (_, position) =
             galata_segments::frontier(root, scopes).ok_or(ReadError::Incomparable)?;
@@ -132,6 +135,28 @@ impl Bound {
             position: i64::try_from(position).map_err(|_| ReadError::Incomparable)?,
         })
     }
+}
+
+/// The declared scopes that have written nothing.
+///
+/// **Exposed because *nothing has happened yet* and *this scope is missing
+/// while the others are live* are different facts**, and only the caller knows
+/// which one matters to it. [`Bound::of`] refuses either way — that is the
+/// right rule for a bound, since excluding a scope would narrow the window
+/// silently and a misconfigured venue would look exactly like a quiet one —
+/// but a caller deciding whether to take a view **at all** needs to tell them
+/// apart first.
+///
+/// Without this a caller reaches for the filesystem, which is how the
+/// `superseded` example began: it stated a directory to find out whether a
+/// venue had ever recorded a reorganisation, reimplementing a rule the store
+/// owns.
+pub fn unwritten(root: &Path, scopes: &[&str]) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| galata_segments::last_durable_for_scope(root, scope).is_none())
+        .map(|scope| (*scope).to_string())
+        .collect()
 }
 
 /// A window a caller wants to see.
@@ -359,6 +384,36 @@ mod tests {
         assert!(matches!(error, ReadError::NoFrontier { .. }), "{error}");
         assert!(error.to_string().contains("kind=trades"), "{error}");
         assert!(error.to_string().contains("silently holed"), "{error}");
+    }
+
+    #[test]
+    fn the_refusal_names_every_unwritten_scope_not_the_first() {
+        // **Naming one at a time makes a misconfiguration take as many runs to
+        // discover as there are scopes wrong in it**: fix, re-run, meet the
+        // next. The listing costs one pass either way.
+        let dir = tape_with(vec![row(1, "hyperliquid", Some(100 * DAY))]);
+        let declared = ["kind=quotes", "kind=trades", "kind=funding", "kind=candles"];
+        let error = Reader::open(dir.path(), &declared).unwrap_err();
+        let said = error.to_string();
+        for missing in ["kind=trades", "kind=funding", "kind=candles"] {
+            assert!(said.contains(missing), "{said}");
+        }
+        assert!(said.contains("3 of the declared scopes"), "{said}");
+    }
+
+    #[test]
+    fn what_has_written_nothing_can_be_asked_before_a_view_is_taken() {
+        // *Nothing has happened yet* and *this scope is missing while the
+        // others are live* are different facts, and only the caller knows
+        // which matters. Without this a caller reaches for the filesystem and
+        // reimplements a rule the store owns.
+        let dir = tape_with(vec![row(1, "hyperliquid", Some(100 * DAY))]);
+        assert_eq!(
+            unwritten(dir.path(), &["kind=quotes", "kind=trades"]),
+            vec!["kind=trades".to_string()]
+        );
+        // The written one is not named, and a fully written set is empty.
+        assert!(unwritten(dir.path(), &["kind=quotes"]).is_empty());
     }
 
     #[test]

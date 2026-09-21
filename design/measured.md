@@ -2335,6 +2335,48 @@ A fresh install is a one-time failure that says exactly what to do. A typo is
 silent for months. **Nothing can tell them apart from the outside**, so the
 noisy reading is the right one.
 
+## A refusal that names one thing at a time — 2026-09-21
+
+The legacy review again, in the reader. Legacy carried `unwritten_scopes`,
+*exposed because nothing has happened yet and this venue is missing while the
+others are live are different facts, and only the caller knows which one
+matters to it.*
+
+The **rule** it supports is carried here and is right: a declared scope that
+has written nothing means no bound, not *ignore that one* — which is the
+silently-holed read arrived at by a different route. Two things around it were
+not.
+
+### The refusal named only the first
+
+`Bound::of` returned on the first unwritten scope it found. A caller with three
+misconfigured scopes fixes one, re-runs, meets the next, and repeats — and
+determining the full set costs one pass over the listing either way. It now
+names all of them.
+
+### And a caller could not ask before opening
+
+Without a way to distinguish *nothing has happened yet* from *this one is
+missing while the others are live*, a caller reaches for the filesystem.
+
+**This tree had already done it.** The `superseded` example stats a directory
+to decide whether a venue ever recorded a reorganisation:
+
+```rust
+  let ever_reorganised = Path::new(&root).join("kind=reorgs").is_dir();
+```
+
+That reimplements a rule the store owns, and gets it subtly wrong: **a
+partition can exist and hold nothing**, so a directory left behind by a
+rebuild that wrote no rows would read as *this venue has reorganised*. The
+example now asks `tape::unwritten` and gives the same answer for the right
+reason.
+
+The gap was visible in this tree's own code and I wrote that line myself. A
+missing query does not announce itself — it shows up as a caller doing the
+store's job badly, which reads as ordinary code until something names the
+query it should have been.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
