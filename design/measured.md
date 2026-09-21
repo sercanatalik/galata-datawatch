@@ -2975,6 +2975,48 @@ guard most machines skip.
 Zero warnings across the workspace, and the guard was watched going red on a
 link to something that does not exist.
 
+## The handover fix, across three rotations — 2026-09-21
+
+The defect was measured over **three** rotations and the fix validated on
+**one**. That asymmetry is not a detail: a single clean handover is also what a
+quiet minute looks like.
+
+A 26-minute run, three handovers, zero warnings, 3,088 segments. The handovers
+landed at 8.00, 16.00 and 24.01 minutes — and the largest gap within three
+seconds of each:
+
+| handover | before the fix | after |
+|---|---|---|
+| 1 — 8.00 min | 935 ms | **521 ms** |
+| 2 — 16.00 min | 765 ms | **469 ms** |
+| 3 — 24.01 min | 1,292 ms | **635 ms** |
+
+### Against what?
+
+The run's own gap distribution, over 60,923 intervals:
+
+```text
+  median      0 ms      quotes arrive in bursts
+  p99       242 ms
+  p99.9     545 ms
+  max     1,762 ms      at 7.64 minutes — a quiet market, not a handover
+```
+
+**All three handover gaps sit at p99.9.** Two below it, one just above. Before
+the fix they were 1.7×, 1.4× and 2.4× that figure, and each was the largest gap
+in its neighbourhood by a clear margin.
+
+The handover is no longer distinguishable from the market being quiet, which is
+the strongest form the claim can take: not *smaller*, but *not findable*.
+
+### Why bother, having already tested one
+
+Because one measurement of a periodic effect cannot tell a fix from a lucky
+sample, and the original defect was periodic. The comparison only means
+anything because both sides used the same query over the same shape of run —
+which is also why the before-figures were worth keeping rather than
+summarising.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
