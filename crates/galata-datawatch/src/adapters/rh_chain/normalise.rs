@@ -60,6 +60,7 @@ pub fn read(
                 // is not custody moving between holders.
                 let event = if transfer.is_supply() {
                     Event::Mint(Mint {
+                        block: transfer.block,
                         holder: if transfer.is_issue() {
                             transfer.to.clone()
                         } else {
@@ -72,6 +73,7 @@ pub fn read(
                     })
                 } else {
                     Event::Transfer(WireTransfer {
+                        block: transfer.block,
                         from: transfer.from.clone(),
                         to: transfer.to.clone(),
                         amount: transfer.amount,
@@ -247,9 +249,33 @@ mod tests {
     }
 
     #[test]
-    fn a_venue_time_the_chain_did_not_state_stays_absent() {
+    fn a_row_states_its_block_and_invents_no_time() {
+        // A getLogs response holds logs from MANY blocks and does not carry
+        // their timestamps; learning them costs a call per block. Stamping the
+        // range's last timestamp onto every row would be plausible and wrong.
+        //
+        // So: the time is absent and the block is present, which makes the time
+        // recoverable rather than guessed.
         let read = read(&venue(), &response(), &tickers(), &decimals(), 100, None);
-        assert!(read.events[0].at_micros.is_none());
-        assert_eq!(read.events[0].recv_micros, 100);
+        assert!(
+            read.events.iter().all(|e| e.at_micros.is_none()),
+            "a venue time was invented"
+        );
+        assert_eq!(read.events[0].recv_micros, 100, "our clock is still ours");
+
+        let blocks: Vec<u64> = read
+            .events
+            .iter()
+            .map(|e| match &e.event {
+                Event::Mint(m) => m.block,
+                Event::Transfer(t) => t.block,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![0x4176ed2, 0x4176ed2],
+            "the block is recoverable"
+        );
     }
 }

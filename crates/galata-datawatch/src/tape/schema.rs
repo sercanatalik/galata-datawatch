@@ -134,6 +134,10 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
         // Value moving between addresses. **Not a trade**: it proves custody
         // moved, not that anything was bought.
         Kind::Transfers => with(vec![
+            // **Present because `at_micros` is not.** A chain range fetch
+            // cannot know per-block times without a call per block, so the
+            // block number is what makes the time recoverable.
+            Field::new("block", DataType::UInt64, false),
             Field::new("from_address", DataType::Utf8, false),
             Field::new("to_address", DataType::Utf8, false),
             Field::new("amount", PRICE, false),
@@ -144,6 +148,7 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
         ]),
 
         Kind::Mints => with(vec![
+            Field::new("block", DataType::UInt64, false),
             Field::new("holder", DataType::Utf8, false),
             Field::new("amount", PRICE, false),
             // Issuance, or redemption.

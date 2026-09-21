@@ -318,6 +318,14 @@ pub struct Quote {
 /// classifies conservatively and this type does not pretend otherwise.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Transfer {
+    /// Which block it was in.
+    ///
+    /// **Here because `at_micros` cannot be.** A range fetch returns logs from
+    /// many blocks and their timestamps are not in the response; learning them
+    /// costs a call per block. So the venue time is absent and the block number
+    /// is present, which makes the time **recoverable** rather than guessed —
+    /// and a guessed time that looks plausible is worse than an absent one.
+    pub block: u64,
     /// The sending address.
     pub from: String,
     /// The receiving address.
@@ -335,6 +343,8 @@ pub struct Transfer {
 /// Issuance or redemption: a transfer from or to the zero address.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mint {
+    /// Which block it was in. See [`Transfer::block`].
+    pub block: u64,
     /// The address receiving issuance, or surrendering on a redemption.
     pub holder: String,
     /// How much.

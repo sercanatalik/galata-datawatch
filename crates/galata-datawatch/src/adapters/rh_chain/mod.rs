@@ -10,6 +10,9 @@
 //!    four distinct timestamps. See [`crate::source::cursor`].
 //! 2. **There are two frontiers.** What arrived, and what cannot be taken back.
 
+/// **Behind the `capture` feature**: it makes requests.
+#[cfg(feature = "capture")]
+pub mod client;
 pub mod normalise;
 pub mod trail;
 pub mod wire;

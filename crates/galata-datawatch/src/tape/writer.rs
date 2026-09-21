@@ -338,6 +338,9 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(dec(rows, |e| quote(e).and_then(|q| q.ask_spread))?);
         }
         Kind::Transfers => {
+            columns.push(u64s(rows, |r| {
+                transfer(&r.envelope).map(|t| t.block).unwrap_or(0)
+            }));
             columns.push(text(rows, |e| transfer(e).map(|t| t.from.clone())));
             columns.push(text(rows, |e| transfer(e).map(|t| t.to.clone())));
             columns.push(dec(rows, |e| transfer(e).map(|t| t.amount))?);
@@ -345,6 +348,9 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(u32s(rows, |e| transfer(e).map(|t| t.log_index)));
         }
         Kind::Mints => {
+            columns.push(u64s(rows, |r| {
+                mint(&r.envelope).map(|m| m.block).unwrap_or(0)
+            }));
             columns.push(text(rows, |e| mint(e).map(|m| m.holder.clone())));
             columns.push(dec(rows, |e| mint(e).map(|m| m.amount))?);
             columns.push(flag(rows, |e| mint(e).is_some_and(|m| m.is_issue)));
