@@ -3017,6 +3017,57 @@ anything because both sides used the same query over the same shape of run —
 which is also why the before-figures were worth keeping rather than
 summarising.
 
+## What a publish would ship, and in what order — 2026-09-21
+
+Publishing is postponed, which makes this the right moment: everything below
+is checkable **before** the irreversible step, and useless after it.
+
+### Two crates can be verified today, two cannot
+
+```text
+  galata-wire        no internal dependencies    packages and builds
+  galata-segments    no internal dependencies    packages
+  galata-broker      needs wire                  cannot package yet
+  galata-datawatch   needs wire, segments, broker    cannot package yet
+```
+
+```text
+  error: failed to prepare local package for uploading
+  Caused by: no matching package named `galata-wire` found
+```
+
+**Correct, not a defect.** `cargo package` resolves dependencies from the
+registry, and two of these are not on it. What it means is that **the publish
+order is forced**, and getting it wrong fails partway through a sequence that
+cannot be undone. That order was nowhere written down; it is now in the README.
+
+### `--list` checks what `package` cannot
+
+`cargo package --list` does not resolve dependencies, so it works for all four
+— which makes *what would ship* holdable even for the crates that cannot yet be
+built from a tarball.
+
+`check-package.sh` holds three rules, each watched failing:
+
+| rule | why |
+|---|---|
+| every crate declares `include` | without it cargo ships the directory minus gitignores — and **this tree's default archive root is `var/`**, which holds captured market data |
+| the tarball carries its licence, README and source | `include` is a **whitelist**: a typo drops a file silently and the crate still publishes, just without its licence |
+| nothing from `var/`, `target/` or a dotfile | the deny side, checked against the real file list rather than the whitelist's intent |
+
+All four pass today. The first rule is the one with teeth: a crate that lost
+its `include` line would publish somebody's order flow, permanently, and
+nothing else in the tree would notice.
+
+### And the plant is the point
+
+The guard's plant removes `"/LICENSE-MIT"` from one `include` list. The crate
+still builds. It still passes every other check. It still publishes — without
+the licence it claims in its own manifest.
+
+That is the shape of every publish defect worth guarding: **not something that
+breaks, something that succeeds while being wrong.**
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

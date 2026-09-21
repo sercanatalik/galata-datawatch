@@ -106,6 +106,42 @@ above cannot disagree. Everything after the dependency fetch runs `--offline`:
 the workspace is provable without a network, and an accidental network
 dependency should fail rather than succeed quietly.
 
+## Publishing
+
+Not published yet. When it is, **the order is forced by the dependency graph**
+and getting it wrong fails partway through a sequence that cannot be undone —
+a crates.io version is permanent.
+
+```text
+  galata-wire        no internal dependencies   ─┐
+  galata-segments    no internal dependencies   ─┴─ either order
+  galata-broker      needs wire
+  galata-datawatch   needs wire, segments, broker
+```
+
+`cargo package` on `galata-broker` or `galata-datawatch` **fails today**, and
+correctly so — it cannot resolve a dependency that is not on the registry:
+
+```text
+  error: failed to prepare local package for uploading
+  Caused by: no matching package named `galata-wire` found
+```
+
+So the first two are the only ones that can be fully verified before any
+publish happens, and they are:
+
+```sh
+cargo package -p galata-wire      # packages and builds from the tarball
+cargo package -p galata-segments
+```
+
+`scripts/check-package.sh` checks all four anyway, using `cargo package
+--list`, which does not resolve dependencies — so what each crate *would* ship
+is held even for the two that cannot yet be built from a tarball.
+
+Allow a moment between publishes: the registry index needs to carry a crate
+before the next one can resolve it.
+
 ## Licence
 
 MIT. See [LICENSE-MIT](./LICENSE-MIT).

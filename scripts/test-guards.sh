@@ -162,6 +162,12 @@ prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
 
+# What a publish would actually ship. Plants for itself: it drops the licence
+# from the include whitelist, which still builds and still publishes.
+prove "check-package (a crate that would ship without its licence)" \
+      ./scripts/check-package.sh \
+      crates/galata-wire/Cargo.toml own
+
 # The documentation builds clean. Plants for itself: it must insert before the
 # tests, and an appended broken link would land in a region cargo doc still
 # reads — but the plant belongs beside the rule either way.
