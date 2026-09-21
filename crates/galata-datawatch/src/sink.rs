@@ -184,18 +184,37 @@ impl Sink for NullSink {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testing {
+/// Sinks for testing an adapter — **including one written out of tree**.
+///
+/// Behind the `testing` feature rather than `#[cfg(test)]`, because
+/// `#[cfg(test)]` is invisible outside this crate: an adapter author writing
+/// their own venue had **no test sink at all** and would have had to write one
+/// to exercise the one path.
+///
+/// Found by `tests/out_of_tree_venue.rs`, which is compiled as its own crate
+/// and therefore sees exactly what a stranger sees. That is what the test is
+/// for, and it found this on its first run.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
     use super::*;
     use std::sync::Mutex;
 
     /// A sink that remembers what it was given.
+    ///
+    /// What an adapter is tested against: hand it to
+    /// [`ingest`](crate::ingest::ingest) and assert on what came out, rather
+    /// than on what the adapter returned — which checks the *path* as well as
+    /// the normaliser.
     #[derive(Debug, Default)]
     pub struct RecordingSink {
         emitted: Mutex<Vec<Envelope>>,
     }
 
     impl RecordingSink {
+        /// Everything emitted so far, in order.
+        ///
+        /// Cloned rather than drained, so a test may assert about it more than
+        /// once without the second assertion seeing an empty list.
         pub fn emitted(&self) -> Vec<Envelope> {
             self.emitted.lock().expect("not poisoned").clone()
         }
@@ -211,8 +230,12 @@ pub(crate) mod testing {
         }
     }
 
-    /// A sink that refuses everything, for asserting that the record does not
-    /// depend on it.
+    /// A sink that refuses everything.
+    ///
+    /// For asserting the property the whole design rests on: **the record does
+    /// not depend on the broker.** Ingest through this and the payload is still
+    /// archived, which is what makes running with no broker a supported state
+    /// rather than a degraded one.
     #[derive(Debug, Default, Clone, Copy)]
     pub struct RefusingSink;
 

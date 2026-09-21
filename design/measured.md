@@ -1176,6 +1176,68 @@ Two stores, two shapes, two rules, and one of them was applied to the other.
 The test that now pins it writes two segments at the same instant and asserts
 silence.
 
+## "Add a venue later" — checked, and it was not quite true — 2026-09-21
+
+Tier 10 says the `Adapter` seam is an out-of-tree extension point, *"which is
+what makes 'add a venue later' true rather than true-if-you-fork."*
+
+That is a **claim about somebody else's repository**, and every adapter in this
+tree lives *inside* the crate, where `pub(crate)` is reachable and nobody would
+notice. So it was written as a test instead: a fictional venue in `tests/`,
+which cargo compiles as **its own crate** and which therefore sees exactly what
+a stranger sees.
+
+**It failed on the first run**, and the failure was the point:
+
+```
+  error[E0432]: unresolved import `galata_datawatch::sink::testing`
+  note: found an item that was configured out
+```
+
+`RecordingSink` was `#[cfg(test)]`. An adapter author writing their own venue
+had **no test sink at all** — they would have had to write one to exercise the
+one path their adapter has to cross. The claim was true for compiling and false
+for *testing what you compiled*, which is the half that matters.
+
+It is now behind a `testing` feature: available to a stranger, absent from a
+production build. Three tests pass — the venue compiles from the public API
+alone, reaches `ingest`, and boxes as the `dyn Adapter` the loop holds.
+
+### And the fix broke the third wall, which said so immediately
+
+Reaching the feature from `tests/` needs the crate to depend on **itself** with
+`testing` on. Written the obvious way, that dev-dependency carries **default
+features** — so a `--no-default-features` build got the transport back through
+its own test dependency, and `check-no-transport.sh` went red:
+
+```
+  check-no-transport: with capture off, these link anyway:
+    tokio  reqwest  rustls  hyper  tungstenite
+```
+
+`default-features = false` on the self-dependency fixes it. Worth recording
+because the guard was written to catch *a module forgetting its `cfg`* and what
+it actually caught, twice now, was something subtler: first a module in the
+wrong layer, now a dependency edge that goes in a circle.
+
+## The publishing order, from the dry runs
+
+```
+  galata-wire       dry-run CLEAN
+  galata-segments   dry-run CLEAN
+  galata-broker     cannot verify — galata-wire is not on crates.io
+  galata-datawatch  cannot verify — galata-broker is not on crates.io
+```
+
+The last two are **lockstep ordering, not a defect**: `cargo publish` verifies
+against the index, and the index has neither of the first two yet. Nothing can
+be done about it except publish in order, and that is a decision for whoever's
+name is on the registry account — publishing is irreversible and outward-facing.
+
+The roadmap's suggestion that `galata-segments` could go **early** is supported
+by this: it is standalone, it dry-runs clean today, and real users would find
+the cursor API's rough edges while the version still costs nothing to change.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

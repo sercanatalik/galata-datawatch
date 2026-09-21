@@ -74,6 +74,11 @@ hyperliquid = []
 # so a tape reader links neither: a signature is a pure function, but it is a
 # pure function nothing reading parquet has any use for.
 rh-crypto = ["dep:ed25519-dalek", "dep:base64"]
+# **Test helpers for somebody else's adapter.** A venue written out of tree
+# needs a sink to exercise the one path against, and #[cfg(test)] is invisible
+# outside this crate — so it had none. Not a default: a production build should
+# not carry a recording sink.
+testing = []
 # The binary, and the log formatter only it needs. A library consumer taking
 # `default-features = false` gets the capture machinery without a subscriber
 # they will replace anyway.
@@ -101,7 +106,17 @@ required-features = ["bin"]
 name = "galata-compact"
 required-features = ["bin"]
 
+# The out-of-tree venue test needs the helpers it is checking the visibility of.
 [dev-dependencies]
+# The crate depends on itself with `testing` on, so `tests/` sees the helpers a
+# stranger would enable. Without this the out-of-tree venue test cannot compile,
+# which is exactly the gap it was written to find.
+#
+# **`default-features = false` is load-bearing.** A self dev-dependency carrying
+# defaults re-enables the transport in a `--no-default-features` build, which
+# defeats the third wall entirely — `check-no-transport.sh` caught exactly that
+# the first time this line was written without it.
+galata-datawatch = { path = ".", default-features = false, features = ["testing"] }
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
 tempfile = "3"
 

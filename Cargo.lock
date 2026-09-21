@@ -933,6 +933,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "futures-util",
  "galata-broker",
+ "galata-datawatch",
  "galata-segments",
  "galata-wire",
  "jiff",
