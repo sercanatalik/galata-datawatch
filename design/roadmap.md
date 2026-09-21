@@ -366,20 +366,37 @@ source before it existed turned out to buy more than tidy refusals.
 
 ## Tier 8 — rh-crypto
 
-*The cheapest possible proof of `Source::Poll`.*
+*The signing and the poll semantics are done. **The live endpoint has not been
+called**, and that is stated rather than implied.*
 
-- Ed25519 request signing over key + timestamp + path + method + body. The clock
-  discipline acquires a correctness consequence: skew is a 401.
-- Two endpoints, no history at all: `best_bid_ask` (repeated `?symbol=`, so all
-  symbols in one request) and `estimated_price`.
-- **Poll at 5 s**, ~12 requests/minute against an undocumented budget community
-  -reported near 100/min. **Archive every poll**; collapsing identical states is
-  the tape projection's job.
-- Adaptive backoff on 429, because the venue states its limits *fluctuate*.
-- `GapCause::{PollFailed, Throttled}` — with a poll, silence *is* a gap, and the
-  bounds are exact.
+- **Ed25519 signing** over `api_key + timestamp + path + method + body`, with
+  each documented trap refused **by name**: milliseconds (13 digits, not 10, and
+  it fails every request), a 64-byte expanded keypair (the seed is its first
+  half), a `0x30` prefix (an ASN.1 SEQUENCE, so PKCS#8). Verified against **RFC
+  8032 vectors**, because an implementation checked only against its own output
+  is a test that a bug and its mirror image agree.
+- **Clock discipline acquires a correctness consequence.** The signature expires
+  after thirty seconds, so skew is a `401` and not a latency figure — the first
+  place in this system where a wrong clock stops capture rather than mislabelling
+  it.
+- **`GapCause::{PollFailed, Throttled}`, with exact bounds.** On a poll, our own
+  action supplies the half a stream is missing, so silence *is* a gap and its
+  width is the cadence. Three consecutive failures are **one** gap three
+  intervals wide.
+- **`best_bid_ask` normalises** to the same `quotes` shape as a pushed `bbo`.
 
-> **Exit:** BTC quotes from two venues in one `kind=quotes` query.
+> **Exit, met:** BTC from two venues in one `kind=quotes` query, with `NULL`
+> meaning *this venue never states it* — an exchange gives sizes and no spread,
+> a broker gives a spread and one quantity.
+
+### Still open in this tier
+
+- **The live endpoint.** No credentials were obtained and none should be. The
+  response shape rests on published documentation that **disagrees with itself**
+  about whether a top-level `price` exists; the decoder requires none, and the
+  record is what will settle it.
+- **The poll loop itself** — cadence, adaptive backoff on 429, archive every
+  poll. The pieces exist; nothing drives them.
 
 ---
 
