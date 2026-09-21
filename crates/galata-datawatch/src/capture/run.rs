@@ -60,6 +60,15 @@ pub enum CaptureError {
     /// The provider would not answer, or answered wrongly.
     #[error("the provider refused: {0}")]
     Provider(String),
+    /// The venue is not polled.
+    #[error(
+        "{endpoint} is not a polled endpoint. This loop asks on a timer; a venue that pushes \
+         needs the streaming loop, and one read by position needs the cursor loop"
+    )]
+    NotAPoll {
+        /// What it declared.
+        endpoint: String,
+    },
 }
 
 /// Everything the loop is given.

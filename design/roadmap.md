@@ -399,8 +399,10 @@ called**, and that is stated rather than implied.*
   response shape rests on published documentation that **disagrees with itself**
   about whether a top-level `price` exists; the decoder requires none, and the
   record is what will settle it.
-- **The poll loop itself** — cadence, adaptive backoff on 429, archive every
-  poll. The pieces exist; nothing drives them.
+- ~~**The poll loop itself**~~ — **done**: `Capture::run_poll`, with every poll
+  archived (including unchanged ones), consecutive failures widening **one**
+  gap, and a `429` backing off where an unreachable venue does not. Exercised
+  without a network or a credential.
 
 ---
 

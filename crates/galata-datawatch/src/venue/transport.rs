@@ -41,6 +41,23 @@ pub enum Transport {
         /// How the venue wants to be kept alive.
         keepalive: super::Keepalive,
     },
+    /// We ask, on a timer, and the answer is the whole current state.
+    ///
+    /// **The shape where silence is a gap.** A stream cannot tell a quiet
+    /// market from a dead socket, because nothing happened either way. A poll
+    /// can: we asked at a known moment, so its failure is an event we
+    /// witnessed and the interval is exactly the cadence.
+    Poll {
+        /// Where to ask.
+        rest_url: &'static str,
+        /// The path asked for.
+        path: &'static str,
+        /// How often, in microseconds.
+        ///
+        /// **Also the width of a gap a single failure produces**, which is why
+        /// it is a declaration rather than a tuning knob.
+        interval_micros: i64,
+    },
     /// We ask, by position, and the position is a block number.
     Cursor {
         /// The JSON-RPC endpoint.
@@ -76,6 +93,7 @@ impl Transport {
     pub fn endpoint(&self) -> &str {
         match self {
             Transport::Stream { ws_url, .. } => ws_url,
+            Transport::Poll { rest_url, .. } => rest_url,
             Transport::Cursor { rpc_url, .. } => rpc_url,
         }
     }

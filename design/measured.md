@@ -1356,6 +1356,61 @@ observation of a *market* — and the decoder did exactly what it is built to do
 Worth recording because the failure was the design working. A decoder that
 shrugged and skipped would have shown an empty dashboard and no reason for it.
 
+## The third transport is driven — 2026-09-21
+
+Three shapes were designed; two were driven.
+
+```
+  Stream   Capture::run          hyperliquid, nine hours live
+  Cursor   Capture::run_cursor   rh-chain, 47,311 transfers
+  Poll     Capture::run_poll     ← this
+```
+
+`Cadence` knew how to bound a gap, `Credential` knew how to sign and
+`best_bid_ask` knew how to normalise. Nothing asked anything, and **an answer
+nothing exercises is an answer nobody has checked.**
+
+### Every poll is archived, including the boring ones
+
+A five-second poll against a market that has not moved returns the same two
+prices. The tempting optimisation is to notice and skip it.
+
+No. The record records **arrivals**, and *we asked at 12:00:05 and the venue
+said 81190.50/81235.50* is an arrival. Collapsing identical states at capture
+time destroys the difference between **the price did not move** and **we did not
+ask** — which is precisely the difference the bounded gap exists to preserve.
+Collapsing is a projection's job, where it is reversible.
+
+### Consecutive failures widen one gap
+
+Tested: three failures after one success produce gaps that all start at the last
+successful poll and each end later. Not three gaps — three claims where there is
+one fact would make a consumer count an outage three times.
+
+And the gap is in the **record** before it is on the wire, checked by looking
+for `kind=gaps` on disk rather than by trusting the sink.
+
+### Throttled backs off; unreachable does not
+
+`429` means *we asked too often* — ours to fix, and it gets worse if we keep the
+rate. A venue that is down is not ours and does not improve by waiting longer.
+`GapCause` keeps them apart so a consumer can tell *we were rate-limited* from
+*the venue was down*: different facts, different remedies.
+
+### A test suite people would have started skipping
+
+The first run of these five tests took **15.15 seconds** — the loop was sleeping
+real time at a five-second cadence. `#[tokio::test(start_paused = true)]`
+auto-advances tokio's own timer:
+
+```
+  15.15 s  →  0.12 s
+```
+
+Worth recording because the failure mode is social rather than technical: a slow
+test is one people run less often, and a test nobody runs is a guard that has
+quietly stopped guarding. The same reason `check-all` exists at all.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
