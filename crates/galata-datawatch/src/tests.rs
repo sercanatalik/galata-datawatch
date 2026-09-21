@@ -561,3 +561,75 @@ fn a_venue_subtree_holds_every_kind_it_sent() {
         .collect();
     assert_eq!(kinds.len(), 3, "one venue's bytes are a single subtree");
 }
+
+#[test]
+fn a_restart_does_not_hand_out_sequences_that_are_already_written() {
+    // **The defect a `--replace` test fixture walked into.** `Archive::open`
+    // numbers from zero, so a second run over the same tree reissued the same
+    // sequences — and `stream_seq`, documented as the road back from a row to
+    // its bytes, forked.
+    let root = tempfile::tempdir().unwrap();
+
+    let mut first = Archive::open(root.path()).from_seq(1_789_941_180_000_000);
+    let one = first.next_seq();
+    let two = first.next_seq();
+    assert_eq!(two, one + 1, "monotonic within a process");
+
+    // A restart: a new handle, seeded from a later clock reading.
+    let mut second = Archive::open(root.path()).from_seq(1_789_941_181_000_000);
+    let three = second.next_seq();
+    assert!(
+        three > two,
+        "a restart reissued {three}, which is not past {two}"
+    );
+}
+
+#[test]
+fn an_unseeded_archive_still_numbers_from_zero() {
+    // Which is right for a fresh tree, a test, and a tool that only reads.
+    let root = tempfile::tempdir().unwrap();
+    let mut archive = Archive::open(root.path());
+    assert_eq!(archive.next_seq(), 0);
+    assert_eq!(archive.next_seq(), 1);
+}
+
+#[test]
+fn capture_seeds_the_archive_from_the_clock_it_owns() {
+    // The seed is handed DOWN rather than read below the loop, because a real
+    // `now()` in a helper does not make a test fail — it makes the test stop
+    // asking.
+    use crate::capture::{Capture, TestClock, Wiring};
+    use crate::sink::testing::RecordingSink;
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().unwrap();
+    let at = 1_789_941_180_000_000i64;
+    let mut capture = Capture::new(Wiring {
+        adapter: crate::adapters::build(crate::adapters::AdapterConfig::Hyperliquid(
+            crate::adapters::hyperliquid::Config {
+                market: crate::adapters::hyperliquid::Market::Mainnet,
+                instruments: vec![crate::adapters::hyperliquid::Instrument::main("BTC")],
+                candle_interval: "1m".into(),
+            },
+        ))
+        .unwrap(),
+        sink: Arc::new(RecordingSink::default()),
+        clock: Arc::new(TestClock::at(at)),
+        archive_root: root.path().join("archive"),
+        status_dir: root.path().join("status"),
+        flush_secs: 2,
+        status_secs: 1,
+        declared: Vec::new(),
+        clipped: galata_wire::Clipped::Continuous,
+        config_hash: "test".into(),
+    });
+
+    // The first payload it takes carries a sequence at or past the clock, not
+    // zero.
+    let payload = payload(Origin::Streamed, at, b"{}");
+    capture.take(payload).unwrap();
+    assert!(
+        capture.archive_next_seq() > at as u64,
+        "the archive was not seeded from the loop's clock"
+    );
+}

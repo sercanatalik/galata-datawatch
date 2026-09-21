@@ -1272,15 +1272,47 @@ What is *not* broken, and worth stating so the scope is clear:
   are on every tape row — so the road back exists, it is just not the one
   column the documentation names.
 
-### Not fixed here
+### Fixed, and the fix was decided by a guard
 
-This change is about `--replace`, and a sequence scheme is its own decision with
-its own trade-offs: resume from disk (the archive is not indexed by sequence),
-seed from a clock (conflates two things), or amend the documented claim to name
-both columns. Fixing it inside an unrelated change is how a small correction
-becomes an unreviewed one.
+Three options, and one of them was ruled out by a rule already in the tree.
 
-The test fixture sets its sequences by hand and says why.
+**Resume from disk** — the archive is partitioned by receipt time and indexed by
+nothing else, so finding the greatest sequence means opening files, on every
+boot, across a tree that reaches 22,000 segments in three hours.
+
+**Seed inside `Archive::open`** — *it cannot*.
+`scripts/check-clock-discipline.sh` forbids a clock read below the loop, and the
+reason is the sharp one: a real `now()` in a helper does not make a test
+**fail**, it makes the test **stop asking**. So the seed is handed down, which
+is the shape this codebase already has.
+
+**Amend the claim to name both columns** — `(recv_micros, stream_seq)` really is
+near-unique and both are on every row. But the bus carries `Envelope::seq`
+*alone*, so the claim would have to be weakened exactly where it is hardest to
+use.
+
+So: the loop seeds the archive from the clock it already reads, in microseconds.
+Monotonic across restarts because time moves forward; unique unless two
+processes open one archive scope in the same microsecond, which one process per
+venue already rules out; and **no counter in a file**, because a counter on disk
+is a second source of truth that can be deleted while the data stays — which is
+this bug wearing a hat.
+
+### Verified on two real restarts
+
+Two captures against the live venue, twenty-five seconds each, then one rebuild:
+
+```
+  2,337 payloads · 2,337 distinct sequences · 0 collisions
+  lowest 1789983568056379 · highest 1789983594381915
+```
+
+The first query tried was `count(*) - count(DISTINCT stream_seq)` over the
+**tape**, which reported 33,053 collisions and meant nothing: one payload
+legitimately becomes many rows — a walked candle page is 5,001 of them sharing
+one sequence, which is the whole point of the column. The question is whether a
+**payload** sequence repeats, and the archive is where payloads are.
+
 
 ## Answered by reading, not by running
 

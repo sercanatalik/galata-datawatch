@@ -173,7 +173,12 @@ pub struct Archive {
 }
 
 impl Archive {
-    /// Open the record under a root.
+    /// Open the record under a root, **numbering from zero**.
+    ///
+    /// Which is right for a fresh tree, a test, and a tool that only reads —
+    /// and **wrong for capture**, because a restart would hand out sequences
+    /// that collide with the ones already on disk. Capture uses
+    /// [`Archive::from_seq`], seeded by the component that owns the clock.
     pub fn open(root: impl Into<PathBuf>) -> Archive {
         Archive {
             root: root.into(),
@@ -185,6 +190,28 @@ impl Archive {
             buffered: Vec::new(),
             failures: Vec::new(),
         }
+    }
+
+    /// Start numbering from a given position.
+    ///
+    /// **The seed comes from the loop**, because
+    /// `scripts/check-clock-discipline.sh` forbids a clock read below it — and
+    /// for a reason worth repeating: a real `now()` in a helper does not make a
+    /// test fail, it makes the test *stop asking*.
+    ///
+    /// Microseconds since the epoch rather than a counter in a file. A counter
+    /// on disk is a second source of truth about the same fact, and this
+    /// codebase has refused that twice: the walk resumes from the record rather
+    /// than a bookmark, and the tape's frontier is read from segment names. A
+    /// sequence file can be deleted while the data stays, and then the sequence
+    /// restarts silently — which is this very bug, wearing a hat.
+    ///
+    /// Time gives monotonicity across restarts for free, and uniqueness unless
+    /// two processes open one archive scope in the same microsecond, which one
+    /// process per venue already rules out.
+    pub fn from_seq(mut self, first: u64) -> Archive {
+        self.next_seq = first;
+        self
     }
 
     /// Scope this handle to one venue's subtree.
@@ -215,11 +242,21 @@ impl Archive {
     /// The next sequence, taken by the caller before it appends.
     ///
     /// Monotonic within a process, so a failure row can name the payload it
-    /// refers to.
+    /// refers to — and, where the handle was seeded with [`Archive::from_seq`],
+    /// monotonic **across** processes too, which is what makes `stream_seq` a
+    /// road back rather than a road that forks.
     pub fn next_seq(&mut self) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
         seq
+    }
+
+    /// The sequence the next payload would take, without taking it.
+    ///
+    /// For asserting that the loop seeded this handle — see
+    /// [`Archive::from_seq`].
+    pub fn peek_seq(&self) -> u64 {
+        self.next_seq
     }
 
     /// Payloads received and not yet durable.

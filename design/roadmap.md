@@ -205,13 +205,11 @@ different shape from the one planned here.
 - ~~**A `--replace` flag for the rebuild.**~~ **Done**, and it was not a
   convenience: Tier 9 runs the rebuild from a scheduler, every scheduler
   retries, and a retry after the archive has grown wrote both copies.
-- **`stream_seq` is not unique across restarts.** `Archive::next_seq` starts at
-  zero on every `open`, so after a restart two archived payloads share a
-  sequence and the tape's *"road back to the bytes"* forks. Found by a test
-  fixture; `(recv_micros, stream_seq)` together still work, so the fix is a
-  choice between resuming from disk, seeding from a clock, or amending the
-  claim — each with its own trade-off, and none of them belongs inside an
-  unrelated change.
+- ~~**`stream_seq` is not unique across restarts.**~~ **Fixed**: the loop seeds
+  the archive from the clock it already reads, because
+  `check-clock-discipline.sh` forbids the archive reading one itself. Verified
+  on two real restarts — 2,337 payloads, 2,337 distinct sequences, zero
+  collisions.
 
 > **Exit, met:** `SELECT * FROM read_parquet('tape/kind=quotes/**/*.parquet')`
 > in DuckDB returns six instruments with their venues **and needs no flags**,

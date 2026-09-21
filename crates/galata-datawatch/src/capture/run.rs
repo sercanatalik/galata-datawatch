@@ -117,8 +117,14 @@ impl Capture {
         let now = wiring.clock.now_micros();
         // Scoped to this process's venue: one process per venue, one record
         // root between them, and neither reading the other's watermark.
-        let archive =
-            Archive::open(wiring.archive_root.clone()).scoped_to(wiring.adapter.venue().as_str());
+        // **Numbered from the clock this loop already read.** Without it the
+        // archive restarts at zero on every boot, two payloads share a
+        // sequence, and the tape's documented road back from a row to its bytes
+        // forks. The seed is handed down rather than read here, because nothing
+        // below the loop reads a clock.
+        let archive = Archive::open(wiring.archive_root.clone())
+            .from_seq(now.max(0) as u64)
+            .scoped_to(wiring.adapter.venue().as_str());
         let mut held = Held::new();
         held.declare(wiring.declared.clone());
         let coverage = Coverage::new(wiring.clipped);
@@ -493,6 +499,12 @@ impl Capture {
             envelope,
         )?;
         Ok(())
+    }
+
+    /// The sequence the record would next hand out — for asserting that the
+    /// loop seeded it.
+    pub fn archive_next_seq(&self) -> u64 {
+        self.archive.peek_seq()
     }
 
     /// The venue.
