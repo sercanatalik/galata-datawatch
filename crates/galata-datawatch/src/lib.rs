@@ -25,6 +25,13 @@
 
 pub mod adapters;
 pub mod calendar;
+
+/// **Behind the `bin` feature**: the wiring both capture binaries share, and
+/// the only thing in this crate that chooses nothing for itself — the
+/// configuration source is its argument.
+#[cfg(feature = "bin")]
+pub mod boot;
+
 /// **Behind the `capture` feature**: it needs a runtime.
 #[cfg(feature = "capture")]
 pub mod capture;

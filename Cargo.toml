@@ -5,6 +5,9 @@ members = [
     "crates/galata-broker",
     "crates/galata-segments",
     "crates/galata-datawatch",
+    # Not published. The vault lives here so the four above can say they link
+    # none of it, and a guard can check that rather than a comment claiming it.
+    "crates/galata-datawatch-vault",
 ]
 
 # Declared once, and taken once — every member says `license.workspace = true`.
@@ -102,6 +105,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # one host is not one — but for the venue's per-IP new-connection budget, which
 # a tight reconnect loop can spend while learning nothing.
 rand = "0.10"
+# The vault, and it reaches exactly one member. End-to-end-encrypted config
+# documents; the SDK is synchronous throughout, so a ConfigSource backed by it
+# needs no runtime and bridges nothing. Confined to galata-datawatch-vault by
+# `check-vault-reach.sh`, because it brings `age` and its localisation stack
+# with it — 104 crates on top of this tree, measured.
+galata-vault = "0.1"
 
 [workspace.lints.rust]
 # Neither crate needs it, and a store whose durability argument rests on

@@ -265,9 +265,10 @@ different shape from the one planned here.
 *The seam is built. **The release-ordering blocker was a conflation and is
 gone.***
 
-This tier used to read *"blocked on galata-vault 0.1.0 reaching crates.io"*. It
-is still unpublished — `cargo search galata-vault` returns nothing — and that
-**blocks a vault-backed binary and nothing else**.
+This tier used to read *"blocked on galata-vault 0.1.0 reaching crates.io"*,
+and then *"still unpublished"*. **Published 2026-09-21**: `cargo search
+galata-vault` returns all ten crates at 0.1.0. Nothing in this tier is blocked
+any more.
 
 `Config::load_from_str` takes the text and its provenance rather than a path,
 and `Origin::Document { name, version }` has existed since Tier 0. So a
@@ -298,8 +299,11 @@ source before it existed turned out to buy more than tidy refusals.
 
 ### Still open
 
-- **A vault-backed binary**, which needs the vault published. Not this crate's
-  problem any more.
+- ~~**A vault-backed binary**, which needs the vault published.~~ **Done**, and
+  it is `galata-datawatch-vault` — a fifth workspace member that does not
+  publish, so the four that do still link none of it. Measured: the vault costs
+  **104** crates on this tree, against the predecessor's carried 225, which was
+  its tree taken alone. The wall is `check-vault-reach.sh`, watched failing.
 - **Per-`(binary, venue)` capability** and child vaults per venue credential —
   both are shapes of the vault's own token model, and belong with it.
 

@@ -724,6 +724,56 @@ taking two `Option<String>`, with the environment read as one line above it.
 The part with the judgement in it is now the part that is tested, which is the
 right way round and would not have been arrived at without the constraint.
 
+## The fourth wall, and a carried figure that does not survive it — 2026-09-21
+
+The vault's cost, taken here rather than believed from the predecessor.
+`legacy/galata-legacy/planning/draw-from-the-vault.md` priced this on
+2026-09-11 as *"a client tree of about 225 crates, much of it `age`'s
+localisation stack, which no `age` feature set drops."*
+
+Both halves of that were checked. One holds and one does not.
+
+```
+  galata-vault, locked on its own                       221 crates
+  legacy's carried figure                              ~225   agrees
+
+  galata-datawatch with `bin`                           310 crates
+  the same, plus galata-vault                           414 crates
+  ────────────────────────────────────────────────────────────────
+  what the vault actually costs this tree               104 crates
+```
+
+**The carried figure is right and the decision it would have supported is
+wrong.** 221 is the vault's tree measured alone; this tree already links serde,
+tokio, reqwest and rustls, so more than half of it is already paid for. Pricing
+the change at 225 would have over-stated it by more than twice — and 225 against
+a 310-crate binary is the kind of number that stops a design, which is what it
+did for eleven days.
+
+The localisation half holds exactly as recorded. It is really there, and no
+feature set drops it:
+
+```
+  age · age-core · fluent · fluent-bundle · fluent-langneg · fluent-syntax
+  i18n-embed · i18n-embed-fl · i18n-embed-impl · intl-memoizer
+  rust-embed · rust-embed-impl · rust-embed-utils · unic-langid · unic-langid-impl
+```
+
+Which is the argument for the wall rather than against the vault: a tape reader
+must not compile a localisation framework to read parquet, and
+`check-vault-reach.sh` names every one of these so the wall holds even if the
+vault is ever vendored under another name. Planted, the guard goes red naming
+13 of them.
+
+**The blocker that was not one.** Legacy also measured that *"Cargo resolves an
+optional dependency even with its feature off"*, so an unreachable git URL fails
+the build regardless, and concluded that galata-vault needed a public remote
+before galata could depend on it in any form. True when taken, and void now:
+galata-vault is a registry dependency at 0.1.0. The finding did not expire
+because it was wrong; it expired because somebody published the crate.
+
+---
+
 ## The third wall — 541 crates to 279, 2026-09-21
 
 A consumer that wants only the tape's schemas — the tower's server is the first,

@@ -133,6 +133,14 @@ prove "check-no-transport (the pure half reaches for the runtime)" \
     "$ROOT/crates/galata-datawatch/src/calendar.rs" \
     own
 
+# The fourth wall. `own` because the guard plants a dependency, and where a
+# dependency is planted matters: [dev-dependencies] would not break the wall,
+# so the guard is the only thing that knows the right place to put it.
+prove "check-vault-reach (a published crate reaches for the vault)" \
+    "$ROOT/scripts/check-vault-reach.sh" \
+    "$ROOT/crates/galata-datawatch/Cargo.toml" \
+    own
+
 prove "check-secret-reach (a secret read outside the one door)" \
     "$ROOT/scripts/check-secret-reach.sh" \
     "$ROOT/crates/galata-datawatch/src/capture/clock.rs" \

@@ -91,7 +91,9 @@ EXPOSE_ALLOWED = {
     "crates/galata-datawatch/src/adapters/rh_chain/client.rs",
     "crates/galata-datawatch/src/venue/transport.rs",   # the accessor itself
     "crates/galata-datawatch/src/config/source.rs",     # Secret::expose lives here
-    "crates/galata-datawatch/src/bin/galata-datawatch.rs",  # hands the broker its password
+    # The wiring, which hands the broker its password. It was the binary until
+    # the same 253 lines became the library entry both binaries call.
+    "crates/galata-datawatch/src/boot.rs",
 }
 # A field name in an error message that would carry an endpoint.
 ENDPOINT_FIELD = re.compile(r"\{\s*(url|rpc_url|rest_url|ws_url|uri|endpoint_url)\b")

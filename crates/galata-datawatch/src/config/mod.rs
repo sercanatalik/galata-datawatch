@@ -81,6 +81,20 @@ pub enum ConfigError {
         /// What it said.
         document: String,
     },
+    /// A reader that fetches documents was given no document to fetch.
+    ///
+    /// The mirror of [`ConfigError::NoDocumentReader`]: that one is a file
+    /// reader handed a document, this is a document reader handed nothing.
+    #[error(
+        "{document_var} is not set, and it names the document to capture from. A file is the \
+         other source, and {path_var} names one"
+    )]
+    NoDocumentNamed {
+        /// The document variable.
+        document_var: &'static str,
+        /// The path variable, named so the other source is discoverable.
+        path_var: &'static str,
+    },
     /// A secret was not where it was said to be.
     #[error("{name} is not set. Nothing connects anonymously, and no default is invented")]
     SecretAbsent {

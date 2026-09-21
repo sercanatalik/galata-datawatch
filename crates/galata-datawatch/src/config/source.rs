@@ -20,12 +20,24 @@
 //! its provenance rather than a path, so a vault-backed loader is:
 //!
 //! ```ignore
-//! let (text, version) = vault.get("datawatch").await?;
-//! Config::load_from_str(&text, Origin::Document { name, version }, &Resolver)
+//! let document = vault.config("datawatch")?;          // synchronous: no runtime
+//! Config::load_from_str(
+//!     document.text()?,
+//!     Origin::Document { name: document.name().to_owned(), version: document.version() },
+//!     &Resolver,
+//! )
 //! ```
 //!
-//! and lives wherever the vault client already is. **This crate takes no vault
-//! dependency to be vault-backed**, which is what lets it publish without one.
+//! and lives wherever the vault client already is — in this tree, in
+//! `galata-datawatch-vault`, which does not publish. **This crate takes no
+//! vault dependency to be vault-backed**, which is what lets it publish
+//! without one, and `scripts/check-vault-reach.sh` checks that rather than
+//! this paragraph asserting it.
+//!
+//! *This example carried an `.await` until 2026-09-21, having been written
+//! before the SDK existed. The SDK has no `async fn` at all, which is the
+//! happier direction to be wrong in: a synchronous trait needs no runtime
+//! bridge, so nothing here blocks inside a reactor.*
 //!
 //! What must *not* happen is a vault SDK's convenient `deserialize` straight to
 //! a typed value: it skips `Config::validate`, where the bounds, the
@@ -138,6 +150,46 @@ impl FileSource {
             }),
             (None, None) => Ok(FileSource::new(default)),
         }
+    }
+}
+
+/// The document the environment names, for a reader that can fetch one.
+///
+/// **The mirror of [`FileSource::from_env`], and it lives here for the same
+/// reason.** The two-variable rule is the part with the judgement in it; a
+/// process that can fetch a document must not restate it, because a second
+/// copy of a precedence rule is how the two come to disagree.
+///
+/// Nothing here fetches anything. It answers *which document*, and the fetch
+/// belongs to whoever has a vault client.
+pub fn document_from_env() -> Result<String, ConfigError> {
+    document_named(
+        std::env::var(CONFIG_PATH_VAR).ok(),
+        std::env::var(CONFIG_DOCUMENT_VAR).ok(),
+    )
+}
+
+/// The rule itself, **taking the two values rather than reading them**, for
+/// the reason [`FileSource::reconcile`] gives: a rule that reads the
+/// environment for itself is a rule no test in this workspace can exercise.
+pub fn document_named(
+    path: Option<String>,
+    document: Option<String>,
+) -> Result<String, ConfigError> {
+    match (path, document) {
+        // The same refusal the file side gives, and deliberately not a
+        // precedence rule in either direction.
+        (Some(path), Some(document)) => Err(ConfigError::TwoSources {
+            path_var: CONFIG_PATH_VAR,
+            path,
+            document_var: CONFIG_DOCUMENT_VAR,
+            document,
+        }),
+        (None, Some(document)) => Ok(document),
+        (Some(_), None) | (None, None) => Err(ConfigError::NoDocumentNamed {
+            document_var: CONFIG_DOCUMENT_VAR,
+            path_var: CONFIG_PATH_VAR,
+        }),
     }
 }
 

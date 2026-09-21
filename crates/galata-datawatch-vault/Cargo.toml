@@ -1,0 +1,31 @@
+[package]
+name = "galata-datawatch-vault"
+description = "Capture configured from a galata-vault document rather than a file on disk."
+# **Never published, and this is the design.** `config/source.rs` states that
+# galata-datawatch takes no vault dependency in order to publish without one.
+# Holding the vault here keeps that sentence literally true, rather than
+# turning it into a claim about a default feature — and Cargo unifies a
+# dependency's features across one build, so a feature could not have held it.
+#
+# Measured: galata-vault locks 221 crates on its own, and costs 104 on top of
+# this tree (310 -> 414). Every one of them stops at this crate's boundary,
+# which `scripts/check-vault-reach.sh` asserts.
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+galata-datawatch = { version = "0.1.0", path = "../galata-datawatch" }
+galata-vault.workspace = true
+thiserror.workspace = true
+# The Resolver’s signature names a Series; the vocabulary, and nothing else.
+galata-wire = { version = "0.1.0", path = "../galata-wire" }
+
+[[bin]]
+name = "galata-datawatch-vault"
