@@ -1513,6 +1513,80 @@ million. It is now derived from the measured integer.
 code, after the `0x015fb7f9b8c38000` decimal. The rule that follows: a fixture
 whose value was guessed is a fixture that tests the guess.
 
+### It is recorded during capture — end to end, live
+
+A 30-second run against the public node with two contracts declared, then a
+tape rebuild and a join:
+
+```
+$ galata-datawatch rh-chain                 # 30 s, no broker
+$ galata-tape-rebuild rh-chain 2026-09-21
+  12 payloads → 37791 rows in 3 segments (0 unparsed)
+```
+
+```
+┌────────┬──────┬───────────────┬──────────────────────┬────────┬──────────────────────┐
+│ ticker │ base │ contract_type │      tick_size       │ active │    ui_multiplier     │
+├────────┼──────┼───────────────┼──────────────────────┼────────┼──────────────────────┤
+│ NVDA   │ NVDA │ token         │ 0.000000000000000001 │ true   │ 1.000775159164630595 │
+│ WETH   │ WETH │ token         │ 0.000000000000000001 │ true   │ NULL                 │
+└────────┴──────┴───────────────┴──────────────────────┴────────┴──────────────────────┘
+```
+
+`NULL`, not `1.0`, survives all the way into the tape — the distinction the
+module exists for is the one a consumer actually sees.
+
+The join, over the same thirty seconds of real transfers:
+
+| ticker | transfers | raw tokens | underlying shares |
+|---|---|---|---|
+| NVDA | 3,406 | 2330.930470173899256393 | 2332.737312289967 |
+| WETH | 19,540 | 7270.635273220536073464 | 7270.635273220535 |
+
+**1.81 shares in thirty seconds**, on one contract, from a multiplier that is
+1.0008. That is the size of the error the record no longer forces on a
+consumer.
+
+### The join overflows without a cast
+
+The obvious query fails:
+
+```
+Out of Range Error: Overflow in multiplication of DECIMAL(38)
+  (189645268612509304019 * 1000775159164630595)
+```
+
+Both columns are `DECIMAL(38, 18)`, and DuckDB will not widen past 38 digits to
+hold the product of two of them. `cast(ui_multiplier as double)` is what makes
+it run — which is fine *here*, because the multiplier has 18 significant
+digits and a double holds 15, and the shares are a display quantity. It would
+not be fine for the amount. Recorded because whoever writes this join next will
+hit it, and the fix that first comes to mind — casting the amount — is the
+wrong one.
+
+### The cadence is an hour, and that is a staleness bound
+
+No update event exists to subscribe to, so a corporate action is learned when
+the next read happens and not before. An hour bounds that; it does not shorten
+it. The read runs **before the first block of a pass**, not after, so a
+multiplier is never younger than the amounts recorded against it.
+
+Three requests per instrument per hour, against a node that refused ranges
+fifteen times in forty seconds under a tighter pace.
+
+### What the chain cannot say about an instrument
+
+`Instrument` has fields describing an order book and this venue has none, so
+each is filled from what a token contract knows rather than left to a default:
+
+| field | value | why |
+|---|---|---|
+| `tick_size`, `lot_size`, `min_size` | `10^-decimals` | the only increment a contract has; `contract_type = token` says it is a quantity, not a price |
+| `quote` | empty | a token contract prices nothing. USDG is a fact about a *trade*, recovered by pairing transfers in one transaction — not about this instrument |
+| `hours` | `continuous` | the record shows transfers at every hour; the assumed Sun 18:00–Fri 17:00 ET window was already disproved for the `xyz` instruments |
+| `venue_index` | `NULL` | a chain addresses by contract, never by position in a list |
+| `active` | did it answer at all | a contract that answers nothing is not one we can call listed |
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

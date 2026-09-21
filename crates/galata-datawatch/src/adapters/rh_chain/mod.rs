@@ -52,6 +52,22 @@ pub const FINALITY_LAG_BLOCKS: u64 = 11_678;
 /// indistinguishable from a range with nothing in it.
 pub const MAX_BLOCK_SPAN: u64 = 1_000;
 
+/// The channel a metadata read is recorded under.
+///
+/// **Its own channel, not `eth_getLogs`.** Two shapes under one channel name
+/// is how a record stops being self-describing: a reader would have to guess
+/// which decoder to try.
+pub const METADATA_CHANNEL: &str = "eth_call";
+
+/// How often a contract is asked about itself.
+///
+/// **Measured 2026-09-21:** fifty thousand blocks of NVDA carry no
+/// `UIMultiplierUpdated` log under any of the four candidate signatures, so
+/// the multiplier is *polled, not evented* — there is nothing to subscribe to
+/// and a cadence is the only way to learn a corporate action happened. An hour
+/// bounds the staleness at three requests per instrument per hour.
+pub const METADATA_INTERVAL_MICROS: i64 = 3_600 * 1_000_000;
+
 /// One instrument on the chain: a contract, what it is, and how it counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instrument {
@@ -131,6 +147,9 @@ impl Normalise for RhChain {
     }
 
     fn normalise(&self, payload: &Payload) -> Result<Vec<galata_wire::Envelope>, NormaliseError> {
+        if payload.channel == METADATA_CHANNEL {
+            return self.instrument(payload);
+        }
         let logs: Vec<wire::Log> =
             serde_json::from_slice(&payload.payload).map_err(|e| NormaliseError::Shape {
                 kind: "eth_getLogs response",
@@ -145,6 +164,43 @@ impl Normalise for RhChain {
             None,
         )
         .events)
+    }
+}
+
+impl RhChain {
+    /// A metadata read becomes one [`galata_wire::Event::Instrument`].
+    ///
+    /// A contract absent from the configuration is **skipped, not refused**: a
+    /// response about somebody else's token is not a defect, it is a response
+    /// we did not ask for.
+    fn instrument(&self, payload: &Payload) -> Result<Vec<galata_wire::Envelope>, NormaliseError> {
+        let answers: erc8056::Answers =
+            serde_json::from_slice(&payload.payload).map_err(|e| NormaliseError::Shape {
+                kind: "eth_call metadata",
+                detail: e.to_string(),
+            })?;
+        let contract = payload
+            .symbol
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let Some(ticker) = self.tickers.get(&contract) else {
+            return Ok(Vec::new());
+        };
+        let declared = self.decimals.get(&contract).copied().unwrap_or(18);
+        let instrument =
+            erc8056::instrument(&answers, ticker.as_str(), declared, payload.recv_micros);
+        Ok(vec![galata_wire::Envelope::new(
+            self.venue().clone(),
+            ticker.clone(),
+            // **No venue time.** The call was made against `latest` and the
+            // node states no block for it, so the only timestamp that exists
+            // is ours. `observed_at` on the event carries the same instant,
+            // which is what dates the multiplier.
+            None,
+            payload.recv_micros,
+            galata_wire::Event::Instrument(instrument),
+        )])
     }
 }
 
@@ -171,9 +227,21 @@ impl Adapter for RhChain {
 
     // **No `streaming()`.** The default is `None`, which is the truth.
 
+    /// **Polled, because there is nothing to subscribe to.** See
+    /// [`METADATA_INTERVAL_MICROS`].
+    fn reference(&self) -> Option<crate::venue::Reference> {
+        Some(crate::venue::Reference {
+            interval_micros: METADATA_INTERVAL_MICROS,
+            symbols: self.tickers.keys().cloned().collect(),
+        })
+    }
+
     fn series_of_channel(&self, channel: &str) -> Option<Series> {
         match channel {
             "eth_getLogs" => Some(Series::Transfers),
+            // **Not a series.** Reference data is not a stream of market
+            // observations, and calling it one would put it in a coverage
+            // report that measures gaps between ticks.
             _ => None,
         }
     }
@@ -303,6 +371,67 @@ mod tests {
         let events = chain().normalise(&payload).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind(), galata_wire::Kind::Mints);
+    }
+
+    #[test]
+    fn a_metadata_read_becomes_a_dated_instrument() {
+        let payload = Payload {
+            seq: 0,
+            recv_micros: 4242,
+            address: PayloadAddress::Venue(VENUE.into()),
+            channel: METADATA_CHANNEL.into(),
+            kind: galata_wire::Kind::Instruments.as_str().to_string(),
+            symbol: Some(contract_lowercase()),
+            origin: Origin::Fetched,
+            payload:
+                br#"{"symbol":null,"decimals":null,
+              "uiMultiplier":"0x0000000000000000000000000000000000000000000000000de377b4760af643"}"#
+                    .to_vec(),
+        };
+        let events = chain().normalise(&payload).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind(), galata_wire::Kind::Instruments);
+        let galata_wire::Event::Instrument(i) = &events[0].event else {
+            panic!("an instrument");
+        };
+        assert!(i.ui_multiplier.is_some());
+        // **Dated.** Rows written before and after a corporate action carry
+        // amounts computed under different multipliers, and this is the only
+        // thing that says which.
+        assert_eq!(i.observed_at, 4242);
+        // Ours, not the venue's: the call named no block.
+        assert_eq!(events[0].at_micros, None);
+    }
+
+    #[test]
+    fn somebody_elses_contract_is_skipped_rather_than_refused() {
+        let payload = Payload {
+            seq: 0,
+            recv_micros: 1,
+            address: PayloadAddress::Venue(VENUE.into()),
+            channel: METADATA_CHANNEL.into(),
+            kind: galata_wire::Kind::Instruments.as_str().to_string(),
+            symbol: Some("0x00000000000000000000000000000000deadbeef".into()),
+            origin: Origin::Fetched,
+            payload: b"{}".to_vec(),
+        };
+        assert!(chain().normalise(&payload).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_two_shapes_do_not_share_a_channel() {
+        // A logs response decoded as metadata, or the reverse, is what one
+        // channel name for two shapes would cost.
+        assert_ne!(METADATA_CHANNEL, "eth_getLogs");
+        assert_eq!(chain().series_of_channel(METADATA_CHANNEL), None);
+    }
+
+    #[test]
+    fn every_configured_contract_is_asked_about() {
+        let chain = chain();
+        let reference = chain.reference().expect("a chain must be asked");
+        assert_eq!(reference.symbols, vec![contract_lowercase()]);
+        assert_eq!(reference.interval_micros, METADATA_INTERVAL_MICROS);
     }
 
     #[test]

@@ -115,6 +115,20 @@ pub enum ConstructError {
     Declaration(#[from] DeclarationError),
 }
 
+/// Reference data a venue will only answer when asked.
+///
+/// **Measured 2026-09-21:** fifty thousand blocks of NVDA carry no multiplier
+/// update log under any candidate signature, so on Robinhood Chain a corporate
+/// action is learned by polling or not at all. That is what this exists for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    /// How often to re-ask. Bounds the staleness; it does not detect a change
+    /// any sooner than that.
+    pub interval_micros: i64,
+    /// The venue's own symbols to ask about — contract addresses on a chain.
+    pub symbols: Vec<String>,
+}
+
 /// The seam.
 ///
 /// Every method is synchronous and pure. See the module documentation for why.
@@ -158,6 +172,20 @@ pub trait Adapter: Normalise {
     /// payload, under whatever channel the adapter can say, because the bytes
     /// are the thing that must not be lost.
     fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload;
+
+    /// Reference data this venue must be **asked** for, on a cadence.
+    ///
+    /// `None` by default, which is the ordinary case: most venues state
+    /// reference data on a channel you subscribe to, and one that does not is
+    /// the exception. A chain is that exception — a token contract answers
+    /// questions and announces nothing.
+    ///
+    /// On the seam rather than in the loop because *which symbols* and *how
+    /// often* are both venue knowledge, and a loop that hard-coded either
+    /// would apply one venue's answer to the next one.
+    fn reference(&self) -> Option<Reference> {
+        None
+    }
 
     /// The venue's own string for a ticker — the inverse of
     /// [`Adapter::venue_ticker`], and what a historical request carries.

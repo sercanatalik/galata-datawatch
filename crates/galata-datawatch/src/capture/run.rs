@@ -503,6 +503,11 @@ impl Capture {
         self.wiring.adapter.transport()
     }
 
+    /// The reference data this venue will only answer when asked.
+    pub fn venue_reference(&self) -> Option<crate::venue::Reference> {
+        self.wiring.adapter.reference()
+    }
+
     /// The venue's stated request budget, for pacing.
     pub fn budget(&self) -> crate::venue::Budget {
         self.wiring.adapter.declaration().budget

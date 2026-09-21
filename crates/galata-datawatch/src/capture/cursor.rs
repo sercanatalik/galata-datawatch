@@ -5,6 +5,7 @@
 //!   plan                  from the last block captured, to the head
 //!   fetch                 eth_getLogs over each step
 //!   ingest                THE ONE PATH — archive, normalise, emit
+//!   ask about a contract  on a cadence; a chain announces no corporate action
 //!   advance the trail     parent linkage; a disagreement is a reorganisation
 //!   pace                  the venue's declared budget
 //! ```
@@ -25,7 +26,7 @@ use crate::adapters::rh_chain::client::{ChainClient, Header};
 use crate::adapters::rh_chain::trail::{Advance, BlockTrail};
 use crate::capture::run::{Capture, CaptureError};
 use crate::source::Backoff;
-use crate::venue::{BlockPaging, Frontier, Transport};
+use crate::venue::{BlockPaging, Frontier, Reference, Transport};
 
 /// What one pass over the chain did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -101,8 +102,18 @@ impl Capture {
         let mut backoff = Backoff::default();
         let pace = Duration::from_millis(self.budget().walk_interval_ms(1.0).max(1));
 
+        // **Reference data is read before the first block, not after.** A
+        // multiplier learned an hour into capture dates from an hour into
+        // capture, and every amount recorded before it has nothing to join to.
+        let reference = self.venue_reference();
+        let mut refreshed_at: Option<i64> = None;
+
         while !shutdown.is_cancelled() {
             let mut last_pass_failed = false;
+            if let Some(reference) = reference.as_ref() {
+                self.refresh_reference(&client, reference, &mut refreshed_at)
+                    .await?;
+            }
             match self
                 .one_pass(
                     &client,
@@ -228,6 +239,30 @@ impl Capture {
             tokio::time::sleep(pace).await;
         }
         Ok(pass)
+    }
+
+    /// Ask each contract about itself, **through the one path**, when the
+    /// cadence says it is time.
+    ///
+    /// A read that fails is not a reason to stop capturing blocks: the
+    /// multiplier stays as last recorded, which is stale rather than wrong,
+    /// and `observed_at` on the last row says exactly how stale.
+    async fn refresh_reference(
+        &mut self,
+        client: &ChainClient,
+        reference: &Reference,
+        refreshed_at: &mut Option<i64>,
+    ) -> Result<(), CaptureError> {
+        let now = self.now();
+        if refreshed_at.is_some_and(|last| now - last < reference.interval_micros) {
+            return Ok(());
+        }
+        for symbol in &reference.symbols {
+            let payload = client.metadata(symbol, self.now()).await;
+            self.take(payload)?;
+        }
+        *refreshed_at = Some(now);
+        Ok(())
     }
 
     /// Advance the trail, publishing a reorganisation if the chain disagrees.

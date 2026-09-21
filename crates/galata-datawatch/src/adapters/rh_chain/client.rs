@@ -13,7 +13,8 @@
 
 use galata_wire::Origin;
 
-use super::{CHAIN_ID, VENUE};
+use super::erc8056::{self, Answers};
+use super::{CHAIN_ID, METADATA_CHANNEL, VENUE};
 use crate::adapters::rh_chain::trail::Seen;
 use crate::record::{Payload, PayloadAddress};
 
@@ -170,6 +171,69 @@ impl ChainClient {
             origin: Origin::Fetched,
             payload: serde_json::to_vec(&result).unwrap_or_default(),
         })
+    }
+
+    /// What a contract says about itself, **as a payload for the one path**.
+    ///
+    /// Three calls, and **a reverted one is an answer**: most contracts on this
+    /// chain do not implement ERC-8056, and `None` records that rather than
+    /// claiming a multiplier of one.
+    ///
+    /// The raw hex is what goes into the record. Decoding happens in
+    /// `normalise`, downstream of durability, so a decoder fixed later can be
+    /// re-run over everything already captured.
+    pub async fn metadata(&self, contract: &str, now_micros: i64) -> Payload {
+        let read = |selector: &'static str| {
+            let to = contract.to_string();
+            async move { self.call_raw(&to, selector).await.ok().flatten() }
+        };
+        let answers = Answers {
+            symbol: read(erc8056::SYMBOL_SELECTOR).await,
+            decimals: read(erc8056::DECIMALS_SELECTOR).await,
+            ui_multiplier: read(erc8056::UI_MULTIPLIER_SELECTOR).await,
+        };
+        Payload {
+            seq: 0,
+            recv_micros: now_micros,
+            address: PayloadAddress::Venue(VENUE.into()),
+            channel: METADATA_CHANNEL.into(),
+            kind: galata_wire::Kind::Instruments.as_str().to_string(),
+            // Unlike a logs response, this one **is** about a single
+            // instrument, and says so.
+            symbol: Some(contract.to_ascii_lowercase()),
+            origin: Origin::Fetched,
+            payload: serde_json::to_vec(&answers).unwrap_or_default(),
+        }
+    }
+
+    /// One `eth_call`, returning the raw hex or `None` where it reverted.
+    ///
+    /// **A revert is not an error here.** Asking a token whether it implements
+    /// an extension is how you find out, and the answer *no* arrives as a
+    /// revert.
+    async fn call_raw(
+        &self,
+        to: &str,
+        selector: &'static str,
+    ) -> Result<Option<String>, ChainError> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+            "params": [{ "to": to, "data": format!("0x{selector}") }, "latest"]
+        });
+        let bytes = self.post(&body, "eth_call").await?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| ChainError::Shape {
+                venue: VENUE,
+                method: "eth_call",
+                detail: e.to_string(),
+            })?;
+        if value.get("error").is_some() {
+            return Ok(None);
+        }
+        Ok(value
+            .get("result")
+            .and_then(|r| r.as_str())
+            .map(str::to_string))
     }
 
     async fn number(
