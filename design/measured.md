@@ -2790,6 +2790,79 @@ The four wrong ones shared a shape: the code matched its own comment, and the
 comment was the thing that was wrong. None was findable by reading. Each took
 a query of about a dozen lines against data already on disk.
 
+## The broker asymmetry, exercised at last — 2026-09-21
+
+Three claims that no soak had ever run. Every capture in this tree so far has
+had no `[broker]` block, so **`sink_dropped` has read 0 in every status file
+ever produced** — which is indistinguishable from a counter that does not work.
+
+Tested against `nats-server` 2.14.5, loaded with this tree's own generated
+grant table.
+
+### Absent → warn and carry on
+
+```text
+  WARN broker at nats://127.0.0.1:4919 did not answer:
+       IO error: Connection refused (os error 61)
+  still running, 25 segments captured
+```
+
+### Refused → exit non-zero, and say what to check
+
+```text
+  exit=1
+  broker at nats://127.0.0.1:4919 refused identity datawatch-hyperliquid:
+    authorization violation.
+    The grant table and this process disagree. Check that
+    GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID is set, and that the table
+    loaded into the server grants that identity.
+```
+
+Not merely non-zero: it names the identity, the variable, and both places the
+disagreement can live.
+
+### Events reach the bus, and the decimal discipline is visible on it
+
+```json
+{"address":{"Venue":{"venue":"hyperliquid","ticker":"BTC"}},
+ "seq":1790001581010278,"at_micros":1790001592151000,
+ "event":{"Quote":{"bid_px":"85851.0","ask_px":"85852.0", …}}}
+```
+
+`"85851.0"` — a **string**, not a JSON number, on the wire where a consumer's
+parser would otherwise turn it into a double. That is `serde-str` doing the one
+job it is there for, and this is the first time it has been seen leaving the
+process.
+
+### Never blocks, and drops only after the queue
+
+The server killed mid-run, capture left alone:
+
+| | |
+|---|---|
+| capture | still running |
+| archive | 37 → 300 segments, **10,538 rows** written while the broker was dead |
+| `buffered` | 4 — the record never noticed |
+| `sink_dropped` after 25 s | **0** — the queue absorbing, nothing lost yet |
+| `sink_dropped` after 115 s | **2,754** |
+
+**The counter moves only after the declared queue is exhausted**, which is
+exactly what the declaration says it is for: 8,192 events at roughly a hundred
+a second is about eighty seconds of outage absorbed before a single event is
+lost.
+
+And the reporting is edge-triggered, as designed — one line per transition
+rather than one per payload:
+
+```text
+  WARN  the sink is refusing events; payloads are still recorded
+  INFO  the sink is taking events again
+```
+
+Those alternate while the broker is down, because the client's own buffer
+drains and refills around the queue's limit. Worth knowing before reading a log
+and concluding the broker recovered.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
