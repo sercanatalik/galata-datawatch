@@ -899,6 +899,71 @@ Nodes disagree about hex case. A comparison that was case-sensitive would report
 a fork because one node said `0xAA` and another `0xaa` — on every block. The
 comparison is case-insensitive and there is a test that says why.
 
+## The seam abstracted framing, not transport — again — 2026-09-21
+
+Worth recording because it was **diagnosed, written down as the thing to avoid,
+and then done anyway.** The original exploration said of the predecessor:
+
+> its capture loop opens a websocket directly, so `subscribe_frames` and a
+> keepalive are baked in as assumptions. Two of the three venues on this roadmap
+> are polled or cursor-driven, for which both are meaningless.
+
+and concluded `Source` should be introduced now rather than retrofitted. The
+`source` **module** was introduced in Tier 1. The **seam was not**:
+
+```
+  Adapter::channel_of         a websocket concept
+  Adapter::subscribe_frames   a websocket concept
+  Adapter::keepalive          a websocket concept
+  Capture::run                constructed StreamSource unconditionally
+```
+
+Expressed through that trait, a chain adapter must answer an empty frame list
+and a `Keepalive::None` — values that are not *false*, they are **meaningless** —
+and a loop acting on them opens a socket and sends it nothing.
+
+### The fix, and why `Option` rather than defaults
+
+```rust
+fn transport(&self) -> Transport;                     // Stream | Cursor
+fn streaming(&self) -> Option<&dyn Streaming> { None } // the subscribing half
+```
+
+Defaulted `subscribe_frames` returning `Vec::new()` would have compiled just as
+well and been worse: an empty list is **an answer a loop will act on**. `None`
+is not, and the caller has to say what it does about it.
+
+`Transport` is an enum rather than a trait object because the set is closed and
+the loop has to match on it regardless — a stream loop and a cursor loop are
+genuinely different programs, and pretending otherwise is how a chain adapter
+would end up with a keepalive.
+
+### The result
+
+`RhChain` is an `Adapter` with **no subscription method at all** and a
+`transport()` that carries the RPC endpoint, chain 4663, the block paging and
+the measured finality lag. There is a test asserting `streaming().is_none()` —
+which, before this change, was not a thing that could be true.
+
+`Capture::run` now refuses a non-stream transport by name rather than opening a
+socket for it.
+
+### And the third wall caught a layering mistake, not a dependency one
+
+`Transport` is a pure declaration, but it was written referencing `BlockPaging`
+from the `source` module — which is behind the `capture` feature. The build with
+that feature off refused it.
+
+The guard was right and the placement was wrong: **how a provider serves ranges
+is a declaration about a venue**, like a bar width or a rate limit. Only the
+*fetching* is transport. The whole module moved from `source/cursor.rs` to
+`venue/chain.rs`, where nothing in it needs a runtime — which was already true,
+and was why it compiled.
+
+Worth noting because the wall was built to stop a *reader linking a websocket
+stack*, and what it actually caught first was a module in the wrong layer. The
+same mistake wearing a different hat.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

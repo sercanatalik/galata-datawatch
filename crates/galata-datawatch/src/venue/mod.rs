@@ -28,14 +28,19 @@
 //!
 //! **The trait defines no method that places, cancels or amends an order.**
 
+pub mod chain;
 pub mod declaration;
 pub mod symbols;
+pub mod transport;
 pub mod universe;
 
+pub use chain::{BlockPaging, BlockStep, Frontier, PlanError};
 pub use declaration::{
     Budget, ConnectionPolicy, Declaration, DeclarationError, PageDirection, PageEnd, Paging,
 };
 pub use symbols::Symbols;
+pub use transport::{Streaming, Transport};
+
 pub use universe::UniverseError;
 
 use galata_wire::{Series, Ticker};
@@ -116,8 +121,23 @@ pub trait Adapter: Normalise {
     /// this rather than from constants of their own.
     fn declaration(&self) -> &Declaration;
 
-    /// The venue's own channel name for a subscription.
-    fn channel_of(&self, subscription: &Subscription) -> String;
+    /// **What carries this venue's bytes.**
+    ///
+    /// Declared rather than assumed. A venue read by polling has no
+    /// subscription and no keepalive, and before this existed it had to answer
+    /// an empty frame list and a `Keepalive::None` — values that are not false
+    /// but meaningless.
+    fn transport(&self) -> Transport;
+
+    /// The subscribing half, **where there is one**.
+    ///
+    /// `None` is the default and the honest answer for a venue that does not
+    /// subscribe. A caller must handle it, which is the difference between this
+    /// and defaulted methods returning an empty frame list: an empty list is an
+    /// answer a loop will act on, and `None` is not.
+    fn streaming(&self) -> Option<&dyn Streaming> {
+        None
+    }
 
     /// Which series a channel's payloads belong to, for partitioning and for
     /// coverage.
@@ -126,16 +146,6 @@ pub trait Adapter: Normalise {
     /// two are distinguished in `normalise`, not here: a channel that carries
     /// nothing is not an anomaly, and one we do not understand is.
     fn series_of_channel(&self, channel: &str) -> Option<Series>;
-
-    /// The frames that subscribe the given set.
-    ///
-    /// Plural because a venue may carry many instruments in one frame and
-    /// another may want one frame each. The caller sends what it is given and
-    /// knows neither shape.
-    fn subscribe_frames(&self, subscriptions: &[Subscription]) -> Vec<String>;
-
-    /// The venue's keepalive, where it wants one.
-    fn keepalive(&self) -> Keepalive;
 
     /// Read a live frame's envelope — its channel and the venue's own symbol —
     /// **without altering the bytes**.

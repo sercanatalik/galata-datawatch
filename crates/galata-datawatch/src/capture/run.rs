@@ -38,6 +38,16 @@ pub enum CaptureError {
     /// The transport refused.
     #[error(transparent)]
     Source(#[from] SourceError),
+    /// The venue does not push, and this loop reads a socket.
+    #[error(
+        "{endpoint} is not a streaming endpoint. This loop connects and subscribes; a venue read \
+         by position needs the cursor loop, and opening a socket to send it nothing is the \
+         failure the transport declaration exists to prevent"
+    )]
+    NotAStream {
+        /// What it declared.
+        endpoint: String,
+    },
 }
 
 /// Everything the loop is given.
@@ -474,8 +484,20 @@ impl Capture {
         &mut self,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<(), CaptureError> {
-        let url = self.wiring.adapter.declaration().ws_url.to_string();
-        let keepalive = self.wiring.adapter.keepalive();
+        // **Dispatch on what the venue IS**, rather than assuming a socket.
+        let (url, keepalive) = match self.wiring.adapter.transport() {
+            crate::venue::Transport::Stream { ws_url, keepalive } => {
+                (ws_url.to_string(), keepalive)
+            }
+            // A cursor venue has no socket to open. Refusing here is the point
+            // of the transport declaration: the alternative is opening one and
+            // sending it nothing.
+            other => {
+                return Err(CaptureError::NotAStream {
+                    endpoint: other.endpoint().to_string(),
+                });
+            }
+        };
         let mut backoff = crate::source::Backoff::default();
         let mut source = StreamSource::new(&url);
 
@@ -495,10 +517,13 @@ impl Capture {
             // Level-triggered: converge toward the declared set rather than
             // remembering what was sent last time.
             let convergence = self.held.converge();
-            let frames = self
-                .wiring
-                .adapter
-                .subscribe_frames(&convergence.to_subscribe);
+            let frames = match self.wiring.adapter.streaming() {
+                Some(streaming) => streaming.subscribe_frames(&convergence.to_subscribe),
+                // Unreachable: the transport said Stream above. Named rather
+                // than unwrapped, because an adapter declaring a stream and
+                // offering no subscriber is a defect worth reading about.
+                None => Vec::new(),
+            };
             if let Err(error) = source.subscribe(&frames).await {
                 tracing::warn!(error = %error, "subscribe failed");
             }

@@ -327,30 +327,21 @@ impl Adapter for Hyperliquid {
         &self.declaration
     }
 
-    fn channel_of(&self, subscription: &Subscription) -> String {
-        wire::channel_of(subscription.series)
-            .unwrap_or("unknown")
-            .to_string()
+    fn streaming(&self) -> Option<&dyn crate::venue::Streaming> {
+        Some(self)
+    }
+
+    fn transport(&self) -> crate::venue::Transport {
+        crate::venue::Transport::Stream {
+            ws_url: self.declaration.ws_url,
+            // A protocol Ping is refused by this venue as a bad message; it
+            // wants a JSON frame of its own.
+            keepalive: Keepalive::Frame(wire::ping_frame().to_string()),
+        }
     }
 
     fn series_of_channel(&self, channel: &str) -> Option<Series> {
         wire::series_of_channel(channel)
-    }
-
-    /// One frame per subscription: this venue takes a single `coin` per
-    /// subscription message.
-    fn subscribe_frames(&self, subscriptions: &[Subscription]) -> Vec<String> {
-        subscriptions
-            .iter()
-            .filter_map(|s| {
-                let symbol = self.symbols.venue_symbol_for(&s.ticker)?;
-                wire::subscribe_frame(s.series, symbol, &self.candle_interval)
-            })
-            .collect()
-    }
-
-    fn keepalive(&self) -> Keepalive {
-        Keepalive::Frame(wire::ping_frame().to_string())
     }
 
     fn venue_symbol(&self, ticker: &galata_wire::Ticker) -> Option<String> {
@@ -415,6 +406,29 @@ impl Adapter for Hyperliquid {
             origin: Origin::Streamed,
             payload: bytes.to_vec(),
         }
+    }
+}
+
+/// **The subscribing half**, which only a streaming venue has.
+///
+/// A cursor venue implements none of this rather than implementing it emptily.
+impl crate::venue::Streaming for Hyperliquid {
+    fn channel_of(&self, subscription: &Subscription) -> String {
+        wire::channel_of(subscription.series)
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
+    /// One frame per subscription: this venue takes a single `coin` per
+    /// subscription message.
+    fn subscribe_frames(&self, subscriptions: &[Subscription]) -> Vec<String> {
+        subscriptions
+            .iter()
+            .filter_map(|s| {
+                let symbol = self.symbols.venue_symbol_for(&s.ticker)?;
+                wire::subscribe_frame(s.series, symbol, &self.candle_interval)
+            })
+            .collect()
     }
 }
 
@@ -494,6 +508,7 @@ mod tests {
 
     #[test]
     fn the_subscribe_frame_carries_the_prefix() {
+        use crate::venue::Streaming;
         use galata_wire::Ticker;
         let hl = shipped();
         let frames = hl.subscribe_frames(&[

@@ -1,6 +1,13 @@
 //! Paging a chain by **block number**, because a timestamp does not identify a
 //! block.
 //!
+//! **In `venue/` rather than `source/`**, and that placement is load-bearing.
+//! How a provider serves ranges is a *declaration about a venue*, like a bar
+//! width or a rate limit; only the fetching is transport. It was written under
+//! `source/` first, and the build with `capture` off refused it — the third
+//! wall catching a layering mistake rather than a dependency one, which is the
+//! same mistake wearing a different hat.
+//!
 //! **Measured on Robinhood Chain, 2026-09-21.** Twenty consecutive blocks carry
 //! four distinct timestamps:
 //!
