@@ -1945,7 +1945,11 @@ main-dex only, WTIOIL, XYZ100 and GOLD carry no funding and no mark, and the
 declaration must say so rather than the walk discovering it. **The first live
 subscription answers it**, which is the soak's first job.
 
-## Open, and waiting on a soak
+## Was open, waiting on a soak — all three now measured
+
+The soak happened. Each of these had carried a *not measured yet* note since
+Tier 0 or Tier 1, and **two of the three refuted the reasoning they replaced**
+— which is the argument for taking the figure rather than acting on the worry.
 
 - ~~**What does `catch_unwind` cost on the one path?**~~ **Measured: under
   20 ns per call**, and the end-to-end instrument cannot resolve it — its
