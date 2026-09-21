@@ -200,9 +200,8 @@ different shape from the one planned here.
 
 ### Still open in this tier
 
-- **`galata-watch`** — the watcher that judges what the status surface reports.
-  Not built. The status file reports and never judges, deliberately, and the
-  component that judges is a different one; nothing yet is it.
+- ~~**`galata-watch`**~~ — **built**, in Tier 9 where it belongs: it watches the
+  record rather than the scheduler.
 - **A `--replace` flag for the rebuild.** Writing over a partition leaves the
   old segments in place and `check_layout` reports the overlap, which is honest
   but means a re-run needs a manual `rm`. Deleting as a side effect of a rebuild
@@ -412,7 +411,8 @@ called**, and that is stated rather than implied.*
   re-derives a range, so it runs as a backfill of **one run per date**.
 - **Nothing watches the scheduler.** `galata-watch` watches the *record*: a
   heartbeat is a claim, a closed partition still holding 1,412 segments is a
-  fact on disk.
+  fact on disk. **Done** — and it closes the half-made decision from Tier 1,
+  where the status surface refused to judge and nothing else did either.
 
 ---
 
