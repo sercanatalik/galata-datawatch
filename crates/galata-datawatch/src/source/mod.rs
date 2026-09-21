@@ -19,7 +19,7 @@
 //! a fourth cannot be quietly forgotten in one arm of the loop.
 //!
 //! The extension point that matters for out-of-tree work is
-//! [`Adapter`](crate::venue::Adapter), which is a trait.
+//! [`Adapter`], which is a trait.
 
 pub mod backoff;
 pub mod stream;

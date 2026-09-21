@@ -162,6 +162,13 @@ prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
 
+# The documentation builds clean. Plants for itself: it must insert before the
+# tests, and an appended broken link would land in a region cargo doc still
+# reads — but the plant belongs beside the rule either way.
+prove "check-docs (a link to something that does not exist)" \
+      ./scripts/check-docs.sh \
+      crates/galata-wire/src/lib.rs own
+
 # A binary that sweeps a declared store must check it can be read. Plants for
 # itself: it must REPLACE the call, which an append cannot do.
 prove "check-scannable-roots (a binary that sweeps without checking)" \

@@ -2937,6 +2937,44 @@ dozen lines of query against data already on disk — and three of the four were
 found by asking a single question: *does the record agree with what the
 surface says about it?*
 
+## A rustdoc warning that hid for six changes — 2026-09-21
+
+`cargo doc` had been reporting one warning since `doc_cfg` was turned on, and
+it stayed through six changes because **rustdoc reports a redundant explicit
+link without a file or a line**:
+
+```text
+  warning: redundant explicit link target
+    = note: when a link's destination is not specified,
+            the label is used to resolve intra-doc links
+```
+
+Two earlier attempts to find it went wrong in instructive ways. Stripping every
+self-resolving-looking link at once produced **nine** warnings instead of one,
+because most of those targets were genuinely needed. Fixing the two most likely
+candidates individually turned each into an *unresolved* link — worse than the
+warning being fixed.
+
+Bisecting one at a time settled it in six builds: every candidate but one
+gained an unresolved link when stripped, and the remaining one went to zero.
+
+**Guessing cost more than bisecting would have**, twice, on a search space of
+eight.
+
+### And it is now held by the build
+
+`check-docs.sh` runs `cargo doc` with `-D warnings`, the same bargain the rest
+of the workspace makes. A broken intra-doc link is invisible locally and
+permanent once published — the page shows ``[`Thing`]`` as literal text and
+nobody who sees it can do anything about it.
+
+Stable rather than nightly: `--cfg docsrs` only adds the feature badges, link
+resolution is the same either way, and a guard needing a nightly toolchain is a
+guard most machines skip.
+
+Zero warnings across the workspace, and the guard was watched going red on a
+link to something that does not exist.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
