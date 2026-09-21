@@ -2534,6 +2534,68 @@ The claim was in three doc comments and one policy type, each stating it as
 settled. None of them was checked against the record, and the record had the
 answer the whole time — in a query of eleven lines over data already captured.
 
+## `count_1m` was between 55% and 63% of a minute — 2026-09-21
+
+The last capture area in the legacy review. Legacy's coverage carried
+`window_age_micros` — *how long the current counting window has been open* —
+beside **one window shared by every pair**. This tree had neither: each pair's
+window began at that pair's first message and rolled on its own schedule.
+
+So the name asserted a minute, the value was whatever had arrived since that
+pair's window opened, and two counts on one snapshot were over different spans.
+
+### Measured against the record
+
+A snapshot, and what actually arrived in the sixty seconds before it:
+
+| pair | `count_1m` said | arrived in 60 s | |
+|---|---|---|---|
+| BTC trades | 181 | 328 | 55% |
+| BTC quotes | 379 | 616 | 62% |
+| BTC candles | 74 | 123 | 60% |
+| BTC funding | 37 | 59 | 63% |
+
+**Differing per pair**, so an operator comparing BTC trades against BTC quotes
+was comparing 33 seconds against 37 without being told.
+
+### After
+
+One window for all of them, its age stated, and the field named `count`:
+
+```text
+  count_window_secs 37
+
+  pair            count   arrived in the stated window
+  ───────────────────────────────────────────────────
+  BTC trades        157        156
+  BTC quotes        422        412
+  BTC candles        80         79
+  BTC funding        36         36
+```
+
+The residual is the window being truncated to whole seconds — the true window
+was 37-point-something and the query used 37 flat. **2.4% at thirty-seven
+seconds, shrinking as the window fills**, and now written on the field rather
+than left to be discovered. A denominator with an unstated error is the thing
+the field exists to remove.
+
+### Three fields, one shape of mistake
+
+This is the third field on this surface whose **name asserted more than the
+code delivered**:
+
+| field | said | meant |
+|---|---|---|
+| `subs_held` | the venue is delivering it | it was sent |
+| `count_1m` | a minute | 55–63% of one, varying |
+| coverage across a handover | continuous | reconnected, and a second lost |
+
+All three were found by asking the record what the surface claimed, which is a
+cheaper check than it sounds: each was a query of a dozen lines over data
+already captured. **None would have been found by reading the code**, because
+in each case the code matched its own comment — and the comment was the thing
+that was wrong.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -456,7 +456,7 @@ impl Capture {
                     state,
                     last_recv_micros: self.coverage.last_recv(&ticker, series),
                     last_event_micros: self.last_event.get(&(ticker, series)).copied(),
-                    count_1m: self.coverage.count(&subscription.ticker, series),
+                    count: self.coverage.count(&subscription.ticker, series),
                     reason: match outcome {
                         Some(Outcome::Refused { reason }) => Some(reason.clone()),
                         _ => None,
@@ -484,6 +484,7 @@ impl Capture {
             subs_held: self.held.count_held(),
             subs_declared: self.wiring.declared.len(),
             subs_refused: self.held.count_refused(),
+            count_window_secs: (self.coverage.window_age_micros(now_micros) / 1_000_000) as u64,
             last_flush_micros: self.last_flush_micros,
             buffered: self.archive.buffered(),
             sink_dropped: self.wiring.sink.dropped(),

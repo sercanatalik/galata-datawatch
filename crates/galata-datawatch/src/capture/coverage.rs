@@ -27,14 +27,29 @@ struct Ledger {
     last_recv_micros: Option<i64>,
     /// Messages in the window being counted.
     count: u32,
-    /// When that window began.
-    window_started_micros: i64,
 }
 
 /// What each declared pair was covered to.
 #[derive(Debug, Default)]
 pub struct Coverage {
     pairs: BTreeMap<(Ticker, Series), Ledger>,
+    /// **When the counting window opened, for every pair at once.**
+    ///
+    /// One window rather than one per pair. Per pair, each began at that
+    /// pair's first message and rolled on its own schedule — so at any moment
+    /// the counts were over windows of different ages, and comparing two of
+    /// them compared different denominators.
+    ///
+    /// **Measured 2026-09-21**, against what the record shows actually
+    /// arrived in the sixty seconds before the snapshot:
+    ///
+    /// ```text
+    ///   BTC trades    reported 181   arrived 328    55%
+    ///   BTC quotes    reported 379   arrived 616    62%
+    ///   BTC candles   reported  74   arrived 123    60%
+    ///   BTC funding   reported  37   arrived  59    63%
+    /// ```
+    window_started_micros: Option<i64>,
     /// What gaps are clipped against. Continuous for a venue that never
     /// closes; a calendar otherwise.
     clipped: Clipped,
@@ -45,6 +60,7 @@ impl Coverage {
     pub fn new(clipped: Clipped) -> Coverage {
         Coverage {
             pairs: BTreeMap::new(),
+            window_started_micros: None,
             clipped,
         }
     }
@@ -53,13 +69,17 @@ impl Coverage {
     /// message. Used on start, so each pair's gap is dated from something the
     /// record actually holds.
     pub fn known(&mut self, ticker: &Ticker, series: Series, at_micros: i64) {
+        // **The window opens when observation does**, not on the first roll:
+        // a window anchored to the first `roll_counts` would be shorter than
+        // it should be by however long the process took to get there.
+        self.window_started_micros.get_or_insert(at_micros);
         let entry = self.pairs.entry((ticker.clone(), series)).or_default();
         entry.last_recv_micros = Some(at_micros);
-        entry.window_started_micros = at_micros;
     }
 
     /// A message arrived for a pair.
     pub fn received(&mut self, ticker: &Ticker, series: Series, at_micros: i64) {
+        self.window_started_micros.get_or_insert(at_micros);
         let entry = self.pairs.entry((ticker.clone(), series)).or_default();
         entry.last_recv_micros = Some(at_micros);
         entry.count += 1;
@@ -90,12 +110,29 @@ impl Coverage {
     /// **Once the window is over, not once per snapshot.** Rolling per snapshot
     /// would report a pair as quiet between one message and the next.
     pub fn roll_counts(&mut self, now_micros: i64, window_micros: i64) {
-        for ledger in self.pairs.values_mut() {
-            if now_micros - ledger.window_started_micros >= window_micros {
+        let Some(opened) = self.window_started_micros else {
+            // Nothing has been observed, so no window is open and there is
+            // nothing to roll.
+            return;
+        };
+        if now_micros - opened >= window_micros {
+            for ledger in self.pairs.values_mut() {
                 ledger.count = 0;
-                ledger.window_started_micros = now_micros;
             }
+            self.window_started_micros = Some(now_micros);
         }
+    }
+
+    /// How long the counting window has been open.
+    ///
+    /// **Reported beside the counts**, because a count without its window is
+    /// not a rate. The field used to be called `count_1m` and held whatever
+    /// had arrived since that pair's own window opened — between 55% and 63%
+    /// of a minute in the run that found it, differing per pair.
+    pub fn window_age_micros(&self, now_micros: i64) -> i64 {
+        self.window_started_micros
+            .map(|opened| (now_micros - opened).max(0))
+            .unwrap_or(0)
     }
 
     /// A handover completed. Coverage is continuous across it, so every pair is
@@ -206,6 +243,40 @@ mod tests {
         c.received(&t("BTC"), Series::Quotes, 10 * SEC);
         // An hour later, still nothing asked for.
         assert_eq!(c.last_recv(&t("BTC"), Series::Quotes), Some(10 * SEC));
+    }
+
+    #[test]
+    fn every_pair_counts_over_the_same_window() {
+        // **Per pair, each window began at that pair's first message.** Two
+        // counts were then over different spans, and nothing said so. Measured
+        // against the record: between 55% and 63% of a minute, differing per
+        // pair.
+        let mut c = Coverage::new(Clipped::Continuous);
+        c.received(&t("BTC"), Series::Quotes, 0);
+        // ETH starts thirty seconds later.
+        c.received(&t("ETH"), Series::Quotes, 30 * SEC);
+
+        // Half a minute on, the window is 45 s old — for both of them.
+        assert_eq!(c.window_age_micros(45 * SEC), 45 * SEC);
+
+        // And both roll together, on the window that opened first.
+        c.roll_counts(60 * SEC, 60 * SEC);
+        assert_eq!(c.count(&t("BTC"), Series::Quotes), 0);
+        assert_eq!(c.count(&t("ETH"), Series::Quotes), 0);
+        assert_eq!(
+            c.window_age_micros(60 * SEC),
+            0,
+            "the new window just opened"
+        );
+    }
+
+    #[test]
+    fn a_window_that_never_opened_has_no_age() {
+        // Nothing observed yet is not "a full window of silence".
+        let mut c = Coverage::new(Clipped::Continuous);
+        assert_eq!(c.window_age_micros(100 * SEC), 0);
+        c.roll_counts(100 * SEC, 60 * SEC);
+        assert_eq!(c.window_age_micros(100 * SEC), 0);
     }
 
     #[test]

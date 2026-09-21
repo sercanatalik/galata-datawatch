@@ -80,7 +80,11 @@ pub struct PairStatus {
     /// matters, and a surface reporting one of them cannot produce it.
     pub last_event_micros: Option<i64>,
     /// Messages in the counting window.
-    pub count_1m: u32,
+    ///
+    /// **Not a rate.** The window's age is `count_window_secs` on the
+    /// snapshot, and it is the denominator — this was called `count_1m` and
+    /// held between 55% and 63% of a minute, differing per pair.
+    pub count: u32,
     /// What the venue said, where it refused.
     pub reason: Option<String>,
 }
@@ -139,6 +143,18 @@ pub struct Status {
     pub subs_declared: usize,
     /// How many the venue refused.
     pub subs_refused: usize,
+    /// **How long the counting window has been open**, which is every pair's
+    /// `count` denominator.
+    ///
+    /// One window for all of them: per pair, each rolled on its own schedule
+    /// and two counts were over different spans without saying so.
+    ///
+    /// **Truncated to whole seconds**, like the other durations here, so a
+    /// count covers up to a second more than this states — 2.4% at a
+    /// thirty-seven second window, and less as it fills. Said rather than
+    /// hidden: a denominator with an unstated error is the thing this field
+    /// exists to remove.
+    pub count_window_secs: u64,
     /// When the buffer was last committed.
     pub last_flush_micros: Option<i64>,
     /// **Payloads received and not yet durable.**
@@ -222,6 +238,7 @@ mod tests {
             subs_held: 6,
             subs_declared: 6,
             subs_refused: 0,
+            count_window_secs: 60,
             last_flush_micros: Some(900),
             buffered: 3,
             sink_dropped: 0,
@@ -232,7 +249,7 @@ mod tests {
                 state: PairState::Live,
                 last_recv_micros: Some(990),
                 last_event_micros: Some(980),
-                count_1m: 42,
+                count: 42,
                 reason: None,
             }],
         }
