@@ -146,6 +146,12 @@ pub struct Status {
     /// The live size of the window a crash would convert into a gap — the one
     /// number here that is a direct measure of standing risk.
     pub buffered: usize,
+    /// **Events the sink dropped** because it could not keep up.
+    ///
+    /// Zero for a sink that cannot drop. A non-zero value here is the one
+    /// number that says the stream is behind the record — and the record is
+    /// still complete, which is why capture did not stop for it.
+    pub sink_dropped: u64,
     /// A walk, while one is running — **absent otherwise**, so a long backfill
     /// is visible rather than silent and a finished one leaves nothing stale.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,6 +224,7 @@ mod tests {
             subs_refused: 0,
             last_flush_micros: Some(900),
             buffered: 3,
+            sink_dropped: 0,
             walking: None,
             pairs: vec![PairStatus {
                 ticker: Ticker::new("BTC").unwrap(),

@@ -398,6 +398,7 @@ impl Capture {
             subs_refused: self.held.count_refused(),
             last_flush_micros: self.last_flush_micros,
             buffered: self.archive.buffered(),
+            sink_dropped: self.wiring.sink.dropped(),
             walking: self.walking.clone(),
             pairs,
         }

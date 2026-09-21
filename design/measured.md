@@ -606,6 +606,71 @@ because thirty fields is thirty chances to forget one, silently.
 
 Asserted: `0.000000000000000123` is stored as that string and read back equal.
 
+## The broker, against a real server — 2026-09-21
+
+`galata-broker` is the fourth crate. The wall it exists for, measured rather
+than asserted:
+
+```
+  cargo tree -p galata-broker  →  0 parquet crates, 0 arrow crates
+```
+
+A component that reads the stream takes the vocabulary and the broker and gets
+no store with them. In the predecessor tree eighteen crates reached the bus
+through the crate that also owned the archive writer, so the one crate whose
+entire justification was linking no history linked `parquet` transitively.
+`check-workspace-deps.sh` now holds this, and the plant proves it fails.
+
+### The boot asymmetry, three cases against `nats-server`
+
+| case | behaviour | exit |
+|---|---|---|
+| broker absent (dead port) | warns, runs on `NullSink`, capture unaffected | — |
+| wrong password | refuses to boot, naming identity and variable | **1** |
+| correct | publishes | — |
+
+```
+Error: Rejected { addr: "nats://127.0.0.1:4222", identity: "datawatch",
+                  var: "GALATA_PW", reason: "authorization violation" }
+```
+
+The password does not appear, because `BrokerIdentity` has no derived `Debug`.
+
+Both cases arrived as one error in the predecessor, which is why *archiving
+everything and publishing nothing for a day* looked exactly like *a broker
+outage for a day*.
+
+### A second process, linking no parquet
+
+```
+listening on markets.hyperliquid.BTC.quotes
+seq=1332  hyperliquid BTC  at=Some(1789976093843000) quotes
+seq=1334  hyperliquid BTC  at=Some(1789976093909000) quotes
+```
+
+and a wildcard across instruments:
+
+```
+listening on markets.hyperliquid.*.trades
+seq=1692  hyperliquid ETH  ...
+seq=1706  hyperliquid BTC  ...
+```
+
+The `seq` is the archive row the bytes are in — the road back from any message
+to what actually arrived.
+
+### The one place this design departs from the predecessor
+
+`Sink::emit` is **synchronous**, so `NatsSink` hands over through a bounded
+channel with `try_send`. A full channel drops and counts; it never blocks the
+thread that is archiving. The predecessor awaits its publish inside the one
+path, so a slow broker slows capture there.
+
+The drop count was, briefly, a number only a unit test could see. It is on the
+status surface as `sink_dropped`, because **a drop that is counted and never
+published is a drop nobody sees** — which is exactly the failure the counter
+exists to prevent.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

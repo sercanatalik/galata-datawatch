@@ -17,6 +17,11 @@
 #      format to do it. In the predecessor tree eighteen crates reached the
 #      broker through the crate that also owned the archive writer, so the one
 #      crate designed to link no history linked parquet transitively.
+#   4. galata-broker links galata-wire and NO OTHER CRATE OF THIS WORKSPACE.
+#      That is the other side of the same wall: a component that reads the
+#      stream takes the vocabulary and the broker, and gets no store with them.
+#      Measured — `cargo tree -p galata-broker` holds zero parquet and zero
+#      arrow crates — and asserted here so it stays that way.
 #
 # Usage: check-workspace-deps.sh [root]
 
@@ -57,6 +62,19 @@ for member in members:
                         f"{name}: {table}.{dep} re-declares version {spec!r} the workspace "
                         f"already declares — say `workspace = true`"
                     )
+            # Rule 4: the broker's wall — the other side of rule 3.
+            if (
+                name == "galata-broker"
+                and table == "dependencies"
+                and dep.startswith("galata-")
+                and dep != "galata-wire"
+            ):
+                problems.append(
+                    f"galata-broker: {dep} is a workspace crate other than galata-wire. A "
+                    f"component that reads the stream takes the vocabulary and the broker and "
+                    f"must get no store with them."
+                )
+
             # Rule 3: the vocabulary crate's wall.
             if name == "galata-wire" and table == "dependencies" and dep not in WIRE_ALLOWED:
                 problems.append(

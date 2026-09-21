@@ -149,6 +149,31 @@ pub struct Capture {
     pub walk_cap: u32,
 }
 
+/// Where events go, if anywhere.
+///
+/// **Optional.** The record does not depend on the broker, so a configuration
+/// with no `[broker]` block captures to disk and publishes nothing — a
+/// supported state rather than a degraded one.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Broker {
+    /// Where the broker is.
+    pub url: String,
+    /// The identity this process presents. **Nothing connects anonymously.**
+    pub user: String,
+    /// The environment variable holding the secret.
+    ///
+    /// The name, not the secret. A password in a configuration file is a
+    /// password in version control, and this file is committed.
+    pub password_var: String,
+    /// How many events may be outstanding towards the broker.
+    ///
+    /// **Exactly the number a broker stall can swallow before events start
+    /// being dropped**, which is an operator's trade rather than ours — so it
+    /// is declared, with no default.
+    pub queue: usize,
+}
+
 /// What the operator declared should be kept, if anything.
 ///
 /// **Optional, and with no defaults.** Numbers are the measurer's and horizons
@@ -221,6 +246,8 @@ pub struct Config {
     /// What is kept, if anything. Absent means nothing expires.
     #[serde(default)]
     pub retention: Retention,
+    /// Where events go. Absent means nowhere, and capture runs anyway.
+    pub broker: Option<Broker>,
     /// What to capture, per venue.
     pub venue: BTreeMap<String, VenueConfig>,
 }
@@ -307,6 +334,17 @@ impl Config {
                 field: "capture.walk_cap",
                 value: self.capture.walk_cap.to_string(),
                 bound: "1..=100000",
+            });
+        }
+
+        if let Some(broker) = &self.broker
+            && !(1..=1_000_000).contains(&broker.queue)
+        {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "broker.queue",
+                value: broker.queue.to_string(),
+                bound: "1..=1000000 — the events a broker stall may swallow before they drop",
             });
         }
 
@@ -532,5 +570,34 @@ instruments = [
         // A venue absent from the block is kept forever rather than assigned a
         // number nobody chose.
         assert_eq!(policy.venues.get("rh-crypto"), None);
+    }
+
+    #[test]
+    fn a_configuration_with_no_broker_publishes_nowhere() {
+        // The record does not depend on the broker, so this is a supported
+        // state rather than a degraded one.
+        assert_eq!(load(GOOD).unwrap().broker, None);
+    }
+
+    #[test]
+    fn a_broker_names_a_variable_and_never_a_secret() {
+        let text = format!(
+            "{GOOD}\n[broker]\nurl = \"nats://localhost:4222\"\nuser = \"datawatch\"\n\
+             password_var = \"GALATA_DATAWATCH_PASSWORD\"\nqueue = 8192\n"
+        );
+        let broker = load(&text).unwrap().broker.unwrap();
+        assert_eq!(broker.password_var, "GALATA_DATAWATCH_PASSWORD");
+        assert_eq!(broker.queue, 8192);
+        // There is no field a secret could be written into.
+        assert!(!format!("{broker:?}").to_lowercase().contains("password\":"));
+    }
+
+    #[test]
+    fn a_queue_of_zero_is_refused() {
+        let text = format!(
+            "{GOOD}\n[broker]\nurl = \"nats://x\"\nuser = \"u\"\npassword_var = \"V\"\nqueue = 0\n"
+        );
+        let err = load(&text).unwrap_err().to_string();
+        assert!(err.contains("broker.queue"), "{err}");
     }
 }

@@ -22,6 +22,7 @@ workspace = true
 arrow.workspace = true
 galata-segments = { version = "0.1.0", path = "../galata-segments" }
 galata-wire = { version = "0.1.0", path = "../galata-wire" }
+galata-broker = { version = "0.1.0", path = "../galata-broker", optional = true }
 # The adapter parses frames. Still no runtime, no HTTP client, no broker.
 serde.workspace = true
 serde_json.workspace = true
@@ -44,7 +45,7 @@ hyperliquid = []
 # The binary, and the log formatter only it needs. A library consumer taking
 # `default-features = false` gets the capture machinery without a subscriber
 # they will replace anyway.
-bin = ["dep:tracing-subscriber"]
+bin = ["dep:tracing-subscriber", "dep:galata-broker"]
 
 [[bin]]
 name = "galata-datawatch"

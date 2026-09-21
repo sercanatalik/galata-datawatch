@@ -73,6 +73,30 @@ instruments = [
   { ticker = "GOLD",   dex = "xyz" },
 ]
 
+# THE BROKER IS NOT DECLARED HERE EITHER, AND CAPTURE RUNS ANYWAY.
+#
+# The record does not depend on the broker: with no `[broker]` block, events
+# are archived and published nowhere, which is a supported state rather than a
+# degraded one. A nine-hour soak ran exactly this way.
+#
+# To publish:
+#
+#   [broker]
+#   url = "nats://127.0.0.1:4222"
+#   # Nothing connects anonymously.
+#   user = "datawatch"
+#   # THE NAME OF A VARIABLE, never a secret. This file is committed.
+#   password_var = "GALATA_DATAWATCH_PASSWORD"
+#   # Exactly the number of events a broker stall may swallow before they
+#   # start being dropped. Dropped events are counted and appear on the
+#   # status surface as `sink_dropped`; capture never blocks for the broker.
+#   queue = 8192
+#
+# A broker that DOES NOT ANSWER is an outage: the process warns and carries on.
+# A broker that REFUSES THE IDENTITY is a misconfiguration that will never fix
+# itself, and the process exits non-zero rather than archiving everything,
+# publishing nothing, and being unable to report it.
+
 # RETENTION IS NOT DECLARED HERE, AND THAT IS THE DEFAULT.
 #
 # Numbers are the measurer's and horizons are the operator's. A default in this

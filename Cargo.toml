@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/galata-wire",
+    "crates/galata-broker",
     "crates/galata-segments",
     "crates/galata-datawatch",
 ]
@@ -45,6 +46,10 @@ parquet = { version = "60", features = ["arrow"] }
 # round-trips as a string instead, globally, because the per-field alternative
 # is thirty annotations and the failure of forgetting one is silent.
 rust_decimal = { version = "1", features = ["serde-str"] }
+# The bus. 0.50 is the current line; `publish` buffers internally and returns
+# without waiting for the wire, which is what lets a bounded channel in front of
+# it be the only place backpressure is decided.
+async-nats = "0.50"
 serde = { version = "1", features = ["derive"] }
 # `raw_value` is load-bearing, not a convenience: a normaliser peeks at a
 # frame's channel and takes its `data` as a borrowed span, then types that span

@@ -1,0 +1,34 @@
+[package]
+name = "galata-broker"
+description = "Where galata-datawatch's normalised events leave the process: subjects, identities, and a NATS publisher and subscriber."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["market-data", "nats", "messaging", "trading", "finance"]
+categories = ["network-programming", "finance"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+[lints]
+workspace = true
+
+# **The other side of the dependency wall.** A downstream algo takes
+# `galata-wire` and this crate and links no parquet — which is the wall the
+# predecessor's `algo-fast` reached for and did not get, because eighteen crates
+# reached the bus through the crate that also owned the archive writer.
+#
+# `scripts/check-workspace-deps.sh` fails the build if a workspace dependency
+# other than `galata-wire` appears here.
+[dependencies]
+galata-wire = { version = "0.1.0", path = "../galata-wire" }
+async-nats.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The example subscriber needs a runtime; the library itself does not spawn
+# anything and takes no runtime dependency of its own.
+tokio = { workspace = true }

@@ -39,6 +39,17 @@ pub enum SinkError {
 /// path crosses this for every event of every payload, and a sink that waits
 /// on a network turns a broker outage into a capture slowdown.
 pub trait Sink: Send + Sync {
+    /// How many events this sink has dropped because it could not keep up.
+    ///
+    /// **Zero for a sink that cannot drop**, which is most of them. It is on
+    /// the trait rather than on the one implementation that can, because the
+    /// status surface reports it and the loop holds a `dyn Sink` — and a
+    /// drop that is counted but never published is a drop nobody sees, which
+    /// is the failure the counter exists to prevent.
+    fn dropped(&self) -> u64 {
+        0
+    }
+
     /// Hand off one event. Returns immediately.
     fn emit(&self, envelope: &Envelope) -> Result<(), SinkError>;
 }
@@ -84,6 +95,72 @@ impl Sink for CollectingSink {
             .expect("not poisoned")
             .push(envelope.clone());
         Ok(())
+    }
+}
+
+/// The bridge from a **synchronous** sink to an **asynchronous** broker.
+///
+/// ```text
+///   ingest ──▶ NatsSink::emit ──try_send──▶ [bounded] ──▶ task ──▶ NATS
+///              synchronous,                  capacity N   async
+///              never blocks
+/// ```
+///
+/// **`try_send`, never `send`.** A full channel means the broker is slower than
+/// capture, and the answer to that is to drop and count — not to block the
+/// thread that is archiving. The record is the thing that must not stall; the
+/// stream is a cache of it. This is the whole reason [`Sink::emit`] is
+/// synchronous, and the predecessor's is not: there, a slow broker slows
+/// capture.
+///
+/// **Drops are counted, never silent.** A publish that quietly did nothing is
+/// indistinguishable from one that worked.
+#[derive(Debug)]
+pub struct NatsSink {
+    tx: tokio::sync::mpsc::Sender<Envelope>,
+    dropped: std::sync::atomic::AtomicU64,
+}
+
+impl NatsSink {
+    /// Wrap a sender, and say how many events may be outstanding.
+    ///
+    /// The capacity is **exactly the number of events a broker stall can
+    /// swallow before they start being dropped**, so it is declared by an
+    /// operator rather than defaulted by us.
+    pub fn new(tx: tokio::sync::mpsc::Sender<Envelope>) -> NatsSink {
+        NatsSink {
+            tx,
+            dropped: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// How many events have been dropped because the broker was behind.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Sink for NatsSink {
+    fn dropped(&self) -> u64 {
+        NatsSink::dropped(self)
+    }
+
+    fn emit(&self, envelope: &Envelope) -> Result<(), SinkError> {
+        match self.tx.try_send(envelope.clone()) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                let n = self
+                    .dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                Err(SinkError::Refused(format!(
+                    "the broker is behind capture; {n} events dropped so far"
+                )))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(SinkError::Refused(
+                "the broker task has stopped; events are recorded but not published".into(),
+            )),
+        }
     }
 }
 
@@ -137,5 +214,82 @@ pub(crate) mod testing {
         fn emit(&self, _envelope: &Envelope) -> Result<(), SinkError> {
             Err(SinkError::Refused("this sink refuses everything".into()))
         }
+    }
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+
+    /// A sink whose channel is full from the first message.
+    fn full_sink() -> NatsSink {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        // One slot, filled, and the receiver held so the channel stays open.
+        tx.try_send(envelope()).unwrap();
+        std::mem::forget(rx);
+        NatsSink::new(tx)
+    }
+
+    fn envelope() -> Envelope {
+        use galata_wire::{Clipped, Event, Gap, GapCause, Series, Ticker, Venue};
+        Envelope::new(
+            Venue::new("hyperliquid").unwrap(),
+            Ticker::new("BTC").unwrap(),
+            Some(1),
+            2,
+            Event::Gap(Gap {
+                series: Series::Quotes,
+                from_micros: 0,
+                to_micros: 1,
+                cause: GapCause::SessionLost,
+                clipped: Clipped::Continuous,
+            }),
+        )
+    }
+
+    #[test]
+    fn a_full_channel_drops_and_does_not_block() {
+        // The record is the thing that must not stall. This test returning at
+        // all is the assertion — `send` would deadlock here, and `try_send`
+        // does not.
+        let sink = full_sink();
+        assert!(sink.emit(&envelope()).is_err());
+        assert_eq!(sink.dropped(), 1);
+    }
+
+    #[test]
+    fn a_drop_is_counted_and_named() {
+        // A publish that silently did nothing is indistinguishable from one
+        // that worked.
+        let sink = full_sink();
+        for _ in 0..3 {
+            let _ = sink.emit(&envelope());
+        }
+        assert_eq!(sink.dropped(), 3);
+        let error = sink.emit(&envelope()).unwrap_err().to_string();
+        assert!(error.contains("4 events dropped"), "{error}");
+        assert!(error.contains("behind capture"), "{error}");
+    }
+
+    #[test]
+    fn a_stopped_broker_task_is_told_apart_from_a_full_one() {
+        // Different facts: one is the broker being slow, the other is the
+        // publishing half being gone entirely.
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        drop(rx);
+        let sink = NatsSink::new(tx);
+        let error = sink.emit(&envelope()).unwrap_err().to_string();
+        assert!(error.contains("stopped"), "{error}");
+        assert!(error.contains("recorded but not published"), "{error}");
+        assert_eq!(sink.dropped(), 0, "a closed channel is not a drop count");
+    }
+
+    #[test]
+    fn an_event_reaches_the_channel_when_there_is_room() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let sink = NatsSink::new(tx);
+        assert!(sink.emit(&envelope()).is_ok());
+        assert_eq!(rx.try_recv().unwrap(), envelope());
+        assert_eq!(sink.dropped(), 0);
     }
 }

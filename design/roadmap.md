@@ -217,20 +217,33 @@ different shape from the one planned here.
 
 ## Tier 4 — the broker
 
-- **`galata-broker`** — `Publisher`/`Subscriber` traits, `NatsBroker`,
-  `BrokerIdentity`, grants, `encode`. Depends on `galata-wire` and **nothing
-  else**.
-- Moving it here also dissolves the `grants ↔ ingest` dev-dependency cycle that
-  legacy documents in `crates/ingest/Cargo.toml`.
-- `ingest` emits to it; `status.<venue>` carries the full snapshot on a timer.
-- **The boot asymmetry, kept verbatim:** a broker that is *absent* warns and the
-  process runs on a `NullSink` — the record does not depend on the broker. A
-  broker that *rejects the identity* refuses to boot, because that is a
-  misconfiguration that will never fix itself, and running on would mean
-  archiving everything, publishing nothing, and being unable to report it.
+*Done.*
 
-> **Exit:** a second process subscribes `markets.hyperliquid.BTC.quotes` and
-> links no parquet.
+- **`galata-broker`** — `Publisher`/`Subscriber`, `NatsPublisher`,
+  `NatsSubscriber`, `BrokerIdentity`, `Subject`, `encode`. Depends on
+  `galata-wire` and **nothing else of this workspace**; measured at zero
+  parquet and zero arrow crates, and held by `check-workspace-deps.sh`.
+- **The boot asymmetry, verified against a real server.** Absent → warn and run
+  on a `NullSink`. Identity refused → exit non-zero, naming the identity and the
+  variable, never the secret.
+- **`NatsSink`** bridges the **synchronous** `Sink::emit` to the async client
+  across a bounded channel. `try_send`, never `send`: a full channel drops and
+  counts rather than blocking the thread that is archiving. Drops appear on the
+  status surface as `sink_dropped`.
+- `Subject` lives in the broker rather than the vocabulary — a subject is a bus
+  concept, and the record and the tape have none.
+
+### Still open in this tier
+
+- **`status.<venue>` is not published yet.** The status *file* is written on its
+  timer and is the surface that works when the broker does not; putting the
+  same snapshot on the bus is a small addition and is not done.
+- **Grants.** The server's user table is what makes *"this component reads only
+  market data"* a rule the server enforces rather than one somebody reviews.
+  The types here make the intent legible; nothing generates the table.
+
+> **Exit, met:** a second process subscribed `markets.hyperliquid.BTC.quotes`,
+> received live envelopes carrying their archive sequence, and links no parquet.
 
 ---
 

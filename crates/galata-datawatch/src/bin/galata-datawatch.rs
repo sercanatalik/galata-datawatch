@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
+use galata_broker::{BrokerIdentity, NatsPublisher, Publisher, Subject};
 use galata_datawatch::adapters::{self, AdapterConfig, History};
 use galata_datawatch::capture::{Capture, Clock, SystemClock, WalkInterval, WalkRequest, Wiring};
 use galata_datawatch::config::{Adapters, Config};
-use galata_datawatch::sink::NullSink;
+use galata_datawatch::sink::{NatsSink, NullSink, Sink};
 use galata_datawatch::venue::Subscription;
-use galata_wire::{Clipped, Series, Ticker};
+use galata_wire::{Clipped, Envelope, Series, Ticker};
 
 /// What the loader asks an adapter, answered without this file naming a venue.
 struct Resolver;
@@ -114,12 +115,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|series| (*series, WalkInterval::live(live_interval)))
             .collect();
 
+        // **The boot asymmetry.** A broker that is ABSENT is an outage the
+        // record survives, so capture runs on a NullSink and says so. A broker
+        // that REJECTS THE IDENTITY is a misconfiguration that will never fix
+        // itself — and the status surface that would report it is a publish
+        // too, so running on would mean archiving everything, publishing
+        // nothing, and being unable to say so.
+        let sink: Arc<dyn Sink> = match &config.broker {
+            None => {
+                tracing::info!(
+                    "no broker is configured; events are recorded and not published. The record \
+                     does not depend on one"
+                );
+                Arc::new(NullSink)
+            }
+            Some(broker) => {
+                let password = std::env::var(&broker.password_var).map_err(|_| {
+                    format!(
+                        "{} is not set, and [broker] names it. Nothing connects anonymously",
+                        broker.password_var
+                    )
+                })?;
+                let identity =
+                    BrokerIdentity::new(broker.user.clone(), password, broker.password_var.clone());
+                match NatsPublisher::connect(&broker.url, &identity).await {
+                    Ok(publisher) => {
+                        let (tx, rx) = tokio::sync::mpsc::channel(broker.queue);
+                        tokio::spawn(publish_loop(publisher, rx));
+                        tracing::info!(url = broker.url, user = broker.user, "publishing");
+                        Arc::new(NatsSink::new(tx))
+                    }
+                    // Fatal: it will never fix itself.
+                    Err(refusal) if refusal.is_fatal() => return Err(Box::from(refusal)),
+                    Err(refusal) => {
+                        tracing::warn!(
+                            "{refusal}\n  Capture continues and the record is unaffected; \
+                             events are not published until this is fixed"
+                        );
+                        Arc::new(NullSink)
+                    }
+                }
+            }
+        };
+
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let mut capture = Capture::new(Wiring {
             adapter,
-            // No broker yet. The record does not depend on one, so running
-            // without it is a supported state rather than a degraded one.
-            sink: Arc::new(NullSink),
+            sink,
             clock,
             archive_root: config.paths.archive.clone(),
             status_dir: config.paths.status.clone(),
@@ -200,4 +242,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+/// Drain the queue onto the bus.
+///
+/// **The only place that awaits a publish.** `NatsSink::emit` is synchronous
+/// and hands over through a bounded channel, so a broker that is slow costs
+/// dropped events and a counter — never a stalled capture loop.
+async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Receiver<Envelope>) {
+    let mut reachable = true;
+    while let Some(envelope) = rx.recv().await {
+        let Some(subject) = Subject::of(&envelope) else {
+            // Addressed to a market rather than a venue. Nothing capture
+            // produces is, today; publishing it to an invented subject would
+            // be worse than declining to.
+            continue;
+        };
+        match publisher.publish(&subject, &envelope).await {
+            Ok(()) => {
+                if !reachable {
+                    tracing::info!("the broker is taking events again");
+                    reachable = true;
+                }
+            }
+            Err(error) => {
+                // **On the edge, not per message.** A warning per event is what
+                // buries a log, and the count is on the status surface.
+                if reachable {
+                    tracing::warn!(%error, "the broker refused an event; the record is unaffected");
+                    reachable = false;
+                }
+            }
+        }
+    }
+    // The channel closed, which means capture is shutting down. Push what the
+    // client still holds: `publish` buffers, so a publish that returned is not
+    // yet a publish that arrived.
+    if let Err(error) = publisher.flush().await {
+        tracing::warn!(%error, "the broker did not take the last of the buffer");
+    }
 }
