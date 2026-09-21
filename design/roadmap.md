@@ -331,8 +331,11 @@ source before it existed turned out to buy more than tidy refusals.
   tape's candles.
 - **`rust-embed`** with `#[folder = "$CARGO_MANIFEST_DIR/ui/dist"]` — one binary
   serves API and screen.
-- `check-no-float-money.sh` gains its **Rust twin**: no `f64` in any type that
-  crosses the contract.
+- ~~`check-no-float-money.sh` gains its **Rust twin**: no `f64` in any type
+  that crosses the contract.~~ **Done, and it lives here** rather than in the
+  tower: the types it guards are `galata-wire`'s. Three rules — no float field
+  in the vocabulary, no `serde-float` on `rust_decimal`, no float arrow column
+  — each watched failing on its own plant.
 
 > **Exit:** `./galata-tower` on `:8777` shows six instruments, their ages, the
 > record's segment counts per closed day, and a chart — with no node process

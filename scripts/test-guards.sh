@@ -162,6 +162,27 @@ prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
 
+# Money never becomes a float. Three rules, three plants.
+
+# 1. A float field in the vocabulary. Plants for itself, before the tests.
+prove "check-no-float-money (a float field in the vocabulary)" \
+      ./scripts/check-no-float-money.sh \
+      crates/galata-wire/src/event.rs own
+
+# 2. The serde feature that routes every Num through a double.
+prove "check-no-float-money (rust_decimal serialising as a float)" \
+      ./scripts/check-no-float-money.sh \
+      Cargo.toml \
+      replace 'features = ["serde-str"]' \
+      'features = ["serde-str", "serde-float"]'
+
+# 3. A float column in a columnar schema.
+prove "check-no-float-money (a float column)" \
+      ./scripts/check-no-float-money.sh \
+      crates/galata-datawatch/src/tape/schema.rs \
+      replace 'Field::new("tick_size", PRICE, false),' \
+      'Field::new("tick_size", DataType::Float64, false),'
+
 # Every feature combination builds. Plants for itself: it must remove a cfg,
 # which an append cannot do.
 prove "check-feature-matrix (a venue-less build stops compiling)" \

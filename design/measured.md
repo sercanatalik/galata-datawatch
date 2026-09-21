@@ -2071,6 +2071,35 @@ at the head means the record holds rows the chain later replaces**, and until
 something said *which*, a reader held the contradiction with no way to apply
 it. That was the missing piece.
 
+## The decimal rule is now held by the build — 2026-09-21
+
+`Num` is `rust_decimal` with `serde-str`, so an amount round-trips as text and
+never through a double. That rule is the oldest in the tree and was held
+**entirely by everyone remembering**.
+
+Three ways to break it, none broken today, all now guarded:
+
+| break | why nothing would notice |
+|---|---|
+| an `f32`/`f64` field in `galata-wire` | the vocabulary crosses the bus, the parquet schema and the HTTP contract — wrong in all three at once |
+| `rust_decimal`'s `serde-float` feature | every `Num` serialises through a double with **no type change, no call-site change and no warning** |
+| a `Float` arrow column | the tape asserts this in a test, which covers the tape and not `galata-segments` |
+
+The second is the dangerous one. The workspace manifest has always carried a
+comment saying `serde-str` *is not a default and is load-bearing*; nothing
+checked that the comment was obeyed. `rust_decimal`'s own documentation says
+not to enable `serde-float` for precision-critical data, and the guard now says
+the same thing in a form that fails.
+
+**A guard is worth writing while the rule still holds.** Afterwards the rows
+are written and unrecoverable — a double that has lost digits cannot say which
+ones.
+
+The guard also requires `serde-str` to be *present*, not merely `serde-float`
+absent. Without it a `Num` serialises as a JSON number, and the loss happens in
+the consumer's parser rather than here, which is worse: the bytes this tree
+wrote were right.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
