@@ -66,14 +66,24 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // **Explicit, like `galata-retain --delete`.** Removing what a previous run
+    // wrote is the kind of thing that should require saying so.
+    let replace = args.iter().any(|a| a == "--replace");
+    args.retain(|a| a != "--replace");
     let (venue_name, from_date, to_date) = match args.as_slice() {
         [venue, date] => (venue.clone(), date.clone(), None),
         [venue, from, to] => (venue.clone(), from.clone(), Some(to.clone())),
         _ => {
             eprintln!(
-                "usage: galata-tape-rebuild <venue> <date>\n       galata-tape-rebuild <venue> \
-                 <from-date> <to-date>   (half-open)"
+                "usage: galata-tape-rebuild [--replace] <venue> <date>\n       \
+                 galata-tape-rebuild [--replace] <venue> <from-date> <to-date>   (half-open)\n\n\
+                 --replace removes the partitions this run will write, BEFORE writing them, so \
+                 they are empty for the duration of the rebuild. The tape is a cache and the \
+                 archive is untouched, so the remedy for a crash in that window is to run it \
+                 again.\n\n\
+                 Without it, a re-run after the archive has grown leaves both copies and \
+                 check_layout reports the overlap — which a scheduled retry will hit."
             );
             return Ok(BAD_ARGUMENT);
         }
@@ -112,13 +122,18 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let adapter = adapters::build(AdapterConfig::from_declared(&venue_name, venue)?)?;
     let scope = format!("venue={venue_name}");
 
-    let report = tape::rebuild(
+    let report = tape::rebuild_with(
         &config.paths.archive,
         &config.paths.tape,
         adapter.as_ref(),
         Some(&[&scope]),
         from_micros,
         to_micros,
+        if replace {
+            tape::Replace::Partitions
+        } else {
+            tape::Replace::Never
+        },
     )?;
 
     if report.is_empty() {

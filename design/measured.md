@@ -1238,6 +1238,50 @@ The roadmap's suggestion that `galata-segments` could go **early** is supported
 by this: it is standalone, it dry-runs clean today, and real users would find
 the cursor API's rough edges while the version still costs nothing to change.
 
+## A defect a test fixture walked into — 2026-09-21
+
+Writing the `--replace` test needed an archive that **grows between two
+rebuilds**, which is what a scheduled retry sees. The obvious fixture reopened
+the archive and appended one payload. It failed, and the reason is a real
+defect rather than a fixture problem.
+
+```rust
+pub fn next_seq(&mut self) -> u64 { let seq = self.next_seq; self.next_seq += 1; seq }
+```
+
+`Archive::open` sets `next_seq: 0` and **nothing ever reads it back from disk**.
+So every restart hands out sequences starting at zero, colliding with the ones
+already written.
+
+### Why that matters beyond a fixture
+
+The tape's `stream_seq` is documented as *"the road back from any row to the
+bytes they came from"*. After one restart, two different archived payloads carry
+`seq = 0`, and two tape rows point at both. **The road back forks.**
+
+The archive itself is unharmed — its segments are named by *receipt time* and
+the `seq` column only joins a failure row to its payload within one flush. It is
+the **provenance claim** that is false, and only after a restart, which is why
+nine hours of soak never showed it.
+
+What is *not* broken, and worth stating so the scope is clear:
+
+- Segment names do not collide. One rebuild reads a whole range and commits one
+  segment per partition, so two payloads both numbered 0 land in the same file.
+- `(recv_micros, stream_seq)` together are still near-unique, and both columns
+  are on every tape row — so the road back exists, it is just not the one
+  column the documentation names.
+
+### Not fixed here
+
+This change is about `--replace`, and a sequence scheme is its own decision with
+its own trade-offs: resume from disk (the archive is not indexed by sequence),
+seed from a clock (conflates two things), or amend the documented claim to name
+both columns. Fixing it inside an unrelated change is how a small correction
+becomes an unreviewed one.
+
+The test fixture sets its sequences by hand and says why.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

@@ -202,10 +202,16 @@ different shape from the one planned here.
 
 - ~~**`galata-watch`**~~ — **built**, in Tier 9 where it belongs: it watches the
   record rather than the scheduler.
-- **A `--replace` flag for the rebuild.** Writing over a partition leaves the
-  old segments in place and `check_layout` reports the overlap, which is honest
-  but means a re-run needs a manual `rm`. Deleting as a side effect of a rebuild
-  should require saying so.
+- ~~**A `--replace` flag for the rebuild.**~~ **Done**, and it was not a
+  convenience: Tier 9 runs the rebuild from a scheduler, every scheduler
+  retries, and a retry after the archive has grown wrote both copies.
+- **`stream_seq` is not unique across restarts.** `Archive::next_seq` starts at
+  zero on every `open`, so after a restart two archived payloads share a
+  sequence and the tape's *"road back to the bytes"* forks. Found by a test
+  fixture; `(recv_micros, stream_seq)` together still work, so the fix is a
+  choice between resuming from disk, seeding from a clock, or amending the
+  claim — each with its own trade-off, and none of them belongs inside an
+  unrelated change.
 
 > **Exit, met:** `SELECT * FROM read_parquet('tape/kind=quotes/**/*.parquet')`
 > in DuckDB returns six instruments with their venues **and needs no flags**,

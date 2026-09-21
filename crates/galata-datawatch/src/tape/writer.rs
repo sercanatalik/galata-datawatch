@@ -118,6 +118,26 @@ impl Tape {
         })
     }
 
+    /// The partitions a commit would write to, **before** committing.
+    ///
+    /// For a rebuild that replaces: it needs to know what it is about to write
+    /// over, and it needs to know before it writes. Derived from the buffered
+    /// rows rather than from the tree, so a partition nothing will be written
+    /// to is not named — and therefore not removed.
+    pub fn pending_partitions(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self
+            .buffered
+            .iter()
+            .map(|row| {
+                let at = row.envelope.at_micros.unwrap_or(row.envelope.recv_micros);
+                partition_of(row.envelope.kind(), at)
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Take a row. Nothing is durable until [`Tape::commit`].
     pub fn take(&mut self, row: Row) {
         self.buffered.push(row);

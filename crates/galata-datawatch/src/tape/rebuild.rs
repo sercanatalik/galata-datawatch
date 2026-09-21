@@ -43,6 +43,15 @@ pub enum RebuildError {
     /// The record refused.
     #[error(transparent)]
     Record(#[from] crate::record::RecordError),
+    /// A partition could not be removed.
+    #[error("{path}: {source}")]
+    Replace {
+        /// Which.
+        path: std::path::PathBuf,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// What a rebuild did.
@@ -55,6 +64,8 @@ pub struct Rebuilt {
     pub rows: usize,
     /// Segments the tape committed.
     pub segments: usize,
+    /// Partitions removed before writing, where replacement was asked for.
+    pub replaced: usize,
     /// Payloads that would not normalise.
     ///
     /// **Not an error.** The archive holds them, the tape carries them as
@@ -72,8 +83,8 @@ impl Rebuilt {
     /// A line an operator can act on.
     pub fn report(&self) -> String {
         format!(
-            "{} payloads → {} rows in {} segments ({} unparsed)",
-            self.payloads, self.rows, self.segments, self.unparsed
+            "{} payloads → {} rows in {} segments ({} unparsed, {} partitions replaced)",
+            self.payloads, self.rows, self.segments, self.unparsed, self.replaced
         )
     }
 }
@@ -92,6 +103,62 @@ pub fn rebuild(
     scopes: Option<&[&str]>,
     from_micros: i64,
     to_micros: i64,
+) -> Result<Rebuilt, RebuildError> {
+    rebuild_with(
+        archive_root,
+        tape_root,
+        adapter,
+        scopes,
+        from_micros,
+        to_micros,
+        Replace::Never,
+    )
+}
+
+/// Whether a rebuild may remove what a previous one wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Replace {
+    /// Leave existing segments. An overlap is reported by `check_layout`.
+    Never,
+    /// Remove the partitions this run will write, **before** writing them.
+    Partitions,
+}
+
+/// The same, saying whether to replace.
+///
+/// # Why this exists
+///
+/// The rebuild is deterministic, so re-running over an **unchanged** archive
+/// writes identical filenames and overwrites them harmlessly. The overlap
+/// appears when the archive has **grown**:
+///
+/// ```text
+///   first run    252,926 payloads  →  s-0_252926.parquet
+///   second run   254,858 payloads  →  s-0_254858.parquet
+///   both files claim sequences 0..252,926
+/// ```
+///
+/// Which is exactly what a **scheduled retry** looks like — the first attempt
+/// wrote something, capture kept running, the retry sees more. Every scheduler
+/// retries, so without this the scheduled use double-counts.
+///
+/// # The window
+///
+/// Partitions are removed **before** the write, so for the duration of the
+/// rebuild they are empty. That is chosen deliberately: the tape is a cache and
+/// the archive is untouched, so the worst outcome of a crash here is a
+/// partition that must be rebuilt again — which is what this tool does. The
+/// alternative, removing afterwards, needs a delete computed against state that
+/// has since changed.
+pub fn rebuild_with(
+    archive_root: &Path,
+    tape_root: &Path,
+    adapter: &dyn Adapter,
+    scopes: Option<&[&str]>,
+    from_micros: i64,
+    to_micros: i64,
+    replace: Replace,
 ) -> Result<Rebuilt, RebuildError> {
     let payloads = replay::read_range(archive_root, scopes, from_micros, to_micros)?;
     let mut report = Rebuilt {
@@ -122,6 +189,23 @@ pub fn rebuild(
                 envelope,
             });
             report.rows += 1;
+        }
+    }
+
+    if replace == Replace::Partitions {
+        // **Only the partitions this run will write.** A dataset with no rows
+        // in the range is left alone: *this rebuild produced no trades* and
+        // *there are no trades* are different claims, and only one of them is
+        // this tool's to make.
+        for partition in tape.pending_partitions() {
+            let path = tape_root.join(&partition);
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).map_err(|source| RebuildError::Replace {
+                    path: path.clone(),
+                    source,
+                })?;
+                report.replaced += 1;
+            }
         }
     }
 
@@ -421,5 +505,130 @@ mod tests {
         .unwrap();
         assert_eq!(report.unparsed, 1);
         assert!(dir.path().join("tape").join("kind=unparsed").is_dir());
+    }
+
+    /// An archive that grows between two rebuilds — which is exactly what a
+    /// scheduled retry sees.
+    fn growing_archive() -> (tempfile::TempDir, Hyperliquid) {
+        let (dir, hl) = archive_with_frames();
+        (dir, hl)
+    }
+
+    fn segment_names(tape: &Path) -> Vec<String> {
+        let mut out: Vec<String> = galata_segments::partitions(tape)
+            .iter()
+            .flat_map(|p| galata_segments::list_segments(p))
+            .map(|(_, path)| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Add one more frame to an existing archive, as capture would.
+    ///
+    /// **The sequence is set by hand**, because `Archive::next_seq` restarts at
+    /// zero on every `open` — a reopened archive hands out sequences that
+    /// collide with the ones already on disk. That is a real defect and it is
+    /// recorded in `design/measured.md`; here it would only make the fixture
+    /// lie, so the fixture steps around it.
+    fn grow(dir: &Path, hl: &Hyperliquid, seq: u64) {
+        let mut archive = Archive::open(dir.join("archive"));
+        let mut payload = hl.classify(&bbo("BTC", 9_000), DAY + 50);
+        payload.seq = seq;
+        archive.append(payload).unwrap();
+        archive.flush().unwrap();
+    }
+
+    #[test]
+    fn nothing_is_removed_by_default() {
+        // Deleting as a side effect of a rebuild is the kind of thing that
+        // should require saying so.
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+        let first = segment_names(&tape);
+        grow(dir.path(), &hl, 100);
+        let report = rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+
+        assert_eq!(report.replaced, 0);
+        let after = segment_names(&tape);
+        assert!(
+            after.len() > first.len(),
+            "the old segments should still be there: {after:?}"
+        );
+        // And the overlap is REPORTED rather than hidden.
+        assert!(
+            !crate::tape::check_layout(&tape).is_empty(),
+            "an overlap went unreported"
+        );
+    }
+
+    #[test]
+    fn a_retry_after_growth_leaves_one_copy() {
+        // The scheduled case. Without this the second run's rows are counted
+        // twice by anyone summing the partition.
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        )
+        .unwrap();
+        grow(dir.path(), &hl, 100);
+        let report = rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        )
+        .unwrap();
+
+        assert!(report.replaced > 0, "nothing was replaced");
+        assert_eq!(
+            crate::tape::check_layout(&tape),
+            Vec::new(),
+            "an overlap survived replacement"
+        );
+    }
+
+    #[test]
+    fn a_neighbouring_date_survives_replacement() {
+        // Replacement removes only the partitions this run will write.
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        // A partition from some other day, which this rebuild has no rows for.
+        let elsewhere = tape.join("kind=quotes/date=2020-01-01");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("s-1_2.parquet"), b"not ours").unwrap();
+
+        rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        )
+        .unwrap();
+
+        assert!(
+            elsewhere.join("s-1_2.parquet").exists(),
+            "a date this run never touched was removed"
+        );
     }
 }
