@@ -21,11 +21,26 @@ use crate::venue::Subscription;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Outcome {
-    /// Sent, not yet confirmed.
+    /// **Sent, and nothing has arrived for it.**
+    ///
+    /// Reachable and meaningful: a subscription stays here until a payload
+    /// arrives carrying its ticker and series. A venue that quietly ignored
+    /// one leaves it here, and `subs_held` below `subs_declared` is what says
+    /// so.
     Pending,
-    /// The venue is delivering it.
+    /// **The venue is delivering it** — a payload has arrived for it.
+    ///
+    /// Not *sent*, and not *acknowledged*. This loop marked it on send once,
+    /// which made the status surface read 24 of 24 whether or not the venue
+    /// answered.
     Held,
     /// The venue said no.
+    ///
+    /// **Unreached on the venues in this tree**, and kept for one that
+    /// refuses. Hyperliquid does not: an unlisted coin makes it **hang up**,
+    /// taking every other subscription on the socket with it — measured at
+    /// seventeen disconnections in eighteen seconds, which is why the universe
+    /// check runs before anything connects.
     Refused {
         /// What it said.
         reason: String,
@@ -109,6 +124,13 @@ impl Held {
     /// refusals: a new connection is a new answer, and carrying a refusal
     /// across one would leave a pair permanently unsubscribed because of a
     /// transient state at the venue.
+    ///
+    /// **The predecessor decided this the other way** — *refusals stand,
+    /// because the venue's answer has not changed* — and offered an operator a
+    /// way to clear one deliberately. Both readings are defensible and
+    /// **neither has been exercised**, because no venue here produces a
+    /// refusal. Recorded rather than argued: the first venue that refuses a
+    /// subscription is what settles it.
     pub fn connection_lost(&mut self) {
         self.outcomes.clear();
     }

@@ -2377,6 +2377,84 @@ missing query does not announce itself — it shows up as a caller doing the
 store's job badly, which reads as ordinary code until something names the
 query it should have been.
 
+## `subs_held` said *delivering* and meant *sent* — 2026-09-21
+
+The legacy review reached `capture/subscriptions.rs`, where legacy and this
+tree disagree about whether a refusal survives a reconnect. Reading that
+argument out found that **neither side of it occurs**, and something larger
+underneath.
+
+### The field claimed what the code did not do
+
+```rust
+/// How many subscriptions the venue is delivering.
+pub subs_held: usize,
+```
+
+and the loop:
+
+```rust
+for subscription in &convergence.to_subscribe {
+    self.held.mark_sent(subscription);
+    // This venue confirms by delivering rather than by
+    // acknowledging per subscription, so a sent subscription is
+    // held until something says otherwise.
+    self.held.mark_held(subscription);
+}
+```
+
+Held on **send**. The surface would read `24/24` even if the venue delivered
+none of them — and in the soak it read 24/24 and happened to be right, which is
+the worst way for a field to be right.
+
+**The comment justifying it is false.** The soak archived **96
+`subscriptionResponse` frames**, each echoing one subscription:
+
+```json
+{"channel":"subscriptionResponse","data":{"method":"subscribe",
+ "subscription":{"type":"activeAssetCtx","coin":"BTC"}}}
+```
+
+This venue acknowledges per subscription. The loop was told it does not — and
+it would not have mattered either way, because **neither sending nor being
+acknowledged is delivering**.
+
+### Held now means delivering, and it is visible
+
+A payload arriving for a declared `(ticker, series)` is what marks it held. No
+seam change: the loop already resolves both from every payload, one line above,
+to record coverage.
+
+Watched on a live run, polling the status file every four seconds:
+
+```text
+  subs_held  6/24   pairs live  6
+  subs_held 17/24   pairs live 17
+  subs_held 24/24   pairs live 24
+  subs_held 24/24   pairs live 24
+```
+
+**Eight seconds of climb**, where before there was an instant 24. The climb is
+the information: a subscription the venue silently ignored would stop the count
+short and stay short.
+
+### Two outcomes had never occurred
+
+- `Outcome::Pending` — `mark_sent` and `mark_held` ran in the same statement,
+  so nothing was ever pending. It is now reachable and means *sent, nothing
+  back yet*.
+- `Outcome::Refused` — `mark_refused` has no caller outside its own tests.
+  Hyperliquid does not refuse: an unlisted coin makes it **hang up**, taking
+  every other subscription with it, measured at seventeen disconnections in
+  eighteen seconds. That is why the universe check runs before anything
+  connects.
+
+Which makes the whole `connection_lost` question — *does a refusal survive a
+reconnect?* — **an argument about a state that has never occurred.** Legacy
+answered it one way, this tree the other, each with a test, and neither answer
+has ever been exercised. Now recorded as that rather than presented as settled:
+the first venue that actually refuses a subscription is what settles it.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

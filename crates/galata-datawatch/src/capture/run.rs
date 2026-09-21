@@ -278,6 +278,14 @@ impl Capture {
         {
             for ticker in covered {
                 self.coverage.received(&ticker, series, recv_micros);
+                // **Held means DELIVERING**, which is what the word means and
+                // what `subs_held` claims. Marking it on SEND made the surface
+                // read 24/24 whether or not the venue answered — and a field
+                // that is right by luck is the worst way for one to be right.
+                self.held.mark_held(&crate::venue::Subscription {
+                    ticker: ticker.clone(),
+                    series,
+                });
             }
             // The venue's own clock, for the latency the status reports — ours
             // is `recv_micros`, and the difference between the two is the
@@ -636,11 +644,15 @@ impl Capture {
                 tracing::warn!(error = %error, "subscribe failed");
             }
             for subscription in &convergence.to_subscribe {
+                // **Sent, and nothing more.** It becomes held when a payload
+                // arrives for it — see `take`. The comment that used to sit
+                // here said this venue "confirms by delivering rather than by
+                // acknowledging per subscription", and marked held straight
+                // away on the strength of it. The venue does acknowledge: a
+                // soak archived ninety-six `subscriptionResponse` frames, each
+                // echoing one subscription. Either way, neither sending nor
+                // being acknowledged is delivering.
                 self.held.mark_sent(subscription);
-                // This venue confirms by delivering rather than by
-                // acknowledging per subscription, so a sent subscription is
-                // held until something says otherwise.
-                self.held.mark_held(subscription);
             }
 
             loop {
@@ -1111,6 +1123,37 @@ mod tests {
             sink,
             _root: root,
         }
+    }
+
+    #[test]
+    fn held_follows_delivery_and_not_sending() {
+        // **`subs_held` is documented as "how many subscriptions the venue is
+        // delivering".** Marking held on send made it read 2 of 2 before the
+        // venue had said anything — and it would have read 2 of 2 if the
+        // venue had ignored both.
+        let mut f = fixture(1_000);
+
+        // Sending is not delivering.
+        for subscription in &declared() {
+            f.capture.held_mut().mark_sent(subscription);
+        }
+        assert_eq!(f.capture.held_mut().count_held(), 0, "sent is not held");
+
+        // One frame arrives, for BTC only.
+        f.capture.take_frame(&bbo("BTC", 1)).unwrap();
+        assert_eq!(f.capture.held_mut().count_held(), 1);
+
+        // **The one the venue ignored is still visible.** Held below declared
+        // is what says so, and it is the whole point of the distinction.
+        assert_eq!(
+            f.capture.status(2_000).subs_held,
+            1,
+            "the surface must not claim the quiet one"
+        );
+        assert_eq!(f.capture.status(2_000).subs_declared, 2);
+
+        f.capture.take_frame(&bbo("ETH", 2)).unwrap();
+        assert_eq!(f.capture.held_mut().count_held(), 2);
     }
 
     /// A `bbo` frame **in the shape the venue actually sends**, captured from a
