@@ -149,6 +149,42 @@ pub struct Capture {
     pub walk_cap: u32,
 }
 
+/// What the operator declared should be kept, if anything.
+///
+/// **Optional, and with no defaults.** Numbers are the measurer's and horizons
+/// are the operator's; a default here would be the builder answering *how long
+/// should this be kept?* for someone who knows what the data is and does not.
+/// A configuration with no `[retention]` block expires nothing.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Retention {
+    /// Days to keep each venue's raw capture, by venue name.
+    ///
+    /// **A record.** Losing it is unrecoverable, so a venue absent from here is
+    /// kept forever rather than assigned a number nobody chose.
+    #[serde(default)]
+    pub venue: BTreeMap<String, u32>,
+    /// Days to keep the tape.
+    ///
+    /// **A cache.** Anything dropped comes back from `galata-tape-rebuild`, so
+    /// this may be far shorter than any venue's without much thought.
+    pub tape_days: Option<u32>,
+}
+
+impl Retention {
+    /// The policy this declares.
+    pub fn policy(&self) -> crate::retain::Policy {
+        crate::retain::Policy {
+            venues: self
+                .venue
+                .iter()
+                .map(|(name, days)| (name.clone(), crate::retain::Horizon { days: *days }))
+                .collect(),
+            tape: self.tape_days.map(|days| crate::retain::Horizon { days }),
+        }
+    }
+}
+
 /// One instrument to capture.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -182,6 +218,9 @@ pub struct Config {
     pub paths: Paths,
     /// The process's own cadences.
     pub capture: Capture,
+    /// What is kept, if anything. Absent means nothing expires.
+    #[serde(default)]
+    pub retention: Retention,
     /// What to capture, per venue.
     pub venue: BTreeMap<String, VenueConfig>,
 }
@@ -467,5 +506,31 @@ instruments = [
             .unwrap_err()
             .to_string();
         assert!(err.contains("walk_cap"), "{err}");
+    }
+
+    #[test]
+    fn a_configuration_with_no_retention_expires_nothing() {
+        // Numbers are the measurer's and horizons are the operator's. The
+        // shipped shape declares none, and that must not mean "some default".
+        let c = load(GOOD).unwrap();
+        assert!(c.retention.policy().is_empty());
+        assert!(c.retention.venue.is_empty());
+        assert_eq!(c.retention.tape_days, None);
+    }
+
+    #[test]
+    fn a_declared_retention_becomes_a_policy() {
+        let text =
+            format!("{GOOD}\n[retention]\ntape_days = 3\n\n[retention.venue]\nhyperliquid = 90\n");
+        let policy = load(&text).unwrap().retention.policy();
+        assert!(!policy.is_empty());
+        assert_eq!(policy.tape, Some(crate::retain::Horizon { days: 3 }));
+        assert_eq!(
+            policy.venues.get("hyperliquid"),
+            Some(&crate::retain::Horizon { days: 90 })
+        );
+        // A venue absent from the block is kept forever rather than assigned a
+        // number nobody chose.
+        assert_eq!(policy.venues.get("rh-crypto"), None);
     }
 }

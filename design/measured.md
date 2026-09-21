@@ -472,6 +472,62 @@ received. The alternative is scanning every partition on every read in case one
 holds a timeless row, which is the pruning thrown away for a case that is rare
 by construction.
 
+## Compaction, against a real archive — 2026-09-21
+
+Three hours of one venue, six instruments, four series: **92 MB in 22,009
+segments**. Compacting every *closed* partition — today's are still being
+written to and are left alone:
+
+```
+  14,719 segments  →  6        in 3.8 seconds
+  whole tree        22,009 → 7,296 segments
+                    94 MB   →  43 MB
+```
+
+**A 54% reduction from merging alone**, before any retention. The saving is not
+the data — the rows are identical — it is per-file parquet overhead: a footer, a
+schema and a set of column chunk headers, 22,000 times, against a mean segment
+of a few kilobytes.
+
+This is also the answer to a question the flush cadence raises. `flush_secs = 2`
+is chosen so a crash converts at most two seconds into a gap, and it costs
+~7,000 files an hour per venue. Compaction is what makes that trade affordable:
+the durability window stays at two seconds, and the file count is paid down
+afterwards, on closed partitions, where nothing is racing.
+
+### Retention expires nothing, and that is the shipped behaviour
+
+Run against the real tree with no `[retention]` block:
+
+```
+  exit 3 — no retention is declared, so nothing expires
+```
+
+With a policy declared and a partition genuinely expired, the **default still
+removes nothing**:
+
+```
+  1 partitions, 0.0 MB, 1 unclassified — nothing was removed. Pass --delete
+```
+
+And the unclassified subtree — a directory put there by hand that no family
+claims — survived `--delete` untouched, which is the behaviour that matters:
+the tool removed exactly what a declared horizon selected and nothing else.
+
+There is no `--dry-run`. Forgetting a flag that protects is a deletion;
+forgetting one that destroys is a report.
+
+## The soak, at three hours
+
+```
+  3h 00m · 90 MB · 21,439 segments · 0 gaps · 0 session failures
+```
+
+~30 MB/hour → **~720 MB/day**, ~120 MB/day/instrument, which holds the
+11-minute and 38-minute figures out to three hours and agrees with the
+predecessor's ~111 to within a tenth. Rotation continued to be free: roughly
+twenty handovers, none of which published a gap.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

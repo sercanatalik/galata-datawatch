@@ -72,3 +72,23 @@ instruments = [
   { ticker = "XYZ100", dex = "xyz" },
   { ticker = "GOLD",   dex = "xyz" },
 ]
+
+# RETENTION IS NOT DECLARED HERE, AND THAT IS THE DEFAULT.
+#
+# Numbers are the measurer's and horizons are the operator's. A default in this
+# file would be the builder answering "how long should this be kept?" for
+# somebody who knows what the data is. With no `[retention]` block,
+# `galata-retain` expires nothing and exits 3.
+#
+# To declare one:
+#
+#   [retention]
+#   # The TAPE is a cache: anything dropped comes back from a rebuild, so this
+#   # may be short without much thought.
+#   tape_days = 7
+#
+#   [retention.venue]
+#   # The ARCHIVE is a record. Losing it is unrecoverable, and a venue absent
+#   # from this block is kept forever rather than assigned a number nobody
+#   # chose.
+#   hyperliquid = 90

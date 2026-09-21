@@ -54,6 +54,14 @@ required-features = ["bin"]
 name = "galata-tape-rebuild"
 required-features = ["bin"]
 
+[[bin]]
+name = "galata-retain"
+required-features = ["bin"]
+
+[[bin]]
+name = "galata-compact"
+required-features = ["bin"]
+
 [dev-dependencies]
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
 tempfile = "3"
