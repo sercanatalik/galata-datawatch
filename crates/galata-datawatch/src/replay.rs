@@ -1,8 +1,17 @@
 //! Reading the archive back out, as payloads.
 //!
-//! **Replay reads the record and never grows it.** Every payload it returns
-//! carries [`Origin::Replay`], which [`ingest`](crate::ingest::ingest) honours
-//! by not appending — so a replay cannot write to the store it is reading.
+//! **Replay reads the record and never grows it**, and that is held by a type
+//! rather than by a field. Everything here comes back as a [`Replayed`], which
+//! only this module constructs and which cannot be turned back into a
+//! [`Payload`] by anyone else. It is accepted by
+//! [`ingest_replayed`](crate::ingest::ingest_replayed), which does not archive,
+//! and there is no way to hand it to the entry point that does.
+//!
+//! The previous form asked a caller to set `origin: Origin::Replay` correctly
+//! and had `Archive::append` refuse it. That worked, and it spent the one slot
+//! that should have said **how the bytes came to exist** on saying *which route
+//! they are taking now* — which is why a payload the system generated had
+//! nowhere to say so, and why twenty-four recorded gaps rebuilt as `unparsed`.
 //!
 //! **Payloads that failed to parse come back like any other.** Filtering an
 //! archive by parse success discards exactly the evidence a normalisation
@@ -30,6 +39,31 @@ use galata_wire::Origin;
 
 use crate::record::{Payload, PayloadAddress};
 
+/// A payload that came **out of** the record.
+///
+/// Constructible only here, and openable only by the one path. That is the
+/// whole of it: a caller cannot route a replayed payload back into the
+/// archiving entry point, because it cannot get the [`Payload`] out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replayed(Payload);
+
+impl Replayed {
+    /// What it is about, for a caller deciding whether to ingest it at all.
+    pub fn payload(&self) -> &Payload {
+        &self.0
+    }
+
+    /// The sequence it was stored under.
+    pub fn seq(&self) -> u64 {
+        self.0.seq
+    }
+
+    /// Open it. `pub(crate)` on purpose — see the type's own documentation.
+    pub(crate) fn into_payload(self) -> Payload {
+        self.0
+    }
+}
+
 /// Why a replay could not be read.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -52,7 +86,7 @@ pub enum ReplayError {
 /// Opens every segment under the root. Where a range is known, prefer
 /// [`read_range`], which excludes segments from their names before opening
 /// anything.
-pub fn read_all(root: &Path) -> Result<Vec<Payload>, ReplayError> {
+pub fn read_all(root: &Path) -> Result<Vec<Replayed>, ReplayError> {
     read_range(root, None, i64::MIN, i64::MAX)
 }
 
@@ -69,7 +103,7 @@ pub fn read_range(
     scopes: Option<&[&str]>,
     from_micros: i64,
     to_micros: i64,
-) -> Result<Vec<Payload>, ReplayError> {
+) -> Result<Vec<Replayed>, ReplayError> {
     let mut out = Vec::new();
     for partition in partitions_in_range(root, from_micros, to_micros) {
         // The failure rows NAME payloads; they are not payloads. Replaying them
@@ -111,7 +145,7 @@ pub fn read_range(
     }
     // Receipt order, then sequence — the order capture produced them in, so a
     // rebuild's rows land in the same order capture's did.
-    out.sort_by_key(|p| (p.recv_micros, p.seq));
+    out.sort_by_key(|p| (p.0.recv_micros, p.0.seq));
     Ok(out)
 }
 
@@ -122,7 +156,7 @@ fn payloads_of(
     kind: Option<&str>,
     from_micros: i64,
     to_micros: i64,
-) -> Result<Vec<Payload>, ReplayError> {
+) -> Result<Vec<Replayed>, ReplayError> {
     let shape = |column: &'static str| ReplayError::Shape {
         path: path.to_path_buf(),
         column,
@@ -145,6 +179,10 @@ fn payloads_of(
         .downcast_ref::<BinaryArray>()
         .ok_or_else(|| shape("payload"))?;
 
+    // The stored origin, read back rather than overwritten. It says how the
+    // bytes came to exist, which is what the one path routes on — a generated
+    // payload is decoded, a venue's frame is normalised.
+    let origin = strings(get("origin")?, path, "origin")?;
     let mut out = Vec::with_capacity(batch.num_rows());
     for i in 0..batch.num_rows() {
         let recv_micros = recv.value(i);
@@ -154,7 +192,7 @@ fn payloads_of(
             continue;
         }
         let value = address.value(i).to_string();
-        out.push(Payload {
+        out.push(Replayed(Payload {
             seq: seq.value(i),
             recv_micros,
             address: match level {
@@ -166,11 +204,18 @@ fn payloads_of(
                 .map(str::to_string)
                 .unwrap_or_else(|| channel.value(i).to_string()),
             symbol: (!symbol.is_null(i)).then(|| symbol.value(i).to_string()),
-            // **Names a payload LEAVING the archive**, not arriving. The one
-            // path refuses to append it.
-            origin: Origin::Replay,
+            origin: match origin.value(i) {
+                "fetched" => Origin::Fetched,
+                "generated" => Origin::Generated,
+                // Anything else, including a discriminator written by a build
+                // this one does not know, is treated as a venue's own bytes.
+                // That is the conservative reading: it goes to the adapter,
+                // which reports it unparsed rather than decoding it as
+                // something it is not.
+                _ => Origin::Streamed,
+            },
             payload: payload.value(i).to_vec(),
-        });
+        }));
     }
     Ok(out)
 }
@@ -324,15 +369,29 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_payload_is_marked_as_leaving_the_archive() {
-        // Which is what `Archive::append` refuses, so a replay cannot write to
-        // the store it is reading.
+    fn a_replayed_payload_keeps_the_origin_the_record_stored() {
+        // Read back rather than overwritten. It says how the bytes came to
+        // exist, which is what the one path routes on — and the route itself is
+        // a type, not a field, so nothing is lost by keeping the fact.
         let dir = tempfile::tempdir().unwrap();
         written(dir.path(), vec![payload(1, DAY, "quotes", "BTC")]);
 
         let back = read_all(dir.path()).unwrap();
         assert_eq!(back.len(), 1);
-        assert_eq!(back[0].origin, Origin::Replay);
+        assert_eq!(back[0].payload().origin, Origin::Streamed);
+    }
+
+    #[test]
+    fn a_generated_payload_comes_back_as_generated() {
+        // Which is how the one path knows to DECODE it rather than hand it to a
+        // venue adapter that would rightly refuse it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = payload(1, DAY, "gaps", "BTC");
+        p.origin = Origin::Generated;
+        written(dir.path(), vec![p]);
+
+        let back = read_all(dir.path()).unwrap();
+        assert_eq!(back[0].payload().origin, Origin::Generated);
     }
 
     #[test]
@@ -349,11 +408,11 @@ mod tests {
         let back = read_all(dir.path()).unwrap();
         assert_eq!(back.len(), 2);
         // Receipt order, which is the order capture produced them in.
-        assert_eq!(back[0].seq, 7);
-        assert_eq!(back[1].seq, 9);
-        assert_eq!(back[0].payload, br#"{"seq":7}"#.to_vec());
-        assert_eq!(back[1].symbol.as_deref(), Some("ETH"));
-        assert_eq!(back[1].kind, "trades");
+        assert_eq!(back[0].seq(), 7);
+        assert_eq!(back[1].seq(), 9);
+        assert_eq!(back[0].payload().payload, br#"{"seq":7}"#.to_vec());
+        assert_eq!(back[1].payload().symbol.as_deref(), Some("ETH"));
+        assert_eq!(back[1].payload().kind, "trades");
     }
 
     #[test]
@@ -375,7 +434,7 @@ mod tests {
 
         let back = read_all(dir.path()).unwrap();
         assert_eq!(back.len(), 1, "the failure row came back as a payload");
-        assert_eq!(back[0].payload, br#"{"seq":1}"#.to_vec());
+        assert_eq!(back[0].payload().payload, br#"{"seq":1}"#.to_vec());
     }
 
     #[test]
@@ -388,7 +447,7 @@ mod tests {
 
         let middle = read_range(dir.path(), None, 15 * DAY, 25 * DAY).unwrap();
         assert_eq!(middle.len(), 1);
-        assert_eq!(middle[0].seq, 2);
+        assert_eq!(middle[0].seq(), 2);
 
         // Half-open: the row exactly at `to` is excluded, the one at `from` is
         // not.
@@ -461,7 +520,7 @@ mod tests {
         // A second copy is a second thing that can disagree.
         let dir = tempfile::tempdir().unwrap();
         written(dir.path(), vec![payload(1, DAY, "candles", "BTC")]);
-        assert_eq!(read_all(dir.path()).unwrap()[0].kind, "candles");
+        assert_eq!(read_all(dir.path()).unwrap()[0].payload().kind, "candles");
     }
 
     #[test]

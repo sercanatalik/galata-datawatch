@@ -56,18 +56,46 @@ pub struct Ingested {
 /// 2. **Normalise** them, inside a panic boundary.
 /// 3. **Emit** the events.
 ///
-/// A payload with origin [`Origin::Replay`] is *not* archived — replay reads
-/// the record back out, and writing it would grow the thing it is reading — but
-/// it takes the same normalise and emit steps, so the events replay produces
-/// are the events live capture produced rather than a second derivation.
+/// A payload read back out of the record takes [`ingest_replayed`] instead,
+/// which is the same three steps without the first. The two are separate
+/// **entry points and one implementation**, so the ordering still lives in one
+/// place while the route cannot be got wrong — see [`crate::replay::Replayed`].
 pub fn ingest(
     archive: &mut Archive,
     normaliser: &dyn Normalise,
     sink: &dyn Sink,
-    mut payload: Payload,
+    payload: Payload,
 ) -> Result<Ingested, RecordError> {
-    let replaying = payload.origin == Origin::Replay;
+    one_path(archive, normaliser, sink, payload, false)
+}
 
+/// The same path, for a payload that came **out of** the record.
+///
+/// Nothing is appended: replay reads the record back out, and writing it would
+/// grow the thing it is reading. The normalise and emit steps are identical, so
+/// the events a replay produces *are* the events live capture produced rather
+/// than a second derivation.
+///
+/// It takes a [`Replayed`](crate::replay::Replayed), which only `replay`
+/// constructs and which cannot be turned back into a [`Payload`]. The previous
+/// form asked a caller to set an origin field correctly; this one cannot be got
+/// wrong.
+pub fn ingest_replayed(
+    archive: &mut Archive,
+    normaliser: &dyn Normalise,
+    sink: &dyn Sink,
+    replayed: crate::replay::Replayed,
+) -> Result<Ingested, RecordError> {
+    one_path(archive, normaliser, sink, replayed.into_payload(), true)
+}
+
+fn one_path(
+    archive: &mut Archive,
+    normaliser: &dyn Normalise,
+    sink: &dyn Sink,
+    mut payload: Payload,
+    replaying: bool,
+) -> Result<Ingested, RecordError> {
     let seq = if replaying {
         // The sequence a replayed payload already carries: it is the record
         // row it came out of, and every row derived from it names that.
@@ -93,7 +121,7 @@ pub fn ingest(
     //    that panics here would take capture with it, so it is caught: the
     //    payload is already recorded, and a panic is a defect to report rather
     //    than a reason to stop recording.
-    let normalised = match catch_normalise(normaliser, &payload) {
+    let normalised = match interpret(normaliser, &payload) {
         Ok(events) => events,
         Err(error) => {
             result.unparsed = true;
@@ -157,12 +185,9 @@ pub fn record_generated(
 ) -> Result<Ingested, RecordError> {
     let seq = archive.next_seq();
     let kind = envelope.kind();
+    let envelope = envelope.stamped(seq);
     let rendered = serde_json::to_vec(&GeneratedPayload {
-        seq,
-        at_micros: envelope.at_micros,
-        recv_micros: envelope.recv_micros,
-        ticker: envelope.ticker().map(|t| t.as_str().to_string()),
-        event: format!("{:?}", envelope.event),
+        envelope: envelope.clone(),
     })
     .unwrap_or_default();
 
@@ -173,13 +198,14 @@ pub fn record_generated(
         channel: kind.as_str().to_string(),
         kind: kind.as_str().to_string(),
         symbol: envelope.ticker().map(|t| t.as_str().to_string()),
-        // Generated, and durable before it is emitted — so a crash leaves the
-        // record ahead of the stream and never behind it.
-        origin: Origin::Fetched,
+        // **Generated**, which is both why it is durable before it is emitted —
+        // a crash leaves the record ahead of the stream and never behind it —
+        // and how the one path knows to decode it rather than hand it to a
+        // venue adapter that would rightly refuse it.
+        origin: Origin::Generated,
         payload: rendered,
     })?;
 
-    let envelope = envelope.stamped(seq);
     let mut result = Ingested {
         seq,
         ..Ingested::default()
@@ -191,18 +217,51 @@ pub fn record_generated(
     Ok(result)
 }
 
-/// How a generated event is rendered into the record.
+/// How a generated event is stored.
 ///
-/// Deliberately not the wire encoding: this is the record's own readable
-/// rendering of something that never crossed a wire, and it exists so the fact
-/// survives a sink that was not there.
-#[derive(serde::Serialize)]
+/// **The whole envelope, encoded so it decodes.** An earlier version stored
+/// `format!("{:?}", event)` — a *readable rendering*, chosen deliberately, and
+/// not round-trippable. Nine hours of capture and one connection reset showed
+/// what that cost: twenty-four gaps recorded, and every one of them rebuilt as
+/// `unparsed`, because no parser will ever recover a Debug string.
+///
+/// A gap that cannot be rebuilt is an absence again, which is the one thing
+/// recording it durably was supposed to prevent. Readable was the wrong thing
+/// to optimise for; this is still readable, and it is also a record.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct GeneratedPayload {
-    seq: u64,
-    at_micros: Option<i64>,
-    recv_micros: i64,
-    ticker: Option<String>,
-    event: String,
+    /// The event, whole.
+    envelope: Envelope,
+}
+
+/// Turn a payload into events, by **how the bytes came to exist**.
+///
+/// ```text
+///   Streamed │ Fetched   ──▶  the venue adapter normalises
+///   Generated            ──▶  decode: the payload IS the event
+/// ```
+///
+/// Chosen by a fact the record stores in a column — never by trying one and
+/// falling back to the other. A fallback would make a genuinely malformed venue
+/// frame look like a generated one on a bad day, which is the failure this
+/// routing exists to avoid rather than to cause.
+fn interpret(normaliser: &dyn Normalise, payload: &Payload) -> Result<Vec<Envelope>, String> {
+    match payload.origin {
+        Origin::Generated => decode(payload),
+        _ => catch_normalise(normaliser, payload),
+    }
+}
+
+/// A generated payload, read back into the event it holds.
+///
+/// No panic boundary: this is **our own encoding**, and a failure here is a
+/// defect in this crate rather than a venue sending an unexpected shape. It
+/// still returns an error rather than panicking, so a record written by an
+/// older build reports itself instead of stopping a rebuild.
+fn decode(payload: &Payload) -> Result<Vec<Envelope>, String> {
+    let stored: GeneratedPayload = serde_json::from_slice(&payload.payload)
+        .map_err(|e| format!("a generated payload would not decode: {e}"))?;
+    Ok(vec![stored.envelope])
 }
 
 /// Normalise, converting a panic into an error.

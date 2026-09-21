@@ -23,7 +23,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ingest::ingest;
+use crate::ingest::ingest_replayed;
 use crate::record::Archive;
 use crate::replay::{self, ReplayError};
 use crate::sink::CollectingSink;
@@ -104,14 +104,15 @@ pub fn rebuild(
 
     // **Rooted at the archive being read**, so a bug that appended anyway would
     // grow that tree and be visible, rather than quietly creating a second one.
-    // Nothing is appended: every payload carries `Origin::Replay`.
+    // Nothing is appended: `ingest_replayed` is the entry point that does not,
+    // and a `Replayed` cannot reach the one that does.
     let mut archive = Archive::open(archive_root);
     let collected = Arc::new(CollectingSink::default());
     let mut tape = Tape::open(tape_root);
 
     for payload in payloads {
-        let seq = payload.seq;
-        let result = ingest(&mut archive, adapter, collected.as_ref(), payload)?;
+        let seq = payload.seq();
+        let result = ingest_replayed(&mut archive, adapter, collected.as_ref(), payload)?;
         if result.unparsed {
             report.unparsed += 1;
         }
@@ -296,5 +297,125 @@ mod tests {
         .unwrap();
         assert!(report.is_empty());
         assert_eq!(report.segments, 0);
+    }
+
+    #[test]
+    fn a_generated_gap_rebuilds_as_a_gap() {
+        // **The defect this change exists for.** Nine hours of capture, one
+        // connection reset, twenty-four gaps recorded — and every one rebuilt
+        // as `unparsed`, because the record held `format!("{:?}", event)` and
+        // no parser recovers a Debug string.
+        //
+        // A gap that cannot be rebuilt is an absence again, which is the one
+        // thing recording it durably was supposed to prevent.
+        use galata_wire::{Clipped, Envelope, Event, Gap, GapCause, Series, Ticker, Venue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let hl = adapter();
+        let root = dir.path().join("archive");
+        let mut archive = Archive::open(&root);
+        let sink = crate::sink::NullSink;
+
+        crate::ingest::record_generated(
+            &mut archive,
+            &sink,
+            "hyperliquid",
+            Envelope::new(
+                Venue::new("hyperliquid").unwrap(),
+                Ticker::new("BTC").unwrap(),
+                Some(DAY),
+                DAY + 5,
+                Event::Gap(Gap {
+                    series: Series::Quotes,
+                    from_micros: DAY,
+                    to_micros: DAY + 5,
+                    cause: GapCause::SessionLost,
+                    clipped: Clipped::Continuous,
+                }),
+            ),
+        )
+        .unwrap();
+        archive.flush().unwrap();
+
+        let tape = dir.path().join("tape");
+        let report = rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+        assert_eq!(
+            report.unparsed, 0,
+            "the gap was handed to the venue adapter"
+        );
+        assert_eq!(report.rows, 1);
+
+        assert!(
+            tape.join("kind=gaps").is_dir(),
+            "no gaps dataset: {:?}",
+            std::fs::read_dir(&tape)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_generated_event_survives_the_round_trip_exactly() {
+        // Including its numbers. rust_decimal's ordinary serde goes through
+        // f64, which is precision loss in the type chosen because f64 loses
+        // precision.
+        use galata_wire::{Envelope, Event, Funding, Num, Ticker, Venue};
+        use std::str::FromStr;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("archive");
+        let mut archive = Archive::open(&root);
+        // Eighteen decimal places, which an f64 cannot hold.
+        let rate = Num::from_str("0.000000000000000123").unwrap();
+        let envelope = Envelope::new(
+            Venue::new("hyperliquid").unwrap(),
+            Ticker::new("BTC").unwrap(),
+            Some(DAY),
+            DAY,
+            Event::Funding(Funding {
+                rate,
+                next_micros: Some(DAY + 3_600_000_000),
+            }),
+        );
+        crate::ingest::record_generated(
+            &mut archive,
+            &crate::sink::NullSink,
+            "hyperliquid",
+            envelope,
+        )
+        .unwrap();
+        archive.flush().unwrap();
+
+        let back = crate::replay::read_all(&root).unwrap();
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&back[0].payload().payload).unwrap();
+        let stored = decoded["envelope"]["event"]["Funding"]["rate"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            stored, "0.000000000000000123",
+            "stored as a string, exactly"
+        );
+    }
+
+    #[test]
+    fn a_malformed_venue_frame_stays_unparsed() {
+        // Routing is by the recorded origin, never by trying one and falling
+        // back — a fallback would make a genuinely malformed frame look like a
+        // generated one on a bad day.
+        let (dir, hl) = archive_with_frames();
+        let report = rebuild(
+            &dir.path().join("archive"),
+            &dir.path().join("tape"),
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+        )
+        .unwrap();
+        assert_eq!(report.unparsed, 1);
+        assert!(dir.path().join("tape").join("kind=unparsed").is_dir());
     }
 }

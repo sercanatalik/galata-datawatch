@@ -42,17 +42,6 @@ const CLEAN_SHUTDOWN: &str = ".clean-shutdown";
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecordError {
-    /// A replayed payload was offered to the record.
-    #[error(
-        "a payload with origin `replay` was offered to the record on {address}/{channel}. \
-         Replay reads the record back out; writing it would grow the thing it is reading."
-    )]
-    ReplayIsNotWritten {
-        /// The address it claimed.
-        address: String,
-        /// The channel it claimed.
-        channel: String,
-    },
     /// The store refused.
     #[error(transparent)]
     Segment(#[from] SegmentError),
@@ -251,13 +240,15 @@ impl Archive {
     /// against every other module in this one.
     pub(crate) fn append(&mut self, payload: Payload) -> Result<(), RecordError> {
         match payload.origin {
-            Origin::Replay => Err(RecordError::ReplayIsNotWritten {
-                address: payload.address.to_string(),
-                channel: payload.channel,
-            }),
             // Covers a range nothing will fetch again, so it is durable before
             // the walk advances past it.
             Origin::Fetched => self.commit(vec![payload]).map(|_| ()),
+            // Made by this process, about something that did not cross a wire.
+            // **Committed at once**, like a fetch and unlike a stream: a gap is
+            // emitted straight after this returns, and a gap that reached the
+            // sink but not the disk is exactly the evidence an outage would
+            // otherwise erase.
+            Origin::Generated => self.commit(vec![payload]).map(|_| ()),
             Origin::Streamed => {
                 self.buffered.push(payload);
                 Ok(())

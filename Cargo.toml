@@ -39,7 +39,12 @@ parquet = { version = "60", features = ["arrow"] }
 # Exact numbers. 96-bit, about 28 significant digits — below the
 # decimal(38,18) written to disk, which holds 38. See `Num` for why that bound
 # is acceptable and why it is stated rather than discovered.
-rust_decimal = "1"
+# `serde-str` is not a default and is load-bearing. rust_decimal's ordinary
+# serde emits a float-looking value and deserialises it THROUGH f64 — precision
+# loss, in the type chosen precisely because f64 loses precision. Every Decimal
+# round-trips as a string instead, globally, because the per-field alternative
+# is thirty annotations and the failure of forgetting one is silent.
+rust_decimal = { version = "1", features = ["serde-str"] }
 serde = { version = "1", features = ["derive"] }
 # `raw_value` is load-bearing, not a convenience: a normaliser peeks at a
 # frame's channel and takes its `data` as a borrowed span, then types that span

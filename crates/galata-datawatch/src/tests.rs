@@ -12,7 +12,7 @@ use galata_wire::{Envelope, Event, GapCause, Origin, Quote, Ticker, Venue};
 
 use crate::ingest::ingest;
 use crate::normalise::{Normalise, NormaliseError};
-use crate::record::{Archive, Payload, PayloadAddress, RecordError, venue_partition_of};
+use crate::record::{Archive, Payload, PayloadAddress, venue_partition_of};
 use crate::sink::testing::{RecordingSink, RefusingSink};
 
 // ---- fixtures -------------------------------------------------------------
@@ -168,41 +168,47 @@ fn a_streamed_payload_waits_for_the_flush() {
 }
 
 #[test]
-fn a_replayed_payload_is_refused_by_name() {
-    // Replay reads the record back out; writing it would grow the thing it is
-    // reading.
-    let root = tempfile::tempdir().unwrap();
-    let mut archive = Archive::open(root.path());
-    let err = archive
-        .append(payload(Origin::Replay, 0, b"{}"))
-        .unwrap_err();
-    match err {
-        RecordError::ReplayIsNotWritten { address, channel } => {
-            assert_eq!(address, "venue=hyperliquid");
-            assert_eq!(channel, "bbo");
-        }
-        other => panic!("expected a named refusal, got {other:?}"),
-    }
-}
-
-#[test]
 fn a_replayed_payload_is_not_written_back() {
     // Through the one path: normalised and emitted, archived not at all, and
     // keeping the sequence it came out with.
+    //
+    // **There is no test that the live path refuses a replayed payload**, and
+    // that is the point of this change rather than an omission: `Replayed` has
+    // no public constructor and cannot be opened, so handing one to `ingest`
+    // does not compile. The guard it replaced was a field somebody had to set
+    // correctly, and a test could only ever check that they had.
     let root = tempfile::tempdir().unwrap();
-    let mut archive = Archive::open(root.path());
-    let sink = RecordingSink::default();
-    let mut p = payload(Origin::Replay, 1_758_326_400_000_000, b"{}");
-    p.seq = 99;
+    let archive_root = tempfile::tempdir().unwrap();
 
-    let result = ingest(&mut archive, &Witness::default(), &sink, p).unwrap();
+    // Written, so there is something to replay.
+    let mut source = Archive::open(root.path());
+    let mut p = payload(Origin::Streamed, 1_758_326_400_000_000, b"{}");
+    p.seq = 99;
+    source.append(p).unwrap();
+    source.flush().unwrap();
+
+    let replayed = crate::replay::read_all(root.path()).unwrap();
+    assert_eq!(replayed.len(), 1);
+
+    let mut archive = Archive::open(archive_root.path());
+    let sink = RecordingSink::default();
+    let result = crate::ingest::ingest_replayed(
+        &mut archive,
+        &Witness::default(),
+        &sink,
+        replayed.into_iter().next().unwrap(),
+    )
+    .unwrap();
 
     assert_eq!(
         result.seq, 99,
         "the sequence it came out of the record with"
     );
     assert_eq!(result.emitted, 1);
-    assert!(list_segments(root.path()).is_empty());
+    assert!(
+        list_segments(archive_root.path()).is_empty(),
+        "a replay grew the archive"
+    );
     assert_eq!(sink.emitted()[0].seq, 99);
 }
 

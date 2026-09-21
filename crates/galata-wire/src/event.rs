@@ -8,12 +8,18 @@ use crate::dataset::{Kind, Series};
 use crate::identity::{Market, Ticker, Venue};
 use crate::token::Num;
 
-/// Where a payload came from, and therefore how durable it must be before
-/// anything else happens.
+/// **How the bytes came to exist**, and therefore how durable they must be
+/// before anything else happens.
 ///
 /// Not a caller's choice of durability — a fact about the payload, from which
 /// durability follows. There is no durability parameter to get wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// It says nothing about **which route a payload is taking now**. It used to:
+/// a `Replay` variant meant *being read back*, which is a different question
+/// from *where did this come from*, and one slot answering both is why a
+/// payload the system generated had nowhere to say so. Routing is a type now —
+/// see `galata_datawatch::replay::Replayed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
     /// Pushed by a venue. Rides the buffer and is committed on the flush
@@ -22,9 +28,11 @@ pub enum Origin {
     /// Asked for by us, covering a range nothing will fetch again — so it is
     /// durable before the caller advances past it.
     Fetched,
-    /// Read back out of the record. **Never written**: writing it would grow
-    /// the thing it is reading.
-    Replay,
+    /// **Made by this process**, describing something that did not cross a
+    /// wire — a gap, most of all. The payload *is* the event, encoded, so it
+    /// is decoded on the way back rather than handed to a venue adapter that
+    /// would rightly refuse it.
+    Generated,
 }
 
 impl Origin {
@@ -33,13 +41,13 @@ impl Origin {
         match self {
             Origin::Streamed => "streamed",
             Origin::Fetched => "fetched",
-            Origin::Replay => "replay",
+            Origin::Generated => "generated",
         }
     }
 }
 
 /// Which side of a book, or which side crossed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     /// The buying side.
@@ -63,7 +71,7 @@ impl Side {
 /// An enum rather than a nullable pair, so an envelope holding a venue where
 /// it should hold a market does not compile — which is what puts a
 /// `venue = cross` sentinel out of reach rather than merely out of policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Address {
     /// Bytes a venue sent, about one instrument.
     Venue {
@@ -85,7 +93,7 @@ pub enum Address {
 /// **Two clocks, always both.** `at_micros` is what a strategy reasons about;
 /// `recv_micros` is what coverage, gaps and latency are measured in. A single
 /// timestamp column would silently pick one question to answer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Envelope {
     /// What this is about.
     pub address: Address,
@@ -153,7 +161,7 @@ impl Envelope {
 }
 
 /// Everything a venue can tell us, normalised.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Event {
     /// An execution the venue printed.
@@ -206,7 +214,7 @@ impl Event {
 }
 
 /// One execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Trade {
     /// What it printed at.
     pub price: Num,
@@ -221,7 +229,7 @@ pub struct Trade {
 }
 
 /// One price level touched by a book message.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BookLevel {
     /// Which side.
     pub side: Side,
@@ -241,7 +249,7 @@ pub struct BookLevel {
 /// Snapshots and deltas share one dataset because they are the same shape.
 /// Splitting them would force every consumer to read both and merge them in
 /// timestamp order, which is the work one table already did.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Book {
     /// Groups the rows of one message; monotonic per `(venue, ticker)`.
     pub update_seq: i64,
@@ -252,7 +260,7 @@ pub struct Book {
 }
 
 /// One bar.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Candle {
     /// The bar width, as the venue spells it.
     pub interval: String,
@@ -287,7 +295,7 @@ pub struct Candle {
 /// **`None` means this venue never states it, or the side is empty**, never
 /// *it was missing*. A venue that publishes no size and a book with no bid are
 /// both real, and neither is a defect.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Quote {
     /// The best bid.
     pub bid_px: Option<Num>,
@@ -308,7 +316,7 @@ pub struct Quote {
 /// **A transfer on its own proves custody moved, not that a trade happened.**
 /// Sweeps and operational rebalancing emit identical events, so a consumer
 /// classifies conservatively and this type does not pretend otherwise.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Transfer {
     /// The sending address.
     pub from: String,
@@ -325,7 +333,7 @@ pub struct Transfer {
 }
 
 /// Issuance or redemption: a transfer from or to the zero address.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mint {
     /// The address receiving issuance, or surrendering on a redemption.
     pub holder: String,
@@ -345,7 +353,7 @@ pub struct Mint {
 /// A price computed in transit is a price from two measurements, and the two
 /// will disagree exactly when it matters. Every field is optional because no
 /// venue publishes all four.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Mark {
     /// What the venue marks positions at — margin and liquidation.
     pub mark: Option<Num>,
@@ -358,7 +366,7 @@ pub struct Mark {
 }
 
 /// The perpetual funding rate.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Funding {
     /// The rate that settled, or will settle.
     pub rate: Num,
@@ -376,7 +384,7 @@ pub struct Funding {
 ///
 /// For a polled or cursor-driven source the loss is known exactly — we know we
 /// asked and we know what came back — and the last three variants say so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum GapCause {
@@ -419,7 +427,7 @@ impl GapCause {
 }
 
 /// What a gap's interval was clipped against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Clipped {
     /// Against a captured session calendar.
@@ -455,7 +463,7 @@ impl Clipped {
 }
 
 /// An absence, made into an event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Gap {
     /// Which series was not covered.
     pub series: Series,
@@ -475,7 +483,7 @@ pub struct Gap {
 ///
 /// An anomaly is an event like any other, and a row here always has bytes
 /// behind it. The one thing that must not happen is silence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Unparsed {
     /// The venue's own channel name.
     pub channel: String,
@@ -486,7 +494,7 @@ pub struct Unparsed {
 }
 
 /// Which session set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionKind {
     /// What the feed will deliver — what coverage is measured against, and
@@ -527,7 +535,7 @@ impl std::str::FromStr for SessionKind {
 ///
 /// The unit is a **session, not a day**: a day may hold several, and an
 /// instrument with an evening break needs that.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     /// When it opens, UTC.
     pub session_start: i64,
@@ -546,7 +554,7 @@ pub struct Session {
 }
 
 /// Reference data for one instrument. Slowly changing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Instrument {
     /// The smallest price increment.
     pub tick_size: Num,
@@ -586,7 +594,7 @@ pub struct Instrument {
 ///
 /// A [`Gap`] says *we did not see this*. A reorg says *what we saw is no
 /// longer true*, which is a different claim and gets its own dataset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reorg {
     /// The first block no longer on the canonical chain.
     pub from_block: u64,
@@ -714,6 +722,6 @@ mod tests {
         // The type carries it because replay's events take the same normalise
         // path as live ones. The record refuses it, which is the store's rule
         // rather than the vocabulary's.
-        assert_eq!(Origin::Replay.as_str(), "replay");
+        assert_eq!(Origin::Generated.as_str(), "generated");
     }
 }

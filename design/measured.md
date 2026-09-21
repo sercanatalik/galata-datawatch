@@ -528,6 +528,84 @@ forgetting one that destroys is a report.
 predecessor's ~111 to within a tenth. Rotation continued to be free: roughly
 twenty handovers, none of which published a gap.
 
+## The nine-hour soak, and the defect it found — 2026-09-21
+
+```
+  8h 52m · 259 MB · 0 session-failure-free hours but ONE reset · 0 parse failures
+```
+
+One connection reset in nearly nine hours, at 03:07:41 — `Connection reset by
+peer`. The system did what it was built to do: published **24 gaps**, one per
+declared pair (6 instruments × 4 series), each recorded durably *before* it was
+emitted, and carried on. About twenty rotations, none of which published
+anything, because none of them lost coverage.
+
+### And then the rebuild had no gaps in it
+
+All 24 came back as `unparsed`:
+
+```
+  venue        ticker   channel   error
+  hyperliquid  BTC      gaps      unrecognised channel "gaps"
+```
+
+The bytes survived; **the meaning did not**. Two causes, both ours:
+
+1. `record_generated` stored the event as `format!("{:?}", …)` — a *readable
+   rendering*, chosen deliberately in an earlier change, and not
+   round-trippable.
+2. The one path handed every replayed payload to the **venue adapter**, and a
+   gap is not a venue frame. The adapter was right to refuse it.
+
+A gap that cannot be rebuilt is an absence again, which is precisely what
+recording it durably was supposed to prevent. The evidence of an outage survived
+the outage and did not survive the rebuild.
+
+### Fixed, and proved on a real crash rather than a fixture
+
+A capture was killed with `SIGKILL` mid-buffer, restarted, and the restart
+reported the window it had not been covering. Rebuilt:
+
+```
+  1,047 payloads → 32,790 rows in 17 segments (0 unparsed)
+```
+
+| ticker | series | cause | clipped | seconds |
+|---|---|---|---|---|
+| BTC | quotes | crash_unflushed | continuous | 7.5 |
+| CL | trades | crash_unflushed | continuous | 7.5 |
+
+24 rows, 6 instruments, 4 series — dated from the **last durable receipt**, not
+from when the loss was noticed, which is what keeps the interval from
+understating itself by exactly the buffer that was outstanding.
+
+### What `Origin` was doing wrong
+
+```rust
+enum Origin { Streamed, Fetched, Replay }
+```
+
+The first two say **how the bytes came to exist**. The third says **which route
+this payload is taking now**. One slot answering two questions is why a payload
+the system generated had nowhere to say so.
+
+The route is a type now — `Replayed`, which only `replay` constructs and which
+cannot be opened by a caller — and it is *stronger* than what it replaced: the
+old guard asked somebody to set a field correctly, and this one does not
+compile if you get it wrong. **It caught the rebuild on the first build**, which
+had been passing replayed payloads to the archiving entry point and relying on
+the field to save it.
+
+### And a precision trap avoided on the way past
+
+`rust_decimal`'s ordinary serde emits a float-looking value and deserialises it
+**through `f64`** — precision loss, in the type chosen precisely because `f64`
+loses precision. The `serde-str` feature makes every `Decimal` round-trip as a
+string, globally; per-field annotations were the alternative and were rejected
+because thirty fields is thirty chances to forget one, silently.
+
+Asserted: `0.000000000000000123` is stored as that string and read back equal.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
