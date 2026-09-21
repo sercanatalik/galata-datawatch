@@ -1,0 +1,50 @@
+# The same check the tree runs locally, on every push.
+#
+# **One command, not a list of steps.** `scripts/check-all.sh` already means
+# "everything": format, clippy, fourteen guards, the harness that proves each
+# guard can fail, and the tests. A workflow that enumerated those separately
+# would be a second definition of "everything" — and the one that drifts is
+# the one nobody runs locally.
+name: check
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A second push to the same branch makes the first one's result irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # **The toolchain is not named here.** `rust-toolchain.toml` pins
+      # 1.98.1 and rustup honours it, so naming a version in this file would
+      # be a second statement of the same fact — and two statements of one
+      # fact do not fail when they disagree, they disagree.
+      #
+      # This step exists to make rustup resolve and install it *before* the
+      # cache key is computed, because that key includes the rustc version.
+      - name: Resolve the pinned toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # **The one network step.** Everything below runs `--offline`, which is
+      # deliberate: the workspace is provable offline, and an accidental
+      # network dependency should fail rather than succeed quietly. `--locked`
+      # means a stale `Cargo.lock` fails here rather than being updated under
+      # us.
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: check-all
+        run: ./scripts/check-all.sh
