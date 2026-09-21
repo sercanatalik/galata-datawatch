@@ -1868,6 +1868,67 @@ What would turn it is named: **a wide dataset**. A `book` row is many times a
 transfer's width, and the row-count table was measured on `quotes`. The first
 partition of real book segments is that measurement.
 
+## The panic boundary costs under 20 ns — 2026-09-21
+
+`ingest` normalises inside `catch_unwind`, and that had been an open question
+since Tier 1 on the strength of a Servo profile showing roughly half a hot loop
+inside `__rust_try`, `__rust_maybe_catch_panic` and `PANIC_COUNT`.
+
+### The end-to-end instrument cannot resolve it, and that IS the result
+
+`cargo run --release --example unwind-cost` — real archived payloads through
+the real chain normaliser, in two shapes, because the concern is a per-*call*
+cost and a chain response is 26 MB:
+
+| shape | run 1 | run 2 |
+|---|---|---|
+| as archived, 10 × 26 MB | +0.25% | −0.96% |
+| split, 38,700 × ~800 B | −12.3% | −16.8% |
+
+**The split figures are negative** — the boundary measuring *faster* than no
+boundary. It does not make work faster. The variance simply swamps the effect.
+
+### And a harness defect nearly became a finding
+
+The first version ran `caught` first in every round. Across three repeats:
+
+```
+  +30.84%    −37.70%    −1.34%
+```
+
+**A single run said +30% and looked exactly like the regression the roadmap
+feared.** Three runs said it was noise.
+
+Two rules out of that. *One run of a benchmark is a number, not a measurement.*
+And a harness that always runs one arm first hands the other a warm allocator —
+so the arms now alternate which goes first.
+
+### The figure, from an isolated measurement
+
+Two million iterations of a virtual call returning a `Vec`:
+
+```
+  bare 36.3 ns/call   caught 29.2 ns/call   boundary  −7.0 ns
+  bare 34.4 ns/call   caught 51.4 ns/call   boundary +17.0 ns
+```
+
+**Between −7 and +17 ns per call**, itself within noise and bounded under 20.
+Against a normalise of hundreds of nanoseconds that is a fraction of a percent.
+
+The Servo figure is superseded: `catch_unwind` was refactored so LLVM inlines
+the try closure into the happy path, making it zero-cost unless a panic is
+actually thrown.
+
+### The mitigation is not taken, and that is the decision
+
+The design pre-committed to one *if it proved costly*: wrap a **batch** of
+frames rather than each frame. Not taken. Batching means buffering payloads
+before normalising, which delays the anomaly a failed parse publishes and makes
+one bad payload cost the batch's parses — real complexity and a real
+behavioural change, bought for an effect no instrument here can detect.
+
+Refiled in the code from *waiting* to *measured unnecessary*, with the figure.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
@@ -1886,19 +1947,12 @@ subscription answers it**, which is the soak's first job.
 
 ## Open, and waiting on a soak
 
-- **What does `catch_unwind` cost on the one path?** Normalisation runs inside
-  a panic boundary for every event of every payload, which is the hottest path
-  in the system — the predecessor measured candles at 44 MB/day/ticker because
-  Hyperliquid pushes one on *every* update, not once per bar. The boundary is
-  kept: an adapter panic taking down capture is worse than the overhead, the
-  published figure is old, and a profile of another program is a hypothesis
-  here rather than a result.
-
-  **The mitigation is recorded in advance so it is not invented under
-  pressure:** wrap a *batch* of frames rather than each frame. That still costs
-  only parses and never bytes, because the bytes are durable before
-  normalisation runs either way — what changes is that one panic costs the
-  batch's parses instead of one. Take the figure first.
+- ~~**What does `catch_unwind` cost on the one path?**~~ **Measured: under
+  20 ns per call**, and the end-to-end instrument cannot resolve it — its
+  variance is ±35%, orders of magnitude larger. The Servo figure is superseded
+  by the inlining of the try closure into the happy path. The batching
+  mitigation is **not** taken: it would delay the anomaly a failed parse
+  publishes, for an effect nothing here can detect.
 
 - ~~**A byte bound on row groups.**~~ **Measured**: 16,384 rows is 567 KiB of
   transfers and 601 KiB of mints, so a bound would change nothing for either.

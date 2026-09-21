@@ -270,13 +270,30 @@ fn decode(payload: &Payload) -> Result<Vec<Envelope>, String> {
 /// bytes and never the process — the payload is already recorded by the time
 /// this runs.
 ///
-/// **This sits on the hottest path in the system**, and the panic-catching
-/// machinery is not free. It is kept because an adapter panic taking down
-/// capture is worse than the overhead, and because a profile from another
-/// program is a hypothesis here rather than a result. The figure to take is in
-/// `design/measured.md`, along with the mitigation if it proves costly: wrap a
-/// **batch** of frames rather than each frame, which still costs only parses
-/// and never bytes, since the bytes are durable before this runs either way.
+/// **This sits on the hottest path in the system**, and it was an open question
+/// for five tiers on the strength of a Servo profile showing half a hot loop
+/// inside `__rust_try` and `PANIC_COUNT`.
+///
+/// # Measured 2026-09-21: between −7 and +17 ns per call
+///
+/// Two million iterations of a virtual call returning a `Vec`, with and
+/// without the boundary, put the cost **under 20 ns per call and within its own
+/// noise**. Against a normalise that takes hundreds of nanoseconds at minimum
+/// that is a fraction of a percent — which is why the end-to-end instrument,
+/// `cargo run --release --example unwind-cost`, *cannot resolve it at all*:
+/// its run-to-run variance is ±35%, orders of magnitude larger than the effect.
+///
+/// The Servo figure is superseded. `catch_unwind` was since refactored so LLVM
+/// inlines the try closure into the happy path, making it zero-cost unless a
+/// panic is actually thrown.
+///
+/// **So the mitigation this note used to hold in reserve — wrapping a *batch*
+/// of frames rather than each one — is not taken.** It would mean buffering
+/// payloads before normalising, which delays the anomaly a failed parse
+/// publishes and makes one bad payload cost the batch's parses: real
+/// complexity and a real behavioural change, bought for an effect no
+/// instrument here can detect. Recorded as *measured unnecessary* rather than
+/// deleted, so the next person to wonder finds the answer.
 fn catch_normalise(normaliser: &dyn Normalise, payload: &Payload) -> Result<Vec<Envelope>, String> {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         normaliser.normalise(payload)
