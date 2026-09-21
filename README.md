@@ -34,8 +34,19 @@ cargo add galata-datawatch --features rh-chain
 ```
 
 `hyperliquid` (WebSocket), `rh-chain` (block cursor over `eth_getLogs`) and
-`rh-crypto` (signed REST poll) ship in-tree. `Adapter` and `Source` are public,
-so a venue can also be implemented out-of-tree without forking this one.
+`rh-crypto` (signed REST poll) ship in-tree.
+
+**A venue can also live in your own crate.** `Adapter` carries a worked example
+that compiles, and the claim itself is checked by
+[`tests/out_of_tree_venue.rs`](./crates/galata-datawatch/tests/out_of_tree_venue.rs)
+— cargo builds that file as its own crate, so it sees exactly what a stranger
+sees. If a venue needs something private, the compiler says which thing there
+rather than in somebody's repository. The venue it implements is fictional on
+purpose: one resembling an in-tree venue would tempt reuse of its helpers, and
+reuse is what makes a test pass for the wrong reason.
+
+docs.rs is told `all-features = true`, so every venue appears and every gated
+item carries a badge naming the feature it needs.
 
 ## Two stores
 

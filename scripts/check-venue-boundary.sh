@@ -46,8 +46,20 @@ fi
 # `#[cfg(all(test, feature = "hyperliquid"))]` — is still a test module, and a
 # guard keying on the exact string silently began scanning test code the first
 # time somebody wrote a legitimate one. That happened.
+# A `#[cfg(...)]` attribute line is skipped as well.
+#
+# **A feature name in a cfg is a BUILD-time gate, not a runtime dispatch.**
+# `#[cfg(feature = "rh-chain")] pub mod cursor;` does not let the loop tell two
+# venues apart — the loop still holds a `dyn Adapter` and still cannot. The
+# rule this guard exists for is that nothing above the seam BRANCHES on a
+# venue's name, and a conditional compilation is not a branch.
+#
+# The narrowing is exact: only the attribute line itself. A violation written
+# on the same line as a cfg would be missed, which rustfmt does not produce.
 non_test_lines() {
-    awk '/^[[:space:]]*#\[cfg\(.*test.*\)\]/{exit} {print FILENAME ":" FNR ": " $0}' "$1"
+    awk '/^[[:space:]]*#\[cfg\(.*test.*\)\]/{exit}
+         /^[[:space:]]*#\[cfg(_attr)?\(/{next}
+         {print FILENAME ":" FNR ": " $0}' "$1"
 }
 
 pattern=$(IFS='|'; echo "${VENUES[*]}")

@@ -23,7 +23,7 @@ const INFO_PATH: &str = "/info";
 pub enum FetchError {
     /// The request could not be made.
     ///
-    /// **Build it with [`FetchError::http`]**, never as a struct literal.
+    /// **Build it with `FetchError::http`**, never as a struct literal.
     #[error("{venue} {path}: {source}")]
     Http {
         /// Which venue.

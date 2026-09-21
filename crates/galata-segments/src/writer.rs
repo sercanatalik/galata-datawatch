@@ -58,8 +58,10 @@ pub const PRUNE_COLUMN: &str = "recv_micros";
 ///
 /// # The byte bound, now measured and still unset
 ///
-/// `parquet` 60 added [`set_max_row_group_bytes`], which flushes a row group
-/// when its *estimated encoded size* crosses a threshold. That expresses this
+/// `parquet` 60 added
+/// [`WriterPropertiesBuilder::set_max_row_group_bytes`](parquet::file::properties::WriterPropertiesBuilder::set_max_row_group_bytes),
+/// which flushes a row group when its *estimated encoded size* crosses a
+/// threshold. That expresses this
 /// constant's actual intent — *how much gets decoded for one window* — far
 /// more directly, and it is **row-width independent**.
 ///
@@ -84,8 +86,6 @@ pub const PRUNE_COLUMN: &str = "recv_micros";
 ///
 /// When both bounds are set the smaller wins, so turning this on later narrows
 /// groups rather than widening them — the safe direction to discover.
-///
-/// [`set_max_row_group_bytes`]: parquet::file::properties::WriterPropertiesBuilder::set_max_row_group_bytes
 pub const MAX_ROW_GROUP_ROWS: usize = 16_384;
 
 /// The codec a store writes with.

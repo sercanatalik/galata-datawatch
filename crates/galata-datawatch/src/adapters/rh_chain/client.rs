@@ -25,7 +25,7 @@ use crate::venue::Endpoint;
 pub enum ChainError {
     /// The request could not be made.
     ///
-    /// **Build it with [`ChainError::http`]**, never as a struct literal: the
+    /// **Build it with `ChainError::http`**, never as a struct literal: the
     /// URL has to be removed before the error is stored, and a redaction
     /// applied where an error is *printed* has to be applied at every print
     /// site — the one that is missed is the one that runs.

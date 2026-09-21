@@ -13,6 +13,8 @@
 pub mod clock;
 pub mod coverage;
 #[cfg(feature = "capture")]
+/// **Behind the `rh-chain` feature**: the only cursor venue in-tree.
+#[cfg(feature = "rh-chain")]
 pub mod cursor;
 #[cfg(feature = "capture")]
 pub mod poll;
@@ -25,6 +27,7 @@ pub mod walk;
 pub use clock::{Clock, SystemClock, TestClock};
 pub use coverage::Coverage;
 #[cfg(feature = "capture")]
+#[cfg(feature = "rh-chain")]
 pub use cursor::Pass;
 #[cfg(feature = "capture")]
 pub use poll::{Polls, Refusal};

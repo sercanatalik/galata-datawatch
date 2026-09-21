@@ -68,6 +68,20 @@ fi
 python3 - "$ROOT" <<'PY'
 import pathlib, sys, re
 
+# **Where the tests begin, however the attribute is spelled.**
+#
+# A literal `#[cfg(test)]` split misses `#[cfg(all(test, feature = "x"))]`,
+# which a feature-gated test module needs — and the miss is silent and
+# BACKWARDS: the tests get scanned as shipped code, so the guard goes red on an
+# assertion written to prove its own rule.
+TESTS = re.compile(r"#\[cfg\((?:test\)|all\(\s*test\b)")
+
+
+def shipped_only(text):
+    found = TESTS.search(text)
+    return text[: found.start()] if found else text
+
+
 root = pathlib.Path(sys.argv[1])
 
 # Where a URL is allowed to leave the type: a client is built, or a socket is
@@ -88,7 +102,7 @@ for path in sorted(root.glob("crates/**/*.rs")):
     if "/examples/" in relative or "/tests/" in relative:
         continue
     text = path.read_text()
-    shipped = text.split("#[cfg(test)]", 1)[0]
+    shipped = shipped_only(text)
 
     # 1. No error message carries a URL.
     for match in re.finditer(r"#\[error\((.*?)\)\]", shipped, re.S):

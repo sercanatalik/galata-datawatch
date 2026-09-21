@@ -11,6 +11,21 @@ keywords = ["market-data", "nats", "messaging", "trading", "finance"]
 categories = ["network-programming", "finance"]
 include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 
+# **How docs.rs builds this.**
+#
+# `all-features` rather than a list: a list would sit beside `[features]` and
+# silently omit one added later, which is the exact failure this prevents one
+# level up. Safe because the feature set is ADDITIVE — no feature turns
+# another off — which `check-workspace-deps.sh` is what keeps true.
+#
+# `--cfg docsrs` turns on `doc_auto_cfg` in the crate root, so every gated item
+# carries a badge naming the feature it needs. Hand-written `#[doc(cfg(...))]`
+# would be a second statement of what `#[cfg(...)]` already says, one line away
+# from disagreeing with it.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

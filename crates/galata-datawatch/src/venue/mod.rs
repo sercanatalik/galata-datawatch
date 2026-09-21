@@ -132,6 +132,125 @@ pub struct Reference {
 /// The seam.
 ///
 /// Every method is synchronous and pure. See the module documentation for why.
+///
+/// # Adding a venue from outside this crate
+///
+/// Everything below is `pub`, so a venue can live in your own crate and never
+/// touch this one. The shape is small — the trait answers *what this venue is*,
+/// and [`Normalise`] turns its bytes into events:
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// use galata_datawatch::normalise::{Normalise, NormaliseError};
+/// use galata_datawatch::record::{Payload, PayloadAddress};
+/// use galata_datawatch::venue::{
+///     Adapter, Budget, ConnectionPolicy, Declaration, Endpoint, Keepalive, Paging, Transport,
+/// };
+/// use galata_wire::{Envelope, Origin, Series, Ticker, Venue};
+///
+/// struct MyVenue {
+///     venue: Venue,
+///     declaration: Declaration,
+/// }
+///
+/// impl MyVenue {
+///     fn new() -> MyVenue {
+///         MyVenue {
+///             venue: Venue::new("my-venue").expect("a legal venue name"),
+///             declaration: Declaration {
+///                 // What it pushes, what it serves historically, and how it
+///                 // pages — DECLARED, so a walk never discovers it by
+///                 // failing.
+///                 streams: vec![Series::Trades],
+///                 historical: vec![],
+///                 paging: BTreeMap::new(),
+///                 budget: Budget {
+///                     requests_per_minute: 60.0,
+///                     min_historical_interval_ms: 1_000,
+///                 },
+///                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 30 },
+///                 ws_url: "wss://my-venue.invalid/stream",
+///                 rest_url: "https://my-venue.invalid",
+///             },
+///         }
+///     }
+/// }
+///
+/// impl Normalise for MyVenue {
+///     fn venue(&self) -> &Venue {
+///         &self.venue
+///     }
+///
+///     /// **Runs after the bytes are already durable**, so a shape you did
+///     /// not expect costs a parse and never the record.
+///     fn normalise(&self, _payload: &Payload) -> Result<Vec<Envelope>, NormaliseError> {
+///         Ok(Vec::new())
+///     }
+/// }
+///
+/// impl Adapter for MyVenue {
+///     fn declaration(&self) -> &Declaration {
+///         &self.declaration
+///     }
+///
+///     /// Which of the three loops drives this venue. No `streaming()`
+///     /// override means nothing is pushed, and the default says so rather
+///     /// than returning an empty frame list.
+///     fn transport(&self) -> Transport {
+///         Transport::Stream {
+///             ws_url: Endpoint::public("wss://my-venue.invalid/stream"),
+///             keepalive: Keepalive::None,
+///         }
+///     }
+///
+///     fn series_of_channel(&self, channel: &str) -> Option<Series> {
+///         (channel == "trades").then_some(Series::Trades)
+///     }
+///
+///     /// Reads only enough of a frame to decide which partition it belongs
+///     /// in. A frame whose envelope cannot be read still becomes a payload.
+///     fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload {
+///         Payload {
+///             seq: 0,
+///             recv_micros,
+///             address: PayloadAddress::Venue("my-venue".into()),
+///             channel: "trades".into(),
+///             kind: Series::Trades.as_str().to_string(),
+///             symbol: None,
+///             origin: Origin::Streamed,
+///             payload: bytes.to_vec(),
+///         }
+///     }
+///
+///     fn venue_symbol(&self, ticker: &Ticker) -> Option<String> {
+///         Some(ticker.as_str().to_string())
+///     }
+///
+///     /// A venue with no bar widths says `None` rather than inventing one.
+///     fn interval_label(&self, _interval_micros: i64) -> Option<String> {
+///         None
+///     }
+///
+///     fn venue_ticker(&self, _channel: &str, venue_symbol: &str) -> Option<Ticker> {
+///         Ticker::new(venue_symbol).ok()
+///     }
+/// }
+///
+/// let adapter = MyVenue::new();
+/// assert_eq!(adapter.venue().as_str(), "my-venue");
+/// assert!(adapter.transport().is_stream());
+/// // Nothing is pushed unless `streaming()` is overridden.
+/// assert!(adapter.streaming().is_none());
+/// ```
+///
+/// **This example is a doctest, so it compiles against this crate — which is
+/// not quite the claim.** A doctest can reach anything the crate can. The
+/// stronger claim is checked by `tests/out_of_tree_venue.rs`, compiled by cargo
+/// as its own crate, so it sees exactly what a stranger sees: if it needs
+/// something private, the compiler says which thing *there* rather than in
+/// somebody's repository. That test implements a deliberately fictional venue,
+/// because one resembling an in-tree venue would tempt reuse of its helpers,
+/// and reuse is what makes a test pass for the wrong reason.
 pub trait Adapter: Normalise {
     /// What this venue serves, pages and permits. Callers derive behaviour from
     /// this rather than from constants of their own.

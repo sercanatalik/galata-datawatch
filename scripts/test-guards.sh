@@ -162,6 +162,20 @@ prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
 
+# Every feature combination builds. Plants for itself: it must remove a cfg,
+# which an append cannot do.
+prove "check-feature-matrix (a venue-less build stops compiling)" \
+      ./scripts/check-feature-matrix.sh \
+      crates/galata-datawatch/src/adapters/mod.rs own
+
+# A publishable crate must say how docs.rs builds it. REPLACE, not append:
+# appending lands in whatever table came last, which is not [package].
+prove "check-release-hygiene (no docs.rs metadata)" \
+    "$ROOT/scripts/check-release-hygiene.sh" \
+    "$ROOT/crates/galata-wire/Cargo.toml" \
+    replace 'all-features = true' \
+    'all-features = false'
+
 # Three rules, three plants. A guard with three rules and one proof is a guard
 # two thirds of which nobody has seen fail.
 

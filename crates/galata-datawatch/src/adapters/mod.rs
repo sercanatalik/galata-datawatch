@@ -12,6 +12,7 @@ pub mod hyperliquid;
 
 /// Robinhood Chain. The decoder is pure and unconditional; nothing here yet
 /// makes a request.
+#[cfg(feature = "rh-chain")]
 pub mod rh_chain;
 
 /// Robinhood Crypto. Behind the `rh-crypto` feature, which carries the
@@ -38,6 +39,7 @@ pub fn known() -> Vec<&'static str> {
     [
         #[cfg(feature = "hyperliquid")]
         hyperliquid::VENUE,
+        #[cfg(feature = "rh-chain")]
         rh_chain::VENUE,
     ]
     .to_vec()
@@ -84,6 +86,7 @@ pub enum AdapterConfig {
     #[cfg(feature = "hyperliquid")]
     Hyperliquid(hyperliquid::Config),
     /// Robinhood Chain.
+    #[cfg(feature = "rh-chain")]
     RhChain(rh_chain::Config),
 }
 
@@ -102,6 +105,7 @@ pub fn supplies(venue: &str, series: galata_wire::Series) -> bool {
         hyperliquid::VENUE => declaration_of_hyperliquid()
             .map(|d| d.supplies(series))
             .unwrap_or(false),
+        #[cfg(feature = "rh-chain")]
         rh_chain::VENUE => matches!(
             series,
             galata_wire::Series::Transfers | galata_wire::Series::Mints
@@ -154,6 +158,7 @@ impl AdapterConfig {
                     .collect(),
                 candle_interval: venue.candle.clone(),
             })),
+            #[cfg(feature = "rh-chain")]
             rh_chain::VENUE => Ok(AdapterConfig::RhChain(rh_chain::Config {
                 // **Held where one is named, public where none is.** A
                 // variable that is named and unset refuses here rather than
@@ -220,6 +225,13 @@ impl AdapterConfig {
 /// it. One request per dex removes the whole failure mode.
 #[cfg(feature = "capture")]
 pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> {
+    // See `History::for_config`: an empty `AdapterConfig` still needs an arm.
+    #[cfg(not(any(feature = "hyperliquid", feature = "rh-chain")))]
+    {
+        let _ = config;
+        return Ok(());
+    }
+    #[cfg(any(feature = "hyperliquid", feature = "rh-chain"))]
     match config {
         #[cfg(feature = "hyperliquid")]
         AdapterConfig::Hyperliquid(c) => {
@@ -252,6 +264,7 @@ pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> 
         // answer rather than a refusal. The chain-id check at boot is the
         // equivalent guard, and it lives in the loop because it needs the
         // provider.
+        #[cfg(feature = "rh-chain")]
         AdapterConfig::RhChain(_) => Ok(()),
     }
 }
@@ -265,6 +278,7 @@ pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
         AdapterConfig::Hyperliquid(c) => {
             Ok(Box::new(hyperliquid::Hyperliquid::new(c, None)?) as Box<dyn Adapter>)
         }
+        #[cfg(feature = "rh-chain")]
         AdapterConfig::RhChain(c) => Ok(Box::new(rh_chain::RhChain::new(c)?) as Box<dyn Adapter>),
     }
 }
@@ -303,9 +317,19 @@ impl History {
             // A chain has no *historical walk* separate from its capture: the
             // cursor loop IS the backfill, because asking for old blocks and
             // asking for new ones is the same call at a different position.
+            #[cfg(feature = "rh-chain")]
             AdapterConfig::RhChain(_) => Err(ResolveError::Unknown {
                 name: "rh-chain has no separate history walk; its cursor loop backfills".into(),
                 known: known().join(", "),
+            }),
+            // **`AdapterConfig` is EMPTY with no venue feature on**, and a
+            // match over a reference to an empty enum is not exhaustive on its
+            // own — Rust will not infer unreachability through the reference.
+            // This arm cannot run, because no value of the type can be built.
+            #[cfg(not(any(feature = "hyperliquid", feature = "rh-chain")))]
+            _ => Err(ResolveError::Unknown {
+                name: "this build compiles in no venue".into(),
+                known: String::new(),
             }),
         }
     }
@@ -317,6 +341,14 @@ impl History {
     /// failed fetch is logged and the walk continues, and the outcome reports
     /// what was reached either way.
     pub async fn fetch(&self, request: Fetch, now_micros: i64) -> Result<Payload, String> {
+        // See `for_config`: with no venue feature on, `History` has no
+        // variants and a match through `&History` still needs an arm.
+        #[cfg(not(feature = "hyperliquid"))]
+        {
+            let _ = (request, now_micros);
+            return Err("this build compiles in no venue with a history walk".to_string());
+        }
+        #[cfg(feature = "hyperliquid")]
         match self {
             #[cfg(feature = "hyperliquid")]
             History::Hyperliquid(client) => match request.series {
@@ -360,7 +392,7 @@ impl History {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rh-chain"))]
 mod tests {
     use super::*;
     use crate::config::{ConfigError, Secret, SecretSource, VenueConfig};

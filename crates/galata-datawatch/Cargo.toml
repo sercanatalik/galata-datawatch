@@ -11,6 +11,21 @@ keywords = ["market-data", "capture", "parquet", "archive", "trading"]
 categories = ["database-implementations", "finance"]
 include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 
+# **How docs.rs builds this.**
+#
+# `all-features` rather than a list: a list would sit beside `[features]` and
+# silently omit one added later, which is the exact failure this prevents one
+# level up. Safe because the feature set is ADDITIVE — no feature turns
+# another off — which `check-workspace-deps.sh` is what keeps true.
+#
+# `--cfg docsrs` turns on `doc_auto_cfg` in the crate root, so every gated item
+# carries a badge naming the feature it needs. Hand-written `#[doc(cfg(...))]`
+# would be a second statement of what `#[cfg(...)]` already says, one line away
+# from disagreeing with it.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 
@@ -70,6 +85,10 @@ capture = [
 ]
 # The seam itself is unconditional; an adapter is a feature.
 hyperliquid = []
+# **A block cursor over `eth_getLogs`.** Off by default: a chain is a different
+# shape of venue from an exchange, and a consumer who wants quotes should not
+# link a hash trail and a reorganisation join to get them.
+rh-chain = []
 # **The signing venue.** Ed25519 and base64 are here rather than unconditional
 # so a tape reader links neither: a signature is a pure function, but it is a
 # pure function nothing reading parquet has any use for.

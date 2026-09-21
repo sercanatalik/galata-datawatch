@@ -1929,6 +1929,83 @@ behavioural change, bought for an effect no instrument here can detect.
 
 Refiled in the code from *waiting* to *measured unnecessary*, with the figure.
 
+## Three feature combinations did not build — 2026-09-21
+
+Tier 10 asks for the `Adapter` seam documented as the out-of-tree extension
+point. Writing that documentation found two things the documentation would
+have been wrong about.
+
+### The README advertised a feature that did not exist
+
+```sh
+cargo add galata-datawatch --features rh-chain
+```
+
+**There is no `rh-chain` feature.** `hyperliquid` and `rh-crypto` are features;
+`pub mod rh_chain;` was unconditional. That command fails — cargo errors on an
+unknown feature — so the README's central claim about venues was undeliverable
+for one of the three.
+
+Making it real exposed the second thing.
+
+### The combinations between all-on and all-off were never built
+
+`check-all.sh` builds `--all-features` and `--no-default-features`, and
+`check-workspace-deps.sh` holds the dependency walls. Nothing built anything in
+between, and **three combinations did not compile** — two of which predate this
+change and would have failed at any point in the last five tiers:
+
+| combination | what broke |
+|---|---|
+| `capture` alone | `match` over an `AdapterConfig` with no variants |
+| `capture, rh-chain` | `match` over a `History` with no variants |
+| `hyperliquid` without `capture` | reached the capture-gated `client` module, twice |
+
+The first two are the same Rust subtlety: **a match through a reference to an
+empty enum is not exhaustive**, because unreachability is not inferred through
+the reference. The third is the feature split's own claim failing — `wire` and
+`normalise` are supposed to be pure and runtime-free, and `client()` and
+`funding_page_end` sat outside the gate that says so.
+
+Making `rh-chain` a feature caused none of these. It simply produced
+combinations nobody had built.
+
+`check-feature-matrix.sh` now builds nine of them on every `check-all`, and was
+watched going red on a removed `cfg`.
+
+### Two guards were keyed too tightly to survive it
+
+Gating the chain meant `#[cfg(all(test, feature = "rh-chain"))]` on a test
+module and `#[cfg(feature = "rh-chain")]` in `capture/mod.rs`. Both tripped
+guards that were right in spirit and wrong in their pattern:
+
+- **`check-endpoint-reach` and `check-secret-reach` split on a literal
+  `#[cfg(test)]`**, so a feature-gated test module was no longer recognised as
+  tests — and the failure was *backwards*: the guard went red on an assertion
+  written to prove its own rule. Both now match any `cfg` predicate mentioning
+  `test`, which `check-venue-boundary` had already learned to do.
+- **`check-venue-boundary` greps for a venue's name in quotes**, and a
+  `#[cfg(feature = "rh-chain")]` contains one. But a feature name in a `cfg` is
+  a **build-time gate, not a runtime dispatch** — the loop still holds a
+  `dyn Adapter` and still cannot tell two venues apart. `cfg` attribute lines
+  are now skipped.
+
+### And docs.rs would have documented the default features only
+
+Venues are features and docs.rs builds defaults unless told otherwise, so the
+page for the crate whose README says *venues are features* would have been
+missing one. `all-features = true` and `--cfg docsrs` on all four crates, and
+`check-release-hygiene.sh` now requires both.
+
+**The widely-copied incantation for this is obsolete.** Every guide says
+`#![cfg_attr(docsrs, feature(doc_auto_cfg))]`; that feature was **removed in
+Rust 1.92** and merged into `doc_cfg`, so the build fails with `E0557`. Caught
+only by building the docs locally, which is worth doing before publishing
+rather than after.
+
+The badges are verified present in the generated HTML for `capture`,
+`hyperliquid` and `rh-crypto`.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

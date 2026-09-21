@@ -441,9 +441,11 @@ called**, and that is stated rather than implied.*
 - `galata-segments` could publish **early**, after Tier 0 — it is standalone,
   useful to anyone, and real users would find the cursor API's rough edges
   before the version matters.
-- README, docs.rs examples, and the `Adapter`/`Source` traits documented as the
-  out-of-tree extension point — which is what makes *"add a venue later"* true
-  rather than true-if-you-fork.
+- ~~README, docs.rs examples, and the `Adapter`/`Source` traits documented as
+  the out-of-tree extension point.~~ **Done**, and writing it found the README
+  advertising a `rh-chain` feature that did not exist and **three feature
+  combinations that did not build**. `check-feature-matrix.sh` holds nine of
+  them now.
 
 ---
 

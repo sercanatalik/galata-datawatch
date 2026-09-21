@@ -12,6 +12,8 @@
 //! never sees a partial file, and a crash leaves a temporary that is
 //! recognisably not a segment.
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod compact;
 pub mod cursor;
 pub mod error;

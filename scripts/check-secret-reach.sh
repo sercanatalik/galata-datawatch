@@ -56,6 +56,20 @@ fi
 python3 - "$ROOT" <<'PY'
 import pathlib, sys, re
 
+# **Where the tests begin, however the attribute is spelled.**
+#
+# A literal `#[cfg(test)]` split misses `#[cfg(all(test, feature = "x"))]`,
+# which a feature-gated test module needs — and the miss is silent and
+# BACKWARDS: the tests get scanned as shipped code, so the guard goes red on an
+# assertion written to prove its own rule.
+TESTS = re.compile(r"#\[cfg\((?:test\)|all\(\s*test\b)")
+
+
+def shipped_only(text):
+    found = TESTS.search(text)
+    return text[: found.start()] if found else text
+
+
 root = pathlib.Path(sys.argv[1])
 allowed = "crates/galata-datawatch/src/config/source.rs"
 # The vault's own door, which is the vault's to document.
@@ -66,7 +80,7 @@ for path in sorted(root.glob("crates/**/*.rs")):
     relative = path.relative_to(root).as_posix()
     text = path.read_text()
     # Shipped code only.
-    shipped = text.split("#[cfg(test)]", 1)[0]
+    shipped = shipped_only(text)
 
     for var in vault_vars:
         if var in shipped:

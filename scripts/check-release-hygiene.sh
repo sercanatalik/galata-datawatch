@@ -50,6 +50,25 @@ for member in members:
         if field not in pkg:
             problems.append(f"{name}: publishable and missing `{field}`")
 
+    # **How docs.rs builds it**, which is invisible until the crate is
+    # published and the page is wrong.
+    #
+    # Venues here are FEATURES, and docs.rs documents only the default set
+    # unless told otherwise — so without this the page for the crate whose
+    # README says "venues are features" would be missing one of them, and
+    # would give no sign that any item is gated at all.
+    docs = pkg.get("metadata", {}).get("docs", {}).get("rs", {})
+    if not docs.get("all-features"):
+        problems.append(
+            f"{name}: publishable and declares no `[package.metadata.docs.rs] all-features` — "
+            f"docs.rs would document the default features only"
+        )
+    elif "--cfg" not in docs.get("rustdoc-args", []):
+        problems.append(
+            f"{name}: docs.rs metadata sets no `--cfg docsrs`, so `doc_auto_cfg` stays off and "
+            f"no item says which feature gates it"
+        )
+
     if not (root / member / "LICENSE-MIT").exists():
         problems.append(
             f"{name}: publishable and carries no LICENSE-MIT — `include` ships only what it lists"

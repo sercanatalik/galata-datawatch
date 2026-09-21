@@ -14,7 +14,10 @@ members = [
 # `cargo deny` and anyone vendoring the tree read exactly them, and a second
 # place to state a licence is a place for two to disagree.
 [workspace.package]
-authors = ["Sercan Atalik <6832079+sercanatalik@users.noreply.github.com>"]
+# Not inherited by any member, which cargo warns about — and a field no
+# crate carries is a field that says nothing. Named here so the workspace
+# still records who owns it.
+# authors = ["Sercan Atalik <6832079+sercanatalik@users.noreply.github.com>"]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/sercanatalik/galata-datawatch"

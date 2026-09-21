@@ -278,6 +278,12 @@ impl Construct for Hyperliquid {
 
 impl Hyperliquid {
     /// A client for this venue's REST root.
+    ///
+    /// **Behind `capture`**, like the `client` module it returns: this venue's
+    /// `wire` and `normalise` are pure functions of bytes and stay available
+    /// without a runtime, and a constructor for something that makes requests
+    /// does not.
+    #[cfg(feature = "capture")]
     pub fn client(&self) -> client::Client {
         client::Client::new(self.declaration.rest_url)
     }
@@ -380,6 +386,10 @@ impl Adapter for Hyperliquid {
         // Funding alone pages forward here; a candle page is planned by spans
         // and needs no end read out of it.
         match payload.channel.as_str() {
+            // **Behind `capture` only because the reader lives beside the
+            // client**, not because it needs a runtime — it reads bytes. A
+            // build with no transport walks nothing, so it never asks.
+            #[cfg(feature = "capture")]
             "fundingHistory" => client::funding_page_end(&payload.payload),
             _ => None,
         }

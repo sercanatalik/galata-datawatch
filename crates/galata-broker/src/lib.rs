@@ -34,6 +34,7 @@
 //! never consumes, and a component that only folds should not hold a handle
 //! that can write.
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
 pub mod encode;

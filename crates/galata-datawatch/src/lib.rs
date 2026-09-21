@@ -21,6 +21,8 @@
 //! process are what most of this design is for, and both are easier to arrange
 //! against a fake than against a venue.
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod adapters;
 pub mod calendar;
 /// **Behind the `capture` feature**: it needs a runtime.

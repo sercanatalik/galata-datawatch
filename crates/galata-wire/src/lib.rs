@@ -24,6 +24,8 @@
 //!
 //! [galata-datawatch]: https://github.com/sercanatalik/galata-datawatch
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod dataset;
 pub mod event;
 pub mod identity;
