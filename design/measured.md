@@ -776,6 +776,81 @@ The lesson is narrow and real: **a guard that keys on an exact string is a guard
 with a silent failure mode**, and the thing that caught this was
 `test-guards.sh` refusing to plant into a tree that was already red.
 
+## Robinhood Chain, measured against the live chain — 2026-09-21
+
+Chain **4663**, Arbitrum Orbit, settling to Ethereum. The public endpoint
+`https://rpc.mainnet.chain.robinhood.com` needs no key, keeps no archive and
+offers no SLA.
+
+### A timestamp names nine blocks
+
+**This is the finding that decides the design.** Twenty consecutive blocks
+carry **four distinct timestamps**:
+
+```
+  1789978217  →  blocks 68642966 … 68642974     nine blocks
+  1789978218  →  blocks 68642975 … 68642983     nine blocks
+```
+
+Block timestamps have one-second granularity and the chain produces about nine
+blocks a second. The predecessor pages history by bumping `last_micros + 1ms`;
+here that asks for *everything after the second the last block was in*, and
+**eight blocks in nine disappear** — silently, because the venue answers every
+such request correctly.
+
+Not a risk to be mitigated. Arithmetic. `Source::Cursor` over block numbers is
+the only correct shape, and `Cursor::Block { first, last }` has been in the
+segment store since Tier 0 waiting for it.
+
+### Two frontiers, and the quoted figure is the wrong one
+
+Read within a minute of each other:
+
+| tag | block | behind head | behind in time |
+|---|---|---|---|
+| `latest` | 68,642,714 | — | — |
+| `safe` | 68,634,888 | 7,826 | 13.1 min |
+| `finalized` | 68,631,036 | 11,678 | **19.6 min** |
+
+The roadmap said *"the finalized block (~13 min)"*. **13 minutes is `safe`, not
+`finalized`** — and `safe` can still be reorganised under a fault, so a bound
+taken there can move backwards, and a bound that can move backwards is not a
+bound. `Frontier` offers `Head` and `Finalized` and deliberately does not offer
+`safe`.
+
+Capture follows the **head**, because a block later reorganised away still
+*arrived*, and the record records arrivals. The reader is bounded by finality.
+Two questions, two answers — the same split as *the archive is a record, the
+tape is a cache*.
+
+### The ERC-721 trap is real, and it is 3% of transfers
+
+Over three hundred blocks:
+
+```
+  4,362 logs carry the ERC-20 Transfer topic0
+    4,239  three topics   ERC-20
+      123  FOUR topics    ERC-721, which shares that topic0
+```
+
+The fixture captured for the test has `"data": "0x"` — **empty**, because an
+ERC-721 keeps its token id in `topics[3]`. Decoded as ERC-20 it yields an
+amount of **zero** and a transfer that never happened. Nearly three percent of
+transfers, every one a plausible-looking zero.
+
+Refused by **arity**, which is a property of the log, rather than by a contract
+allow-list, which is a second thing to maintain.
+
+### And the decoder was right where I was not
+
+The first test asserted an amount of `0.0987`, computed by eye from
+`0x015fb7f9b8c38000`. The decoder said `0.099`. The decoder was right — the
+value is 99,000,000,000,000,000 exactly.
+
+Worth recording because the failure mode is the dangerous direction: a fixture
+whose expected value was guessed is a fixture that tests the guess. The
+assertion now carries the full raw integer as well as the scaled decimal.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

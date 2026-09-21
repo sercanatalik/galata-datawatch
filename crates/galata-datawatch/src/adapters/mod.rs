@@ -10,6 +10,10 @@
 #[cfg(feature = "hyperliquid")]
 pub mod hyperliquid;
 
+/// Robinhood Chain. The decoder is pure and unconditional; nothing here yet
+/// makes a request.
+pub mod rh_chain;
+
 #[cfg(feature = "capture")]
 use galata_wire::Series;
 

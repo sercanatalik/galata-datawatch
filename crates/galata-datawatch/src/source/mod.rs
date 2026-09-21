@@ -22,9 +22,11 @@
 //! [`Adapter`](crate::venue::Adapter), which is a trait.
 
 pub mod backoff;
+pub mod cursor;
 pub mod stream;
 
 pub use backoff::Backoff;
+pub use cursor::{BlockPaging, BlockStep, Frontier, PlanError};
 pub use stream::StreamSource;
 
 /// What a source hands the loop.

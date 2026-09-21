@@ -303,8 +303,12 @@ source before it existed turned out to buy more than tidy refusals.
 - **server** — axum over `galata-segments` (partitions, frontier,
   `overdue_closed`, gaps, failures), `galata-broker` (status and market
   streams), and `galata-datawatch` with `default-features = false` for the tape
-  schemas. **Never the capture loop** — which needs `capture` to become a
-  feature (default on).
+  schemas. **Never the capture loop.**
+  - **Done here already**: `capture` is a feature, default on, and a tree built
+    without it links **zero** transport crates — 541 down to 279.
+    `check-no-transport.sh` holds it. The server can be written against the
+    thin build from its first line rather than acquiring a dependency on
+    something in the fat one.
 - **contract** — `utoipa` → committed `openapi.snapshot.json` →
   `openapi-typescript` + `openapi-fetch`, with a `--check` mode failing CI on
   drift. This replaces legacy's hand-generated fixtures and two-sided drift
