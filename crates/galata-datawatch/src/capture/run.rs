@@ -436,10 +436,26 @@ impl Capture {
                     }
                     (true, Some(Outcome::Held)) => match self.wiring.clipped {
                         Clipped::Continuous | Clipped::Assumed24h => {
-                            if self.coverage.count(&ticker, series) > 0 {
-                                PairState::Live
-                            } else {
-                                PairState::Stale
+                            // **How long since anything arrived**, not whether
+                            // a counter is above zero.
+                            //
+                            // The count is a TUMBLING window: it resets, and
+                            // every pair that has not spoken since the reset
+                            // reads as stale for no reason but the reset.
+                            // Observed live with the window shared across
+                            // pairs: five of twenty-four flipped to stale at
+                            // the roll and took EIGHT SECONDS to come back,
+                            // all healthy throughout.
+                            //
+                            // Staleness is a TRAILING window — *nothing has
+                            // arrived in the last minute* — which is what the
+                            // state has always been documented to mean and
+                            // does not reset.
+                            match self.coverage.last_recv(&ticker, series) {
+                                Some(last) if now_micros - last <= COUNT_WINDOW_MICROS => {
+                                    PairState::Live
+                                }
+                                _ => PairState::Stale,
                             }
                         }
                         // Staleness has to respect a calendar, or it fires
@@ -525,6 +541,12 @@ impl Capture {
     }
 
     // ---- accessors for the driver and for tests ---------------------------
+
+    /// Roll the counting window, for a test that needs one to have elapsed.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn roll_for_test(&mut self, now_micros: i64) {
+        self.coverage.roll_counts(now_micros, COUNT_WINDOW_MICROS);
+    }
 
     /// The subscription ledger.
     pub fn held_mut(&mut self) -> &mut Held {
@@ -1209,6 +1231,39 @@ mod tests {
             sink,
             _root: root,
         }
+    }
+
+    #[test]
+    fn a_window_roll_does_not_make_a_live_pair_stale() {
+        // **The count tumbles; staleness trails.** Deciding staleness from the
+        // counter made every pair that had not spoken since the reset read as
+        // stale because of the reset — five of twenty-four, for eight seconds,
+        // once a minute, all healthy.
+        let mut f = fixture(1_000);
+        f.capture.take_frame(&bbo("BTC", 1)).unwrap();
+
+        let live = |f: &mut Fixture, at: i64| {
+            f.capture
+                .status(at)
+                .pairs
+                .iter()
+                .filter(|p| p.state == crate::capture::status::PairState::Live)
+                .count()
+        };
+
+        // A second later it is live, as it should be.
+        assert_eq!(live(&mut f, 1_000 + 1_000_000), 1);
+
+        // Roll the counting window. Nothing about the venue changed.
+        f.capture.roll_for_test(1_000 + COUNT_WINDOW_MICROS);
+        assert_eq!(
+            live(&mut f, 1_000 + COUNT_WINDOW_MICROS),
+            1,
+            "a roll is not a venue going quiet"
+        );
+
+        // A full window after the last message, it really is stale.
+        assert_eq!(live(&mut f, 1_000 + 2 * COUNT_WINDOW_MICROS + 1_000_000), 0);
     }
 
     #[test]

@@ -2681,6 +2681,58 @@ independently. **The gap is dated from the last durable receipt**, as designed,
 not from when the loss was noticed. Recorded because after three claims that
 overstated, one that holds to the microsecond is worth saying out loud.
 
+## A window roll read as five instruments going quiet — 2026-09-21
+
+The audit's next field, and this one I broke myself in the entry above.
+
+`PairState::Live` was decided by *is the count above zero*, and the count is a
+**tumbling** window — it resets. So every pair that had not spoken since the
+reset read as stale **because of the reset**.
+
+Sharing one counting window across pairs, which the previous change did so the
+counts would be comparable, turned a staggered and invisible version of this
+into a synchronised and obvious one. Sampled every second across a roll:
+
+```text
+  window=60s  live=24  stale= 0
+  window= 1s  live=19  stale= 5    ← the counter reset
+  window= 4s  live=20  stale= 4
+  window= 7s  live=23  stale= 1
+  window= 8s  live=24  stale= 0
+```
+
+**Five of twenty-four pairs, for eight seconds, once a minute, every one of
+them healthy.**
+
+### The documentation already said what it should mean
+
+> `Stale` says nothing arrived in the counting window; it does not say that is
+> wrong. A quiet instrument at four in the morning is stale and healthy.
+
+The failure is in the word *counting*. Staleness is a question about **time
+since the last message** — a trailing window, which does not reset — and the
+count needs a tumbling one because a count must reset to be a count. Two
+questions, two windows, one of them borrowed for the other.
+
+### After
+
+```text
+  window=60s  live=24  stale= 0
+  window= 1s  live=24  stale= 0
+  window= 7s  live=24  stale= 0
+```
+
+### What this one adds to the pattern
+
+The three before it were claims that had always been wrong. **This one I
+introduced**, in the change immediately before, while fixing a different claim
+on the same surface — and it was visible within a minute of looking, by the
+same method that found the others.
+
+A fix that makes an existing flaw *more visible* is not a regression, but it is
+not finished either. Sharing the window was right; it exposed a second thing
+borrowing that window for a question it could not answer.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

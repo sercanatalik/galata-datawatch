@@ -31,16 +31,21 @@ pub enum Connection {
 
 /// What is true of one pair.
 ///
-/// **States, not verdicts.** `Stale` says nothing arrived in the counting
-/// window; it does not say that is wrong. A quiet instrument at four in the
-/// morning is stale and healthy.
+/// **States, not verdicts.** `Stale` says nothing has arrived for a minute;
+/// it does not say that is wrong. A quiet instrument at four in the morning is
+/// stale and healthy.
+///
+/// **A trailing minute, not the counting window.** The count tumbles — it
+/// resets — and deciding staleness from it made every pair that had not spoken
+/// since the reset read as stale because of the reset. Measured: five of
+/// twenty-four pairs, for eight seconds, once a minute, all of them healthy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum PairState {
-    /// Held, and something arrived in the counting window.
+    /// Held, and something arrived within the last minute.
     Live,
-    /// Held, and nothing arrived in the counting window.
+    /// Held, and nothing has arrived for a minute.
     Stale,
     /// Held, and the venue's calendar says it should not be trading.
     Closed,
