@@ -13,6 +13,7 @@
 /// **Behind the `capture` feature**: it makes requests.
 #[cfg(feature = "capture")]
 pub mod client;
+pub mod erc8056;
 pub mod normalise;
 pub mod trail;
 pub mod wire;

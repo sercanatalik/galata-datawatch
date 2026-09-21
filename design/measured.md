@@ -1452,6 +1452,67 @@ been loaded into one is a decoration** — and a unit test asserting the string
 `deny: [">"]` only checks that the renderer does what the renderer was written
 to do.
 
+## A raw token amount is not a share count — 2026-09-21
+
+ERC-8056 applies a corporate action by updating a **display multiplier** rather
+than minting, burning or migrating tokens:
+
+```
+  underlying shares = raw amount × uiMultiplier ÷ 1e18
+```
+
+Asked of the live chain, contract by contract:
+
+| contract | symbol | `uiMultiplier()` |
+|---|---|---|
+| `0xd0601ce…` | **NVDA** | **1.0007751591646306** |
+| `0x4a0e65a…` | SPCX | 1.000000 |
+| `0x0bd7d30…` | WETH | reverts |
+| `0x3429ddc…` | RSTOCK | reverts |
+
+**NVDA's multiplier is not one.** A corporate action has already been applied,
+so:
+
+```
+  1000 raw tokens  →  1000.775 underlying shares
+  understated by      0.0775%
+```
+
+Every raw amount this system records is correct as *tokens* and wrong as
+*shares*, by a factor that changes and has changed once already. Nothing in the
+record is wrong — raw is what arrived — but a consumer summing those amounts and
+calling them shares is, silently, and more so after each corporate action.
+
+### Two things this measurement corrected
+
+**The contract being captured was WETH.** The rh-chain demonstration earlier in
+this tree captured `0x0bd7d30…` as `TOKEN0BD7`, which turns out to be **WETH**
+and not a stock token at all. The capture was correct; the label was ignorance,
+and asking the contract its own symbol is what settled it.
+
+**The update event could not be named.** Four candidate signatures for
+`UIMultiplierUpdated` were hashed and searched against 50,000 blocks of the NVDA
+contract. **None matched.** So nothing listens for an event it cannot name: the
+multiplier is **polled** and recorded with the moment it was read, which is
+honest about the update itself not having been witnessed.
+
+### `None` is not `1.0`
+
+Most contracts here revert on the call. Recording `1.0` for them would claim
+they implement the standard and are currently unscaled. They do not implement
+it, and *this is not a stock token* is a different fact from *this multiplier is
+one*.
+
+### And a hand-typed constant was wrong, again
+
+The test fixture's hex was converted by hand and decoded to
+`1.000838949559649155` — close enough to look right, wrong by 64 parts per
+million. It is now derived from the measured integer.
+
+**Second time in this tree** a hand-computed expectation disagreed with correct
+code, after the `0x015fb7f9b8c38000` decimal. The rule that follows: a fixture
+whose value was guessed is a fixture that tests the guess.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
