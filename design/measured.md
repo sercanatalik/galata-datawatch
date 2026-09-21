@@ -2863,6 +2863,80 @@ Those alternate while the broker is down, because the client's own buffer
 drains and refills around the queue's limit. Worth knowing before reading a log
 and concluding the broker recovered.
 
+## Replay, run rather than reasoned about — 2026-09-21
+
+The last unaudited surface, and the one whose claim is structural:
+
+> Replay is **refused** durability, because replay reads the record back out
+> and writing it would grow the thing it is reading.
+
+Enforced by a type. `Replayed` is constructed only by `replay` and consumed
+only by `ingest_replayed`; there is no `Origin::Replay` for a caller to set
+wrongly, because the field was removed in favour of the route.
+
+**A structural claim is the one most worth running.** The compiler agreeing
+that a type is private is not the same as the file count not moving.
+
+Over the soak's real archive:
+
+```text
+  3403 segments, 86384 payloads replayed
+  151824 events emitted from the replay
+  segments before 3403, after 3403         the record did not grow
+  after one ordinary append: 3405          the write path works
+```
+
+### The control matters more than the result
+
+*Nothing was written* and *writing is broken* are the same number. So the
+ordinary path runs against the same archive object and must move what the
+replay did not — otherwise the test proves only that something is broken.
+
+### Writing the control found the guard holding
+
+`Archive::append` is **private**, and the example was refused at compile time.
+`check-ingest-callers.sh` exists to say *no caller reaches past the one path to
+the record*, and here the language said it first. A guard that the language
+also enforces is a guard that cannot be evaded by someone who does not know it
+is there.
+
+### And the control exercised the failure path by accident
+
+The control payload was chosen to be unparseable, which produced two segments
+rather than one:
+
+```text
+  kind=trades/date=1970-01-01/t-1_1_10718_1.parquet            the payload
+  kind=trades/date=1970-01-01/failures/t-1_1_10718_2.parquet   the failure
+```
+
+| row | seq | channel | bytes | error |
+|---|---|---|---|---|
+| payload | 0 | control | 2 | — |
+| failure | 0 | control | — | `unrecognised channel "control"` |
+
+**The payload is archived although it would not parse** — filtering the record
+by parse success would discard exactly the evidence a normalisation defect is
+diagnosed from. The failure row **joins it on `seq`**, lives in a `failures/`
+sibling, and carries **no payload column**. Three claims from Tier 1, none of
+them the one being tested, all holding.
+
+### The audit, closed
+
+Fourteen claims examined across the status surface, the store, the broker and
+replay.
+
+| | |
+|---|---|
+| wrong | **4** — all four claiming more than was true |
+| right | **10** — one of them to the microsecond |
+
+Every one of the four was a case where **the code matched its own comment and
+the comment was wrong**, so none was findable by reading. Each took about a
+dozen lines of query against data already on disk — and three of the four were
+found by asking a single question: *does the record agree with what the
+surface says about it?*
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
