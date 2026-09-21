@@ -123,6 +123,11 @@ prove "check-release-hygiene (missing description)" \
 
 # The one path cannot be bypassed. This guard plants for itself, for the reason
 # `own` exists at all.
+prove "check-grant-coverage (a subject root granted to nobody)" \
+    "$ROOT/scripts/check-grant-coverage.sh" \
+    "$ROOT/crates/galata-broker/src/grants.rs" \
+    own
+
 prove "check-no-transport (the pure half reaches for the runtime)" \
     "$ROOT/scripts/check-no-transport.sh" \
     "$ROOT/crates/galata-datawatch/src/calendar.rs" \

@@ -1411,6 +1411,47 @@ Worth recording because the failure mode is social rather than technical: a slow
 test is one people run less often, and a test nobody runs is a guard that has
 quietly stopped guarding. The same reason `check-all` exists at all.
 
+## `allow: []` means allow everything — reproduced — 2026-09-21
+
+The predecessor shipped an inverted permission table and recorded what failed to
+catch it: review, unit tests, and `nats-server -t`. **All three were checked
+again here, and all three still miss it.**
+
+Same probe, two tables, a real `nats-server`:
+
+| table | `nats-server -t` | what capture did | server log |
+|---|---|---|---|
+| `subscribe: { allow: [] }` | **valid, exit 0** | **received `markets.hyperliquid.BTC.quotes`** | nothing |
+| `subscribe: { deny: [">"] }` | valid, exit 0 | heard nothing | `Subscription Violation` |
+
+```
+  VERDICT: FAILED — capture received markets.hyperliquid.BTC.quotes,
+                    which it is denied
+```
+
+`allow: []` reads as *allow nothing* and means **allow everything** — an absent
+restriction rather than a total one, which is the exact inverse of what a
+component granted no rights should have. So *nothing* is spelled `deny: [">"]`.
+
+### The probe had to publish, or it proved nothing
+
+The first version of this test asserted only *capture heard nothing in three
+seconds*. Under the **inverted** table that also passed — because nothing had
+been published. A false negative that would have certified the broken table.
+
+The probe now publishes a real message first, on a subject capture is granted
+under **both** tables, so the two halves differ only in the thing being tested.
+*I did not see any data* is not evidence of a denial; the server's own refusal
+is.
+
+### What the guard cannot do
+
+`nats-server -t` calling the inverted table valid is the whole reason this
+verification loads a running server. **A generated permission set that has never
+been loaded into one is a decoration** — and a unit test asserting the string
+`deny: [">"]` only checks that the renderer does what the renderer was written
+to do.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a
