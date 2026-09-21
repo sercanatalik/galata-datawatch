@@ -10,9 +10,12 @@
 #[cfg(feature = "hyperliquid")]
 pub mod hyperliquid;
 
+#[cfg(feature = "capture")]
 use galata_wire::Series;
 
+#[cfg(feature = "capture")]
 use crate::capture::Fetch;
+#[cfg(feature = "capture")]
 use crate::record::Payload;
 use crate::venue::{Adapter, ConstructError};
 
@@ -71,6 +74,10 @@ pub enum AdapterConfig {
 /// Answered from the adapter's own declaration rather than from a second list
 /// here: a second implementation of what a venue serves does not fail, it
 /// disagrees.
+// A build with no adapter feature has no arms here, so the parameters are
+// genuinely unused. That build is legitimate — it is what a tape reader takes —
+// and the alternative to naming it is a lint nobody can satisfy.
+#[cfg_attr(not(feature = "hyperliquid"), allow(unused_variables))]
 pub fn supplies(venue: &str, series: galata_wire::Series) -> bool {
     match venue {
         #[cfg(feature = "hyperliquid")]
@@ -103,6 +110,7 @@ impl AdapterConfig {
     ///
     /// **The only place a venue's name becomes a variant**, which is what keeps
     /// the boundary checkable.
+    #[cfg_attr(not(feature = "hyperliquid"), allow(unused_variables))]
     pub fn from_declared(
         name: &str,
         venue: &crate::config::VenueConfig,
@@ -140,6 +148,7 @@ impl AdapterConfig {
 /// **Measured 2026-09-20:** an unlisted coin is answered by a hang-up rather
 /// than a refusal, and it takes every other subscription on the socket with
 /// it. One request per dex removes the whole failure mode.
+#[cfg(feature = "capture")]
 pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> {
     match config {
         #[cfg(feature = "hyperliquid")]
@@ -173,6 +182,7 @@ pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> 
 
 /// Build the adapter a configuration names.
 pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
+    #[cfg(feature = "hyperliquid")]
     use crate::venue::Construct;
     match config {
         #[cfg(feature = "hyperliquid")]
@@ -184,12 +194,16 @@ pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
 
 /// The historical endpoint for a venue.
 ///
+/// **Behind the `capture` feature**: it makes requests, and a thing that makes
+/// requests is transport whatever else it is near.
+///
 /// Here rather than on the [`Adapter`] trait for the reason that trait states
 /// about itself: its methods are facts about a venue, and a fact that needs a
 /// runtime to state cannot be asserted in a test. This one needs a network.
 ///
 /// It is also the second and last place permitted to name a venue, which is
 /// what keeps [`crate::capture::Capture::walk`] — and the binary — free of one.
+#[cfg(feature = "capture")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum History {
@@ -198,6 +212,7 @@ pub enum History {
     Hyperliquid(hyperliquid::client::Client),
 }
 
+#[cfg(feature = "capture")]
 impl History {
     /// The fetcher a configuration names.
     pub fn for_config(config: &AdapterConfig) -> Result<History, ResolveError> {

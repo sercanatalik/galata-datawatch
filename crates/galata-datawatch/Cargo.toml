@@ -27,25 +27,51 @@ galata-broker = { version = "0.1.0", path = "../galata-broker", optional = true 
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
-tokio-util = { workspace = true }
-futures-util = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-rand = { workspace = true }
-rustls = { workspace = true }
-reqwest = { workspace = true }
+# THE TRANSPORT, and every one of these is optional.
+#
+# A consumer that reads the tape links this crate, and before the `capture`
+# feature existed it compiled 541 crates to do it — a runtime, a websocket
+# stack, an HTTP client and a TLS provider, to read parquet. That is the same
+# wall `galata-wire` and `galata-broker` already have, one level in.
+#
+# `scripts/check-workspace-deps.sh` fails the build if any of these reaches a
+# tree built with `--no-default-features`.
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 [features]
-default = ["hyperliquid", "bin"]
+default = ["capture", "hyperliquid", "bin"]
+# **The transport.** Everything that needs a runtime: the loop, the clock, the
+# websocket source and every adapter's HTTP client.
+#
+# The record, the tape, replay, the calendar, configuration, the venue seam and
+# every adapter's `wire` and `normalise` are OUTSIDE it — all of them pure
+# functions of bytes or a file on disk. That the seam is outside is not an
+# accident; its own documentation has said so since Tier 1: *a fact that needs a
+# runtime to state is a fact that cannot be asserted in a test.*
+capture = [
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:tokio-util",
+    "dep:futures-util",
+    "dep:rand",
+    "dep:rustls",
+    "dep:reqwest",
+]
 # The seam itself is unconditional; an adapter is a feature.
 hyperliquid = []
 # The binary, and the log formatter only it needs. A library consumer taking
 # `default-features = false` gets the capture machinery without a subscriber
 # they will replace anyway.
-bin = ["dep:tracing-subscriber", "dep:galata-broker"]
+bin = ["capture", "dep:tracing-subscriber", "dep:galata-broker"]
 
 [[bin]]
 name = "galata-datawatch"
@@ -66,3 +92,13 @@ required-features = ["bin"]
 [dev-dependencies]
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
 tempfile = "3"
+
+# The examples that need a runtime say so, rather than failing a build that
+# turned the transport off.
+[[example]]
+name = "probe"
+required-features = ["capture"]
+
+[[example]]
+name = "tape-demo"
+required-features = []

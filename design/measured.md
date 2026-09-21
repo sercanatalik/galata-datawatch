@@ -724,6 +724,58 @@ taking two `Option<String>`, with the environment read as one line above it.
 The part with the judgement in it is now the part that is tested, which is the
 right way round and would not have been arrived at without the constraint.
 
+## The third wall — 541 crates to 279, 2026-09-21
+
+A consumer that wants only the tape's schemas — the tower's server is the first,
+and it never captures — compiled **541 crates**. It got a runtime, a websocket
+stack, an HTTP client and a TLS provider, to read parquet.
+
+```
+  galata-datawatch --no-default-features    541  →  279 crates
+  transport crates in that tree                     0
+  tests still passing with no runtime at all      123
+```
+
+This is the same wall the workspace already had twice, one level in:
+
+```
+  galata-wire    may not link a columnar format   (everything names events)
+  galata-broker  may not link a store             (everything reads the stream)
+  galata-datawatch, capture off: no transport     (everything reads the tape)
+```
+
+The line is **does this need a runtime**. The record, the tape, replay, the
+calendar, configuration, the venue seam and every adapter's `wire` and
+`normalise` are outside it. That the *seam* is outside is not a new decision —
+its documentation has said so since Tier 1: *a fact that needs a runtime to
+state is a fact that cannot be asserted in a test.* The feature is that sentence
+enforced by the build.
+
+`check-no-transport.sh` asks **cargo**, not the manifest, because a feature
+nobody verifies stops gating anything the first time a module forgets its `cfg`.
+
+### A guard fragility this exposed, and it is worth writing down
+
+Four guards read each file only as far as its first `#[cfg(test)]`, matching
+that **literal string**. Gating a test module on a feature as well —
+
+```rust
+#[cfg(all(test, feature = "hyperliquid"))]
+mod tests {
+```
+
+— is legitimate, and it made the literal disappear. Three guards silently began
+scanning test code and went red on fixtures that were never violations.
+
+They failed *loudly*, which is the good case. The bad case is the mirror image:
+a guard whose marker moves and which then scans **less** than it should, passing
+while checking nothing. All four now match any `#[cfg(...)]` whose predicate
+mentions `test`.
+
+The lesson is narrow and real: **a guard that keys on an exact string is a guard
+with a silent failure mode**, and the thing that caught this was
+`test-guards.sh` refusing to plant into a tree that was already red.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

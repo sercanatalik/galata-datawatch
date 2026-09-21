@@ -41,8 +41,13 @@ if [[ "$VERB" == "plant" ]]; then
     exit 0
 fi
 
+# Any `#[cfg(...)]` whose predicate mentions `test`, not the literal
+# `#[cfg(test)]`. A test module gated on a feature as well —
+# `#[cfg(all(test, feature = "hyperliquid"))]` — is still a test module, and a
+# guard keying on the exact string silently began scanning test code the first
+# time somebody wrote a legitimate one. That happened.
 non_test_lines() {
-    awk '/#\[cfg\(test\)\]/{exit} {print FILENAME ":" FNR ": " $0}' "$1"
+    awk '/^[[:space:]]*#\[cfg\(.*test.*\)\]/{exit} {print FILENAME ":" FNR ": " $0}' "$1"
 }
 
 pattern=$(IFS='|'; echo "${VENUES[*]}")

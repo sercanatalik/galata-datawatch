@@ -23,6 +23,8 @@
 
 pub mod adapters;
 pub mod calendar;
+/// **Behind the `capture` feature**: it needs a runtime.
+#[cfg(feature = "capture")]
 pub mod capture;
 pub mod config;
 pub mod ingest;
@@ -31,6 +33,8 @@ pub mod record;
 pub mod replay;
 pub mod retain;
 pub mod sink;
+/// **Behind the `capture` feature**: it needs a runtime.
+#[cfg(feature = "capture")]
 pub mod source;
 pub mod tape;
 pub mod venue;

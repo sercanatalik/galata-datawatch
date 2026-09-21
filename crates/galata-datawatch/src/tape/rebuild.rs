@@ -129,7 +129,11 @@ pub fn rebuild(
     Ok(report)
 }
 
-#[cfg(test)]
+// The tests normalise real frames, so they need an adapter to normalise them
+// with. That is the `hyperliquid` feature rather than `capture` — the
+// normaliser is pure and needs no runtime, which is the whole point of the
+// split.
+#[cfg(all(test, feature = "hyperliquid"))]
 mod tests {
     use super::*;
     use crate::adapters::hyperliquid::{Config as HlConfig, Hyperliquid, Instrument, Market};

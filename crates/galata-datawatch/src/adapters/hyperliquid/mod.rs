@@ -15,6 +15,10 @@
 //! call. A [`Ticker`](galata_wire::Ticker) may not hold a `:`, so the ticker is
 //! the bare coin and the prefix is composed at the seam.
 
+/// **Behind the `capture` feature**: it makes HTTP requests. It sits beside
+/// `normalise` because they are about the same venue, and it links separately
+/// because a thing that makes requests is transport whatever it is near.
+#[cfg(feature = "capture")]
 pub mod client;
 pub mod normalise;
 pub mod wire;

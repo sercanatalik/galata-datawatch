@@ -100,6 +100,9 @@ impl Sink for CollectingSink {
 
 /// The bridge from a **synchronous** sink to an **asynchronous** broker.
 ///
+/// **Behind the `capture` feature**, because the channel it hands over is
+/// tokio's. A consumer that only reads the tape has nothing to publish.
+///
 /// ```text
 ///   ingest ──▶ NatsSink::emit ──try_send──▶ [bounded] ──▶ task ──▶ NATS
 ///              synchronous,                  capacity N   async
@@ -115,12 +118,14 @@ impl Sink for CollectingSink {
 ///
 /// **Drops are counted, never silent.** A publish that quietly did nothing is
 /// indistinguishable from one that worked.
+#[cfg(feature = "capture")]
 #[derive(Debug)]
 pub struct NatsSink {
     tx: tokio::sync::mpsc::Sender<Envelope>,
     dropped: std::sync::atomic::AtomicU64,
 }
 
+#[cfg(feature = "capture")]
 impl NatsSink {
     /// Wrap a sender, and say how many events may be outstanding.
     ///
@@ -140,6 +145,7 @@ impl NatsSink {
     }
 }
 
+#[cfg(feature = "capture")]
 impl Sink for NatsSink {
     fn dropped(&self) -> u64 {
         NatsSink::dropped(self)
@@ -217,7 +223,7 @@ pub(crate) mod testing {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "capture"))]
 mod sink_tests {
     use super::*;
 
