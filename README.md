@@ -1,5 +1,7 @@
 # galata-datawatch
 
+[![check](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml/badge.svg)](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml)
+
 Market data capture and parquet archival, in Rust.
 
 One process per venue. Bytes are made durable **before** anything tries to
@@ -98,6 +100,11 @@ cargo test                 # no network is touched
 scripts/check-all.sh       # format, lints, guards, the guard harness, tests
 scripts/test-guards.sh     # proves every guard can fail
 ```
+
+**CI runs `check-all.sh` and nothing else**, so the badge above and the command
+above cannot disagree. Everything after the dependency fetch runs `--offline`:
+the workspace is provable without a network, and an accidental network
+dependency should fail rather than succeed quietly.
 
 ## Licence
 
