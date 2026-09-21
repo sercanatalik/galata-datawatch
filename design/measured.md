@@ -2271,6 +2271,70 @@ So the real archive validates the fix without exercising the defect. **A clean
 run over real data is not evidence that a bug is absent**, only that this run
 did not meet it, and the unit tests are what hold that one.
 
+## Four binaries reported compliance for a store they never read — 2026-09-21
+
+Continuing the legacy review. Legacy's `retain` carries a type this tree does
+not:
+
+> One root that could not be scanned. **A missing store is a refusal naming the
+> path, never an empty sweep that looks like compliance.**
+
+Absent here, in four binaries. Every listing in `galata-segments` answers an
+unreadable directory with an empty result — right for a *subtree*, since a
+partition that vanished mid-walk is no reason to abandon the others, and wrong
+for a **declared root**: no partitions means no candidates, which each binary
+reports as *nothing to do* and exits 3.
+
+A mistyped path, an unmounted volume or a permissions change is then
+indistinguishable from a tidy store. A retention job on a cron would report
+success for ever while expiring nothing.
+
+### And compaction made the typo real
+
+Pointing all four at a nonexistent path, before the fix:
+
+```
+  galata-retain        exit 1
+  galata-compact       exit 3      ← "nothing to compact"
+  galata-watch         exit 1
+  galata-tape-rebuild  exit 3      ← "nothing to rebuild"
+```
+
+The last two were caused by the second. **`hold` creates the directory it
+locks**, so `galata-compact` created the mistyped path — after which it is a
+real, empty, perfectly scannable store, and `watch` and `tape-rebuild`
+*honestly* agreed there was nothing to do.
+
+So the check has to come before anything that could create a store, which is a
+stronger statement than *check first*.
+
+After:
+
+```
+  all four               exit 1
+  cannot scan …/typo-archive: No such file or directory (os error 2).
+  A store that cannot be read is not a store with nothing in it
+  the path was not created
+```
+
+### The tree already knew
+
+Three guard scripts have said it about themselves since Tier 0, verbatim:
+
+> A guard handed a root it cannot scan reports success forever.
+> … refusing to scan nothing and call it ok
+
+It was applied to the scripts that check the code and not to the binaries that
+act on the record. `check-scannable-roots.sh` now holds it for the binaries,
+and `galata-datawatch` is exempt because capture **writes** its store and
+creates it on first run.
+
+### A store that does not exist yet is refused too
+
+A fresh install is a one-time failure that says exactly what to do. A typo is
+silent for months. **Nothing can tell them apart from the outside**, so the
+noisy reading is the right one.
+
 ## Answered by reading, not by running
 
 Recorded because a design question resolved from documentation is still not a

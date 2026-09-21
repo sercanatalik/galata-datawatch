@@ -84,6 +84,18 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let today =
         galata_datawatch::calendar::date_of(galata_datawatch::capture::SystemClock.now_micros());
 
+    // **A root that cannot be read is a refusal, and this must come before
+    // `hold`.**
+    //
+    // Every listing answers an unreadable directory with nothing, which is
+    // right for a subtree and wrong for a declared root: no partitions means
+    // nothing overdue, reported as "nothing to do" with exit 3.
+    //
+    // Worse here than elsewhere: `hold` creates the directory it locks, so a
+    // mistyped path was CREATED — after which it is a real, empty, perfectly
+    // scannable store, and every later run agrees there is nothing to do.
+    galata_segments::scannable(&config.paths.archive)?;
+
     if report_only {
         let overdue = overdue_closed(&config.paths.archive, &today, OVERDUE_ABOVE);
         if overdue.is_empty() {

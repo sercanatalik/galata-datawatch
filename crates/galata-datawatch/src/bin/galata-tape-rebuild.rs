@@ -126,6 +126,12 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     )?)?;
     let scope = format!("venue={venue_name}");
 
+    // **A root that cannot be read is a refusal, not an empty result.** No
+    // partitions means nothing to rebuild, which is indistinguishable from a
+    // tidy store — so a mistyped path would look healthy for as long as
+    // nobody checked.
+    galata_segments::scannable(&config.paths.archive)?;
+
     let report = tape::rebuild_with(
         &config.paths.archive,
         &config.paths.tape,

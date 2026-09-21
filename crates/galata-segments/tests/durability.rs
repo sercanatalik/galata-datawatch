@@ -594,3 +594,26 @@ fn a_narrow_segment_before_its_container_is_still_found() {
         "a resumed compaction must not double the partition"
     );
 }
+
+/// **A store that cannot be read is not a store with nothing in it.**
+///
+/// Every listing here answers an unreadable directory with an empty result,
+/// which is right for a subtree and wrong for a declared root: the binaries
+/// report no candidates as "nothing to do" and exit 3, so a mistyped path
+/// looks exactly like a tidy store.
+#[test]
+fn a_root_that_cannot_be_read_is_refused_by_name() {
+    let missing = std::path::Path::new("/nonexistent-store-a8f3/archive");
+    // The listing still answers empty — that behaviour is deliberate.
+    assert!(list_segments(missing).is_empty());
+    // And `scannable` is what turns it into a refusal.
+    let error = galata_segments::scannable(missing).unwrap_err();
+    let said = error.to_string();
+    assert!(said.contains("nonexistent-store-a8f3"), "{said}");
+    assert!(said.contains("cannot scan"), "{said}");
+
+    // An existing, empty store is genuinely empty and passes.
+    let real = tempfile::tempdir().unwrap();
+    assert!(galata_segments::scannable(real.path()).is_ok());
+    assert!(list_segments(real.path()).is_empty());
+}

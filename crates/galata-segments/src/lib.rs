@@ -28,7 +28,7 @@ pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;
 pub use listing::{
     frontier, last_durable, last_durable_for_scope, list_segments, mixed_cursors,
-    overlapping_ranges, partitions,
+    overlapping_ranges, partitions, scannable,
 };
 pub use reader::{read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{

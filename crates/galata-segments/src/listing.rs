@@ -9,6 +9,33 @@
 use std::path::{Path, PathBuf};
 
 use crate::cursor::{Cursor, Variant};
+use crate::error::SegmentError;
+
+/// **Refuse a root that cannot be read**, rather than sweeping nothing.
+///
+/// Every listing in this module answers an unreadable directory with an empty
+/// vector, which is right for a *subtree* — a partition that vanished mid-walk
+/// is not a reason to abandon the others. It is wrong for a **declared root**:
+/// no partitions means no candidates, which the binaries report as *nothing to
+/// do* and exit 3. A mistyped path, an unmounted volume or a permissions
+/// change then looks exactly like a tidy store, for as long as nobody checks.
+///
+/// The guards in `scripts/` have said this about themselves since Tier 0 — *a
+/// guard handed a root it cannot scan reports success forever* — and the
+/// binaries that act on the record did not.
+///
+/// A store that does not exist **yet** is refused too. A fresh install is a
+/// one-time failure that says what to do; a typo is silent for months, and
+/// nothing can tell them apart from the outside.
+pub fn scannable(root: &Path) -> Result<(), SegmentError> {
+    match std::fs::read_dir(root) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(SegmentError::Unscannable {
+            path: root.to_path_buf(),
+            reason: error.to_string(),
+        }),
+    }
+}
 
 /// Every committed segment under a directory, oldest first.
 ///
@@ -18,6 +45,9 @@ use crate::cursor::{Cursor, Variant};
 /// Ordering is **within a variant**. A partition is written by exactly one
 /// source, so a partition holding two variants is a defect — reported by
 /// [`mixed_cursors`], not silently ordered here.
+///
+/// **An unreadable directory is an empty listing here**, which is right for a
+/// subtree and wrong for a declared root — see [`scannable`].
 pub fn list_segments(dir: &Path) -> Vec<(Cursor, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

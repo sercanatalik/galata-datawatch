@@ -162,6 +162,12 @@ prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
 
+# A binary that sweeps a declared store must check it can be read. Plants for
+# itself: it must REPLACE the call, which an append cannot do.
+prove "check-scannable-roots (a binary that sweeps without checking)" \
+      ./scripts/check-scannable-roots.sh \
+      crates/galata-datawatch/src/bin/galata-watch.rs own
+
 # Money never becomes a float. Three rules, three plants.
 
 # 1. A float field in the vocabulary. Plants for itself, before the tests.

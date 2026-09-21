@@ -83,6 +83,13 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let now = galata_datawatch::capture::SystemClock.now_micros();
     let today = galata_datawatch::calendar::date_of(now);
 
+    // **A root that cannot be read is a refusal, not an empty result.** No
+    // partitions means nothing to report, which is indistinguishable from a
+    // tidy store — so a mistyped path would look healthy for as long as
+    // nobody checked.
+    galata_segments::scannable(&config.paths.archive)?;
+    galata_segments::scannable(&config.paths.tape)?;
+
     let report = watch::watch(
         &config.paths.archive,
         &config.paths.tape,

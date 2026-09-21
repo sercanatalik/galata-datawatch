@@ -86,6 +86,15 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     }
 
     let now = galata_datawatch::capture::SystemClock.now_micros();
+    // **A root that cannot be read is a refusal, not an empty sweep.**
+    //
+    // Every listing answers an unreadable directory with nothing, which is
+    // right for a subtree and wrong for a declared root: no partitions means
+    // no candidates, which this reports as "nothing to do" and exits 3. A
+    // mistyped path then looks exactly like a tidy store.
+    galata_segments::scannable(&config.paths.archive)?;
+    galata_segments::scannable(&config.paths.tape)?;
+
     let swept = retain::sweep(&config.paths.archive, &config.paths.tape, &policy, now);
 
     for path in &swept.unclassified {

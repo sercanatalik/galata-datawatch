@@ -6,6 +6,22 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SegmentError {
+    /// A store that was to be scanned could not be read.
+    ///
+    /// **Never an empty listing.** A root that cannot be read produces no
+    /// partitions, and a sweep over no partitions selects nothing — which
+    /// reads as *nothing to do* and is indistinguishable from compliance. A
+    /// mistyped path then looks healthy for as long as nobody checks.
+    #[error(
+        "cannot scan {path}: {reason}. A store that cannot be read is not a store with \
+             nothing in it"
+    )]
+    Unscannable {
+        /// The root.
+        path: PathBuf,
+        /// Why.
+        reason: String,
+    },
     /// The partition directory could not be created.
     #[error("could not create {path}: {source}")]
     CreateDir {
