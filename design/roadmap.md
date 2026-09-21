@@ -242,9 +242,10 @@ different shape from the one planned here.
   second process holding `status.>` against a real server. The file is still
   written **first**, because the surface that reports a broker outage must not
   be a publish.
-- **Grants.** The server's user table is what makes *"this component reads only
-  market data"* a rule the server enforces rather than one somebody reviews.
-  The types here make the intent legible; nothing generates the table.
+- ~~**Grants.**~~ **Done**, and the predecessor's inverted-table bug was
+  reproduced rather than taken on trust: `allow: []` means *allow everything*,
+  and review, unit tests and `nats-server -t` all still miss it.
+  `check-grant-coverage.sh` refuses a root granted to nobody.
 
 > **Exit, met:** a second process subscribed `markets.hyperliquid.BTC.quotes`,
 > received live envelopes carrying their archive sequence, and links no parquet.
