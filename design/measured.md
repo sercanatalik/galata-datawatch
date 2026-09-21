@@ -724,6 +724,82 @@ taking two `Option<String>`, with the environment read as one line above it.
 The part with the judgement in it is now the part that is tested, which is the
 right way round and would not have been arrived at without the constraint.
 
+## Capture, configured from a vault — against a real server, 2026-09-21
+
+`gv-server local` on loopback, a project, an `acme/prod` environment and the
+shipped configuration stored as document `datawatch` v1. Run rather than
+reasoned about, because the three refusals were written from an SDK's error
+kinds and two of them turned out to describe something else.
+
+**It works end to end.** `galata-datawatch-vault hyperliquid`, with a `config`
+token and no file anywhere, fetched the document, validated it through
+`Config::load`, booted capture and walked candles off the live venue:
+
+```
+  INFO boot: no broker is configured; events are recorded and not published
+  INFO capture::run: walk of candles at 1m: asked 7d, the venue holds 3d 11h 20m,
+       covered 3d 11h 20m in 1 requests venue="hyperliquid"
+```
+
+### What the document costs at boot
+
+Time from exec to the venue refusal — naming a venue the configuration does not
+declare, so the process stops immediately after `Config::load` and the figure is
+the load and nothing after it. Ten runs each.
+
+```
+  from a document (loopback vault)   median 37.0 ms   min 35.0   max 50.0
+  from a file on disk                median 28.7 ms   min 26.6   max 32.3
+  ──────────────────────────────────────────────────────────────────────
+  the document costs                          8.3 ms
+```
+
+8.3 ms, once, at boot, for a process that then runs for days. Nothing was
+published to compare against — the search for a loopback-versus-file figure
+returned none — so this is taken rather than carried. The file binary's FIRST
+run took **44 seconds**, which is not a config cost: it is the macOS first-exec
+signature validation and cold page-in that galata-vault's own conformance script
+was mis-diagnosing as a dead server. Dropped from the median, and recorded
+because it would otherwise look like the file path was catastrophic.
+
+### Two refusals described something that does not happen
+
+- **`read` reads configuration documents.** The refusal said *a token whose
+  scope includes `config`*. It is wrong: a `read` token serves the document
+  perfectly well, and only `meta` is refused — *"this credential cannot read
+  configs"*. The message named a scope because the scope seemed obvious from
+  the name, and naming it restated a rule belonging to the vault. This is the
+  same mistake `check-secret-reach.sh` refuses for `GV_TOKEN`, arriving a second
+  time by a route the guard cannot see: **a copy of somebody else's rule
+  disagrees rather than fails.** The scope is gone from the message; the vault's
+  own sentence is the authority.
+
+- **The ordinary unreachable case never reaches our `Unreachable`.**
+  `Vault::from_env` opens the vault, so a stopped server is refused by the SDK
+  before `VaultConfig::fetch` is called — in **0.04 s**, not at the 120 s
+  timeout. Our variant now covers only a vault that disappears between opening
+  and reading, and says so.
+
+  The SDK's message carries the URL: `could not reach http://127.0.0.1:8751`.
+  `check-endpoint-reach.sh` governs this tree's own messages and cannot reach a
+  dependency's, which is worth knowing rather than worth fixing here.
+
+### The refusals that do hold
+
+```
+  a meta token          the vault refused to serve datawatch: ... cannot read configs
+  both variables set    GALATA_CONFIG names ... and GALATA_CONFIG_DOCUMENT names ...
+                        unset one
+  no document named     GALATA_CONFIG_DOCUMENT is not set, and it names the
+                        document to capture from
+```
+
+The middle one is the same sentence the file binary gives, from the same
+function, which is what moving `document_from_env` beside `FileSource::from_env`
+bought.
+
+---
+
 ## The fourth wall, and a carried figure that does not survive it — 2026-09-21
 
 The vault's cost, taken here rather than believed from the predecessor.

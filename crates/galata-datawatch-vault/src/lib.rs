@@ -27,7 +27,7 @@
 //! exists, is convenient, and would be a mistake: it reaches a typed value
 //! without passing `Config::validate`, where the bounds, the unknown-key
 //! refusal and the unknown-venue refusal live. This takes `text()` instead, and
-//! `a_document_with_an_unknown_key_is_refused_by_name` is what fails if anybody
+//! `an_unknown_key_in_a_document_is_refused_by_name` is what fails if anybody
 //! changes that.
 
 use galata_datawatch::config::{ConfigError, ConfigSource, Origin};
@@ -70,11 +70,16 @@ pub enum VaultConfigError {
 
     /// The vault answered and declined.
     ///
-    /// **The token's value appears nowhere in this**, only what it needed to be.
-    #[error(
-        "the vault refused to serve {document}: {detail}. Reading a configuration document needs \
-         a token whose scope includes `config`"
-    )]
+    /// **The token's value appears nowhere in this**, and neither does a scope.
+    /// An earlier version of this message said *a token whose scope includes
+    /// `config`*, and a soak against a real vault showed it was wrong: a
+    /// `read` token serves configuration documents perfectly well, and only
+    /// `meta` is refused. Which credentials may read a config is the vault's
+    /// rule, stated in its own message — restating it here is the same mistake
+    /// `check-secret-reach.sh` refuses for the vault's authentication
+    /// variables, and it disagreed rather than failed. (That guard refused
+    /// this very comment for naming one of them, which is the rule working.)
+    #[error("the vault refused to serve {document}: {detail}")]
     Refused {
         /// The document it wanted.
         document: String,
@@ -105,7 +110,11 @@ impl VaultConfig {
         let fetched = vault.config(document).map_err(|error| {
             let detail = error.message().to_owned();
             match error.kind() {
-                // Nothing answered.
+                // Nothing answered *mid-fetch*. The ordinary unreachable case
+                // never arrives here: `Vault::from_env` opens the vault, so a
+                // refused connection is reported by the SDK before this is
+                // called — measured at 40ms against a stopped server. This
+                // covers a vault that goes away between opening and reading.
                 ErrorKind::Transport => VaultConfigError::Unreachable {
                     document: document.to_owned(),
                     timeout_secs: FETCH_TIMEOUT_SECS,
