@@ -2247,13 +2247,53 @@ measurement, and the distinction matters when the answer turns out to be wrong.
 | question | answer | source |
 |---|---|---|
 | does `bbo` carry sizes? | **yes** — it is functionally `l2Book` with `nLevels: 1, strict: true` | the venue's own subscription documentation |
-| how often does `bbo` fire? | **only when the top of book changes on a block** — bounded by block cadence and by change, not by every quote update | the same |
-| does `activeAssetCtx` cover the HIP-3 `xyz` dex? | **unresolved.** HIP-3 assets are addressed `<dex>:<coin>` in subscriptions generally, and this one is not separately documented | — |
+| how often does `bbo` fire? | ~~bounded by block cadence and by change~~ — **24 msg/s over three coins, 4.0× the bytes of `l2Book`** | *superseded by measurement, 2026-09-21* |
+| does `activeAssetCtx` cover the HIP-3 `xyz` dex? | ~~unresolved~~ **yes** — all three `xyz` instruments carry funding and marks | *answered by a soak, 2026-09-21* |
 
-The last is the one that costs something if wrong: if `activeAssetCtx` is
-main-dex only, WTIOIL, XYZ100 and GOLD carry no funding and no mark, and the
-declaration must say so rather than the walk discovering it. **The first live
-subscription answers it**, which is the soak's first job.
+**Both of the deferred ones are now measured, and one of them was wrong.**
+
+*How often `bbo` fires* was read from documentation as **bounded**, which reads
+as an argument that it is cheap. Measured, it is 4.0× the bytes of the
+`l2Book` it replaced. The reading was not false — it does fire only on change
+— but the inference drawn from it was, and that is the failure mode this
+section exists to catch.
+
+*Whether `activeAssetCtx` covers the HIP-3 dex* is the one that would have
+cost something: if it were main-dex only, CL, XYZ100 and GOLD would carry no
+funding and no mark, and the declaration would have to say so rather than the
+walk discovering it. A 24-minute soak settles it from the record rather than
+from a probe:
+
+```
+  ticker    funding rows   distinct rates
+  ──────────────────────────────────────
+  BTC             1,591              332
+  ETH             1,591              348
+  HYPE            1,591               39
+  CL              1,591              426   ← xyz
+  XYZ100          1,591              292   ← xyz
+  GOLD            1,591               91   ← xyz
+```
+
+Identical row counts and genuinely varying rates on all six. Not zeros, not
+repeats — the HIP-3 instruments are served exactly as the main-dex ones are.
+
+## The soak itself, 24 minutes and 24 subscriptions — 2026-09-21
+
+Reported because *nothing went wrong* is a measurement too, and this tree has
+recorded plenty of the other kind.
+
+```
+  24/24 subscriptions live      0 refused
+  2,853 segments, 19 MB          0 warnings
+  74,418 payloads → 135,535 rows 0 unparsed
+  0 gaps                         0 dropped to the sink
+  galata-watch: nothing to report (8 partitions)
+```
+
+The same soak livelocked the *chain* cursor within twenty-five minutes, which
+is recorded above. **One venue clean and the other stuck, in one run**, is the
+argument for soaking both at once rather than each alone.
 
 ## Was open, waiting on a soak — all three now measured
 
