@@ -127,17 +127,28 @@ correctly so — it cannot resolve a dependency that is not on the registry:
   Caused by: no matching package named `galata-wire` found
 ```
 
-So the first two are the only ones that can be fully verified before any
-publish happens, and they are:
+All four are verified before any publish happens, and by the gate rather than
+by remembering:
 
 ```sh
-cargo package -p galata-wire      # packages and builds from the tarball
-cargo package -p galata-segments
+cargo package --workspace     # every crate, built from its own tarball
 ```
 
-`scripts/check-package.sh` checks all four anyway, using `cargo package
---list`, which does not resolve dependencies — so what each crate *would* ship
-is held even for the two that cannot yet be built from a tarball.
+`cargo package --workspace` builds a temporary registry under `target/package`,
+publishes each crate into it, and compiles every unpacked tarball against the
+*packaged* versions of the rest — not against the path dependencies this
+workspace supplies. That distinction is the point: inside a workspace cargo
+prefers the path dependency, so a crate can compile perfectly here while using
+a sibling change its own manifest does not require.
+
+Two guards, two questions. `scripts/check-package.sh` asks what a tarball would
+*contain*, using `cargo package --list`, which resolves nothing — so it still
+answers for a crate that will not build. `scripts/check-tarball-builds.sh` asks
+whether it *compiles*, which is the half that could not be checked at all
+before `--workspace` existed. About 19s warm, 95s on a cold tree, measured.
+
+Verification builds default features; combinations are
+`scripts/check-feature-matrix.sh`'s.
 
 Allow a moment between publishes: the registry index needs to carry a crate
 before the next one can resolve it.

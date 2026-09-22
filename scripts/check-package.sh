@@ -23,9 +23,13 @@
 #      whitelist's intent.
 #
 # `cargo package --list` is used rather than `cargo package`, because it does
-# not resolve dependencies — so all four crates are checkable even though two
-# of them cannot be packaged until the other two are on crates.io. See the
-# publish order in README.md.
+# not resolve dependencies — so a crate that will not BUILD is still checkable
+# for what it would SHIP, and the two questions stay separable.
+#
+# Whether it builds is `check-tarball-builds.sh`'s, which compiles every crate
+# from its tarball against its siblings' tarballs. Until `cargo package
+# --workspace` existed, two of this workspace's four crates could not be
+# verified that way before publishing at all, and this header said so.
 #
 # Usage: check-package.sh [check|plant] [root]
 

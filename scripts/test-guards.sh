@@ -176,6 +176,15 @@ prove "check-package (a crate that would ship without its licence)" \
       ./scripts/check-package.sh \
       crates/galata-wire/Cargo.toml own
 
+# Every publishable crate builds from what it would ship. Plants for itself:
+# it narrows `include` to one source file, which still COMPILES in the
+# workspace — every file is on disk — and cannot compile from the tarball,
+# where six of seven modules are absent. check-package.sh cannot see that: the
+# licence, the README and some source all still ship.
+prove "check-tarball-builds (a crate whose tarball is missing its modules)" \
+      ./scripts/check-tarball-builds.sh \
+      crates/galata-broker/Cargo.toml own
+
 # The documentation builds clean. Plants for itself: it must insert before the
 # tests, and an appended broken link would land in a region cargo doc still
 # reads — but the plant belongs beside the rule either way.
