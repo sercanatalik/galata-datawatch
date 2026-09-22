@@ -48,3 +48,66 @@ jobs:
 
       - name: check-all
         run: ./scripts/check-all.sh
+
+  # **Reverse-dependency CI: does the consumer still compile?**
+  #
+  # galata-tower takes four crates from here BY PATH — galata-segments,
+  # galata-wire, galata-broker and galata-datawatch — and builds against
+  # whatever this repository's default branch holds. Without this job, a
+  # removed field or a renamed method turns the tower red and leaves this
+  # workspace green: the signal arrives in the wrong repository, to whoever
+  # pushes there next, about a change somebody made here.
+  #
+  # That is not hypothetical. On 2026-09-22, within minutes of the tower
+  # getting CI at all:
+  #
+  #   error[E0599]: no method named `connected` found for `&mut NatsSubscriber`
+  #   error[E0560]: struct `Window` has no field named `ticker`
+  #
+  # Both were additions made here and not yet pushed. **With path
+  # dependencies the upstream is pushed first** — that is the ordering, and
+  # it is written here because that is where it bit.
+  #
+  # **A TYPE-CHECK, NOT THE TOWER'S GATE.** This finds the class above and
+  # nothing else: it does not run the tower's tests, its screen tests or its
+  # seven guards. Those belong to the tower, and a copy of its gate here
+  # would be a second definition of "the tower is fine" — which is the
+  # failure this workspace spends its own guards preventing.
+  #
+  # It retires itself. When these crates publish and the tower takes them
+  # from the registry with a version, this stops being the mechanism — the
+  # same sentence `test-guards.sh` carries about its symlink.
+  #
+  # Separate and parallel, so the wall clock does not move and the report
+  # names which half failed: "your workspace is fine and the tower no longer
+  # compiles" is a different sentence from "your workspace is broken".
+  downstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: galata-datawatch
+
+      # Its default branch, symmetrically with what the tower does to this
+      # repository. Pinning would test a pair no working tree has.
+      - uses: actions/checkout@v4
+        with:
+          repository: sercanatalik/galata-tower
+          path: galata-tower
+
+      - name: Resolve the pinned toolchain
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: galata-tower
+
+      # The tower's own lockfile. `--locked` so a stale one fails rather than
+      # being updated under us.
+      - name: Fetch the tower's dependencies
+        working-directory: galata-tower
+        run: cargo fetch --locked
+
+      - name: Does the tower still compile against this?
+        working-directory: galata-tower
+        run: cargo check --all-targets --locked
