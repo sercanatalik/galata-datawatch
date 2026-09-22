@@ -6,6 +6,12 @@
 //!                                       itself, on its own root
 //! ```
 //!
+//! **Two roots so that one can be taken without the other.** A dashboard
+//! subscribes `status.>` and is granted no market subject at all: market data
+//! for a screen comes from the record, which holds it bounded, because *an
+//! identity that could read every venue's firehose is exactly what a password
+//! on an operator's laptop should not be*. See [`table`](grants::table).
+//!
 //! **This crate depends on [`galata_wire`] and nothing else of the workspace.**
 //! A component that reads the stream links no columnar format to do it — which
 //! is the wall the predecessor's `algo-fast` reached for and did not get,

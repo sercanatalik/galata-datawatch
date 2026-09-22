@@ -74,7 +74,13 @@ impl Grants {
 /// - **a capture process** publishes its own venue and its own status, and
 ///   subscribes to **nothing** — it never consumes, and a component that only
 ///   writes should not hold a handle that can read;
-/// - **a reader** subscribes to market data and status and publishes nothing.
+/// - **a reader** subscribes to status and publishes nothing. It is NOT
+///   granted `markets.>`, and that is the point of the two roots being
+///   separate: a dashboard takes `status.>` without also taking the firehose.
+///   Market data for a screen comes from the record, which holds it bounded,
+///   because *an identity that could read every venue's firehose is exactly
+///   what a password on an operator's laptop should not be*. The grant is the
+///   boundary; galata-tower's `check-no-market-reach.sh` holds the other side.
 pub fn table(venues: &[&str]) -> Grants {
     let mut grants = Vec::new();
     for venue in venues {
@@ -88,7 +94,7 @@ pub fn table(venues: &[&str]) -> Grants {
     grants.push(Grant {
         identity: "reader".into(),
         publish: Vec::new(),
-        subscribe: vec!["markets.>".into(), "status.>".into()],
+        subscribe: vec!["status.>".into()],
     });
     Grants(grants)
 }
@@ -235,7 +241,7 @@ mod tests {
         let grants = table(&["hyperliquid"]);
         let reader = grants.iter().find(|g| g.identity == "reader").unwrap();
         assert!(reader.publish.is_empty());
-        assert_eq!(reader.subscribe, vec!["markets.>", "status.>"]);
+        assert_eq!(reader.subscribe, vec!["status.>"]);
     }
 
     #[test]
@@ -254,6 +260,27 @@ mod tests {
         );
     }
 
+    /// **The assertion, not the absence of one.** A reader granted the
+    /// firehose would pass every other test in this file; only naming the
+    /// thing it must not have catches it coming back.
+    #[test]
+    fn a_reader_is_granted_no_market_subject() {
+        let grants = table(&["hyperliquid", "rh-chain"]);
+        let reader = grants.iter().find(|g| g.identity == "reader").unwrap();
+        assert!(
+            !reader
+                .subscribe
+                .iter()
+                .any(|subject| subject.starts_with("markets.")),
+            "the reader's password sits in a process that serves a web page: {:?}",
+            reader.subscribe
+        );
+    }
+
+    /// A root with one direction is still a granted root. `markets.` is
+    /// published by every capture identity and read by none, which is the
+    /// shape this table is for — not an oversight the coverage guard should
+    /// start reporting.
     #[test]
     fn every_root_the_code_declares_is_granted_to_somebody() {
         // The guard's rule, asserted here too so a root added without a grant
