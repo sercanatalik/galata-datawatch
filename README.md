@@ -1,6 +1,13 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-on-dark.svg">
+  <img src="assets/logo.svg" alt="" width="72" align="right">
+</picture>
+
 # galata-datawatch
 
 [![check](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml/badge.svg)](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml)
+[![MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE-MIT)
+[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-b7410e.svg)](rust-toolchain.toml)
 
 Market data capture and parquet archival, in Rust.
 
@@ -9,8 +16,19 @@ parse them, gaps are published as events rather than inferred from silence, and
 the store answers *how far am I durable* from a directory listing without
 opening a file.
 
+| | |
+|---|---|
+| **Archive first** | every payload lands verbatim before a parser sees it, so a parse bug costs a re-run and never the data |
+| **A gap is an event** | an absence is written down with its cause and its bounds, never inferred from missing rows |
+| **The frontier is a listing** | *how far am I durable* is answered from directory entries, with no parquet decode |
+| **Venues are features** | a venue that is not compiled in cannot be reached, and a guard holds it |
+| **The tape is a cache** | delete it and `galata-tape-rebuild` writes it again from the archive |
+
 > **Pre-0.1.0.** Nothing is published yet. The roadmap is
 > [`design/roadmap.md`](./design/roadmap.md).
+>
+> The screen for this record is
+> [galata-tower](https://github.com/sercanatalik/galata-tower).
 
 ## The crates
 
