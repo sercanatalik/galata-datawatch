@@ -160,7 +160,10 @@ pub fn unwritten(root: &Path, scopes: &[&str]) -> Vec<String> {
 }
 
 /// A window a caller wants to see.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// No longer `Copy`: the ticker is owned, so that a caller may hold a window
+/// built from a string it read rather than borrowing one for the read's life.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
     /// Which dataset.
     pub kind: Kind,
@@ -168,6 +171,12 @@ pub struct Window {
     pub from_micros: i64,
     /// End, exclusive.
     pub to_micros: i64,
+    /// One instrument, or every instrument in the window.
+    ///
+    /// **Optional because *every* is the right answer for a table of the
+    /// newest rows and for anything rebuilding a partition.** A required field
+    /// would make the common case state something it does not mean.
+    pub ticker: Option<String>,
 }
 
 /// The bounded reader.
@@ -196,6 +205,7 @@ impl Reader {
     /// No bound argument, by design. The window selects; the bound restricts;
     /// both are applied per row.
     pub fn view(&self, window: Window) -> Result<Vec<RecordBatch>, ReadError> {
+        let window = &window;
         if window.to_micros <= window.from_micros {
             return Err(ReadError::Backwards {
                 from: window.from_micros,
@@ -238,12 +248,15 @@ impl Reader {
     /// also covers the day it was received. The alternative — scanning every
     /// partition on every read, in case one holds a timeless row — is the
     /// pruning thrown away for a case that is rare by construction.
-    fn keep(&self, batch: &RecordBatch, window: Window) -> Result<RecordBatch, ReadError> {
-        use arrow::array::{Array, BooleanArray, Int64Array, UInt64Array};
+    fn keep(&self, batch: &RecordBatch, window: &Window) -> Result<RecordBatch, ReadError> {
+        use arrow::array::{Array, BooleanArray, Int64Array, StringArray, UInt64Array};
 
         let at = batch
             .column_by_name("at_micros")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
+        let ticker = batch
+            .column_by_name("ticker")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let seq = batch
             .column_by_name("stream_seq")
             .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
@@ -266,7 +279,19 @@ impl Reader {
                     // direction is to withhold, not to reveal.
                     None => false,
                 };
-                Some(in_window && permitted)
+                // **The opposite of the time rule above, deliberately.** A
+                // row with no venue time is kept, because it is not AT any
+                // time and a window cannot exclude it on the evidence. A row
+                // with no ticker is not the instrument the caller asked for,
+                // and that IS evidence. Matched whole: `BTC` is not `BTCUSD`,
+                // and a prefix match returns a superset while reading as a
+                // subset.
+                let is_the_instrument = match (&window.ticker, ticker) {
+                    (None, _) => true,
+                    (Some(wanted), Some(column)) if !column.is_null(i) => column.value(i) == wanted,
+                    (Some(_), _) => false,
+                };
+                Some(in_window && permitted && is_the_instrument)
             })
             .collect();
 
@@ -278,7 +303,7 @@ impl Reader {
     ///
     /// The tape has no time in its segment names, so the `date=` level does the
     /// excluding that the archive's naming does for a replay.
-    fn partitions_for(&self, window: Window) -> Vec<PathBuf> {
+    fn partitions_for(&self, window: &Window) -> Vec<PathBuf> {
         const DAY: i64 = 86_400_000_000;
         let mut out = Vec::new();
         let dir = self.root.join(format!("kind={}", window.kind));
@@ -314,11 +339,16 @@ mod tests {
     const DAY: i64 = 86_400_000_000;
 
     fn row(seq: u64, venue: &str, at: Option<i64>) -> Row {
+        row_for(seq, venue, "BTC", at)
+    }
+
+    /// The same, naming the instrument — for the reads that ask for one.
+    fn row_for(seq: u64, venue: &str, ticker: &str, at: Option<i64>) -> Row {
         Row {
             stream_seq: seq,
             envelope: Envelope::new(
                 Venue::new(venue).unwrap(),
-                Ticker::new("BTC").unwrap(),
+                Ticker::new(ticker).unwrap(),
                 at,
                 at.unwrap_or(100 * DAY),
                 Event::Quote(Quote {
@@ -463,8 +493,9 @@ mod tests {
             kind: galata_wire::Kind::Quotes,
             from_micros: 0,
             to_micros: 200 * DAY,
+            ticker: None,
         };
-        assert_eq!(seqs(&earlier.view(window).unwrap()), vec![1]);
+        assert_eq!(seqs(&earlier.view(window.clone()).unwrap()), vec![1]);
         assert_eq!(seqs(&reader.view(window).unwrap()), vec![1, 2]);
     }
 
@@ -479,6 +510,7 @@ mod tests {
             kind: galata_wire::Kind::Quotes,
             from_micros: 100 * DAY,
             to_micros: 100 * DAY + 1,
+            ticker: None,
         };
         assert_eq!(seqs(&reader.view(narrow).unwrap()), vec![1]);
     }
@@ -499,6 +531,7 @@ mod tests {
             kind: galata_wire::Kind::Quotes,
             from_micros: 100 * DAY,
             to_micros: 100 * DAY + 1,
+            ticker: None,
         };
         assert_eq!(
             rows_in(&reader.view(reaching).unwrap()),
@@ -510,6 +543,7 @@ mod tests {
             kind: galata_wire::Kind::Quotes,
             from_micros: 500 * DAY,
             to_micros: 501 * DAY,
+            ticker: None,
         };
         assert_eq!(
             rows_in(&reader.view(elsewhere).unwrap()),
@@ -526,6 +560,7 @@ mod tests {
             kind: galata_wire::Kind::Quotes,
             from_micros: 200 * DAY,
             to_micros: 100 * DAY,
+            ticker: None,
         };
         assert!(matches!(
             reader.view(backwards),
@@ -543,9 +578,10 @@ mod tests {
             kind: galata_wire::Kind::Quotes,
             from_micros: 0,
             to_micros: 200 * DAY,
+            ticker: None,
         };
         // One argument, and it carries no bound.
-        let _: Result<Vec<RecordBatch>, ReadError> = reader.view(window);
+        let _: Result<Vec<RecordBatch>, ReadError> = reader.view(window.clone());
         assert_eq!(
             std::mem::size_of_val(&window),
             std::mem::size_of::<Window>()
@@ -561,6 +597,63 @@ mod tests {
             kind: galata_wire::Kind::Trades,
             from_micros: 0,
             to_micros: 200 * DAY,
+            ticker: None,
+        };
+        assert_eq!(rows_in(&reader.view(window).unwrap()), 0);
+    }
+    /// **The gap this change exists for.** Six tickers in the tape and no way
+    /// to look at any but the busiest — the newest forty rows were all one
+    /// instrument, so five of the six were unreachable from the screen.
+    #[test]
+    fn a_window_can_name_one_instrument() {
+        let dir = tape_with(vec![
+            row_for(1, "hyperliquid", "BTC", Some(10)),
+            row_for(2, "hyperliquid", "ETH", Some(20)),
+            row_for(3, "hyperliquid", "BTC", Some(30)),
+        ]);
+        let reader = Reader::open(dir.path(), &["kind=quotes"]).unwrap();
+        let mut window = Window {
+            kind: galata_wire::Kind::Quotes,
+            from_micros: 0,
+            to_micros: 200 * DAY,
+            ticker: Some("BTC".to_owned()),
+        };
+        assert_eq!(seqs(&reader.view(window.clone()).unwrap()), vec![1, 3]);
+
+        // Naming none is every instrument, which is the tape table's default.
+        window.ticker = None;
+        assert_eq!(seqs(&reader.view(window).unwrap()), vec![1, 2, 3]);
+    }
+
+    /// **`BTC` is not `BTCUSD`.** A prefix match returns a superset while
+    /// reading as a subset, which is the shape of a wrong answer nobody
+    /// checks.
+    #[test]
+    fn an_instrument_is_matched_whole() {
+        let dir = tape_with(vec![
+            row_for(1, "hyperliquid", "BTC", Some(10)),
+            row_for(2, "hyperliquid", "BTCUSD", Some(20)),
+        ]);
+        let reader = Reader::open(dir.path(), &["kind=quotes"]).unwrap();
+        let window = Window {
+            kind: galata_wire::Kind::Quotes,
+            from_micros: 0,
+            to_micros: 200 * DAY,
+            ticker: Some("BTC".to_owned()),
+        };
+        assert_eq!(seqs(&reader.view(window).unwrap()), vec![1]);
+    }
+
+    /// An instrument the window does not hold is empty, never an error.
+    #[test]
+    fn an_instrument_that_is_not_there_is_empty() {
+        let dir = tape_with(vec![row_for(1, "hyperliquid", "BTC", Some(10))]);
+        let reader = Reader::open(dir.path(), &["kind=quotes"]).unwrap();
+        let window = Window {
+            kind: galata_wire::Kind::Quotes,
+            from_micros: 0,
+            to_micros: 200 * DAY,
+            ticker: Some("DOGE".to_owned()),
         };
         assert_eq!(rows_in(&reader.view(window).unwrap()), 0);
     }

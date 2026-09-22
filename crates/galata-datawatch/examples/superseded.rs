@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kind,
         from_micros: from,
         to_micros: to,
+        ticker: None,
     };
 
     // **The reorganisations first.** They are the smallest dataset in the tree

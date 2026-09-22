@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kind,
         from_micros: from,
         to_micros: to,
+        ticker: None,
     })?;
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!("{kind}: {rows} rows in {} batches", batches.len());
