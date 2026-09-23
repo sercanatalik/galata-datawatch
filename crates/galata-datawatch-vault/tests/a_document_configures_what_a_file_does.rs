@@ -12,7 +12,9 @@
 use std::path::{Path, PathBuf};
 
 use galata_datawatch::config::source::{CONFIG_DOCUMENT_VAR, CONFIG_PATH_VAR, document_named};
-use galata_datawatch::config::{Adapters, Config, ConfigSource, FileSource, Origin};
+use galata_datawatch::config::{
+    Adapters, Config, ConfigError, ConfigSource, FileSource, Origin, Secret, SecretSource,
+};
 use galata_datawatch_vault::VaultConfig;
 use galata_wire::Series;
 
@@ -189,4 +191,64 @@ fn a_fetched_document_holds_no_vault() {
         .expect("a document in hand cannot fail to read");
     assert!(text.contains("hyperliquid"));
     assert!(matches!(origin, Origin::Document { .. }));
+}
+
+/// A refusal to hand over a secret says which secret, and never the secret.
+///
+/// **Why this is not `SecretAbsent`.** That variant says *"{name} is not set"*,
+/// which is an environment variable's sentence: an operator reads it and goes
+/// and exports something. Measured against a real `gv-server local` on
+/// 2026-09-23, a vault says better things, and they point at different fixes:
+///
+/// ```text
+///   config token   GALATA_DATAWATCH_PASSWORD could not be read: the token's
+///                  vault: this credential can list names but cannot decrypt
+///                  secrets
+///   no such secret A_SECRET_NOBODY_SET could not be read: the token's vault:
+///                  no secret named A_SECRET_NOBODY_SET
+/// ```
+///
+/// The first is the `config` scope working as designed — the vault gives that
+/// bundle no field for the vault key, so it is cryptography and not a
+/// permission check — and *"is not set"* would have sent the reader to a
+/// variable that was never involved.
+///
+/// **Neither names a credential or a vault authentication variable**, which is
+/// `check-secret-reach.sh`'s second rule.
+#[test]
+fn a_refused_secret_names_the_secret_and_not_the_value() {
+    let refusal = ConfigError::SecretRefused {
+        name: "GALATA_DATAWATCH_PASSWORD".to_owned(),
+        detail: "this credential can list names but cannot decrypt secrets".to_owned(),
+    }
+    .to_string();
+
+    assert!(refusal.contains("GALATA_DATAWATCH_PASSWORD"), "{refusal}");
+    assert!(refusal.contains("cannot decrypt secrets"), "{refusal}");
+    // The sentence that would send an operator to the wrong fix.
+    assert!(!refusal.contains("is not set"), "{refusal}");
+}
+
+/// The seam itself: `boot` takes whatever source its caller hands it.
+///
+/// Until 2026-09-23 `boot` named `EnvSecrets` in its own body, so a binary
+/// that fetched its configuration from a vault still took its broker password
+/// from the process environment and had no way to say otherwise. This is a
+/// stranger's `SecretSource`, held as the trait object `boot` accepts — if the
+/// seam closes again, this stops compiling.
+#[test]
+fn a_caller_supplies_its_own_secret_source() {
+    struct FromNowhere;
+    impl SecretSource for FromNowhere {
+        fn secret(&self, name: &str) -> Result<Secret, ConfigError> {
+            Err(ConfigError::SecretRefused {
+                name: name.to_owned(),
+                detail: "this source holds nothing, on purpose".to_owned(),
+            })
+        }
+    }
+
+    let source: &dyn SecretSource = &FromNowhere;
+    let refusal = source.secret("GALATA_DATAWATCH_PASSWORD").unwrap_err();
+    assert!(refusal.to_string().contains("GALATA_DATAWATCH_PASSWORD"));
 }

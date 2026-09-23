@@ -32,6 +32,7 @@ use crate::venue::Subscription;
 /// before anything connects.
 pub fn boot(
     source: &dyn ConfigSource,
+    secrets: &dyn SecretSource,
     adapters: &dyn Adapters,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // **One crypto provider, installed explicitly, before anything can build a
@@ -147,7 +148,14 @@ pub fn boot(
                 // `env::var` for a secret anywhere but `config/source.rs`: one
                 // call site is one place to get the logging wrong, and the
                 // third would be added by somebody who did not read this.
-                let password = EnvSecrets.secret(&broker.password_var)?;
+                // **The caller's, not this function's.** Until 2026-09-23
+                // this line named `EnvSecrets`, so a binary that fetched its
+                // configuration FROM A VAULT still took its broker password
+                // from the process environment — where `ps e`, a crash dump
+                // and every child process can read it — and no caller could
+                // say otherwise. `password_var` names where the password is;
+                // what that name MEANS is the source's to decide.
+                let password = secrets.secret(&broker.password_var)?;
                 let identity = BrokerIdentity::new(
                     broker.user.clone(),
                     password.expose(),

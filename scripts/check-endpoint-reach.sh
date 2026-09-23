@@ -94,7 +94,17 @@ EXPOSE_ALLOWED = {
     # The wiring, which hands the broker its password. It was the binary until
     # the same 253 lines became the library entry both binaries call.
     "crates/galata-datawatch/src/boot.rs",
+    # Where a vault's bytes become a `Secret`, which is the same job
+    # `config/source.rs` does for the environment. Added 2026-09-23 with
+    # `VaultSecrets`.
+    "crates/galata-datawatch-vault/src/lib.rs",
 }
+# **This list holds three different `expose`s, and the check cannot tell them
+# apart.** `Endpoint::expose` is the one rule 3 is about; `Secret::expose` and
+# `galata_vault::SecretValue::expose` share the spelling and are a different
+# type's accessor. A textual guard matching a method name matches all three,
+# which is why an entry here carries a reason rather than only a path: the
+# reason is what a reviewer checks, because the check itself cannot.
 # A field name in an error message that would carry an endpoint.
 ENDPOINT_FIELD = re.compile(r"\{\s*(url|rpc_url|rest_url|ws_url|uri|endpoint_url)\b")
 

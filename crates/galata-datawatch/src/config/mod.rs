@@ -101,6 +101,26 @@ pub enum ConfigError {
         /// The name it should have been under. **Never the value.**
         name: String,
     },
+    /// A secret source answered, and declined.
+    ///
+    /// **Not [`ConfigError::SecretAbsent`].** *"is not set"* is an environment
+    /// variable's sentence: it is what an operator reads and then goes and
+    /// exports something. A vault that refuses has said something more useful
+    /// and more specific — a token that is revoked, a secret that is not
+    /// there, or a scope that **cannot decrypt a secret at all**, which is the
+    /// answer a `config`-scoped token gets and is cryptographic rather than a
+    /// permission check. Flattening that into *"is not set"* would send the
+    /// reader to the wrong fix.
+    #[error("{name} could not be read: {detail}")]
+    SecretRefused {
+        /// The name it was asked for. **Never the value.**
+        name: String,
+        /// What the source said. Never a credential, and never a vault
+        /// authentication variable — `check-secret-reach.sh` holds the second,
+        /// because a copy of the vault's naming rule disagrees rather than
+        /// fails.
+        detail: String,
+    },
     /// The text could not be read.
     #[error("{origin}: {source}")]
     Read {

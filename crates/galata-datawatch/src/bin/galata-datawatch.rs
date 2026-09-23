@@ -6,7 +6,7 @@
 
 use galata_datawatch::adapters;
 use galata_datawatch::boot;
-use galata_datawatch::config::{Adapters, FileSource};
+use galata_datawatch::config::{Adapters, EnvSecrets, FileSource};
 
 /// What the loader asks an adapter, answered without this file naming a venue.
 struct Resolver;
@@ -27,7 +27,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // The one thing this binary decides. Naming two sources at once is a
     // refusal rather than a precedence rule, and `FileSource::from_env` is
     // where that refusal lives.
-    boot::boot(&FileSource::from_env("config/datawatch.toml")?, &Resolver)
+    // **The environment, said rather than assumed.** This binary reads a file
+    // and authenticates from the process environment; the vault binary reads a
+    // document and authenticates from the vault. Both are now a value handed
+    // to the same function, which is what made the second one possible.
+    boot::boot(
+        &FileSource::from_env("config/datawatch.toml")?,
+        &EnvSecrets,
+        &Resolver,
+    )
 }
 
 fn main() -> std::process::ExitCode {

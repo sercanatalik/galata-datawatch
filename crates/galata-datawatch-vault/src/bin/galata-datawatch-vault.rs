@@ -11,12 +11,25 @@
 //! vault's own rule, stated once in its own documentation; a copy here would
 //! disagree with it rather than fail, and `check-secret-reach.sh` holds the
 //! line. `Vault::from_env` reads whatever it reads.
+//!
+//! **The password comes from the vault too**, which until 2026-09-23 it did
+//! not: the document was fetched from the vault and the broker password was
+//! then read from the process environment, because `boot` named `EnvSecrets`
+//! itself. A deployment that moved its configuration into a vault to stop
+//! holding it on disk went on holding its password where `ps e` and every
+//! child process can read it.
+//!
+//! A `config`-scoped token cannot serve both — the vault gives that scope's
+//! bundle no field for the vault key, so it cannot decrypt a secret at all —
+//! and the refusal says so in the vault's own words. Which credential reaches
+//! both is the operator's: one `read` token, two tokens, or a child vault per
+//! binary. Nothing here picks.
 
 use galata_datawatch::adapters;
 use galata_datawatch::boot;
 use galata_datawatch::config::Adapters;
 use galata_datawatch::config::source::document_from_env;
-use galata_datawatch_vault::VaultConfig;
+use galata_datawatch_vault::{VaultConfig, VaultSecrets};
 use galata_vault::Vault;
 
 /// What the loader asks an adapter, answered without this file naming a venue.
@@ -58,10 +71,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // binary gives, because it is the same function.
     let document = document_from_env()?;
 
-    // Fetched once, before anything connects to a venue. Nothing below holds
-    // the vault, so the capture loop cannot reach it even by accident.
+    // Fetched once, before anything connects to a venue.
     let vault = Vault::from_env()?;
     let config = VaultConfig::fetch(&vault, &document)?;
 
-    boot::boot(&config, &Resolver)
+    // **The vault is boot's argument, and still not the loop's value.** It
+    // used to say "nothing below holds the vault"; that was true of a call
+    // taking only a document, and is now too strong — `boot` borrows this for
+    // as long as it runs. What has not changed is the part that matters:
+    // `boot` reads the password once, before a socket is opened, and hands the
+    // loop a `Sink`. No value the capture loop holds carries a vault, so the
+    // rule *fetch at boot, never on the capture path* is still structural
+    // rather than remembered.
+    boot::boot(&config, &VaultSecrets::new(&vault), &Resolver)
 }

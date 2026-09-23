@@ -304,8 +304,18 @@ source before it existed turned out to buy more than tidy refusals.
   publish, so the four that do still link none of it. Measured: the vault costs
   **104** crates on this tree, against the predecessor's carried 225, which was
   its tree taken alone. The wall is `check-vault-reach.sh`, watched failing.
+- ~~**A secret the vault holds.**~~ **Done.** The document came from the vault
+  and the broker password came from the process environment, because `boot`
+  named `EnvSecrets` in its own body. It now takes a `&dyn SecretSource`, and
+  `VaultSecrets` is one. Measured against a real `gv-server local`: a `read`
+  token serves it, and a `config` token is refused with the vault's own
+  sentence — *"this credential can list names but cannot decrypt secrets"* —
+  which is the scope working by cryptography rather than by a check.
 - **Per-`(binary, venue)` capability** and child vaults per venue credential —
-  both are shapes of the vault's own token model, and belong with it.
+  both are shapes of the vault's own token model, and belong with it. Now
+  **reachable and deliberately not chosen**: one `read` token, two tokens, and
+  a child vault per binary are all askable, and which is right depends on what
+  else is in an operator's vault.
 
 > **Exit:** `hyperliquid` still builds with
 > `--no-default-features --features hyperliquid` — no vault, no broker — and a

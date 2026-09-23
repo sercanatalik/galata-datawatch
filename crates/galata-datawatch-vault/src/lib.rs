@@ -30,7 +30,7 @@
 //! `an_unknown_key_in_a_document_is_refused_by_name` is what fails if anybody
 //! changes that.
 
-use galata_datawatch::config::{ConfigError, ConfigSource, Origin};
+use galata_datawatch::config::{ConfigError, ConfigSource, Origin, Secret, SecretSource};
 use galata_vault::{ErrorKind, Vault};
 
 /// A configuration document, fetched and in hand.
@@ -192,3 +192,83 @@ impl ConfigSource for VaultConfig {
 /// long it waited. Nothing in this tree has measured a better one, and inventing
 /// a shorter one would be a figure with no entry in `design/measured.md`.
 const FETCH_TIMEOUT_SECS: u64 = 120;
+
+/// Secrets, from the vault the configuration came from.
+///
+/// **The gap this closes.** `galata-datawatch-vault` fetches its configuration
+/// document from a vault and, until 2026-09-23, then took its broker password
+/// from the process environment — because [`boot`](galata_datawatch::boot::boot)
+/// named `EnvSecrets` itself and no caller could supply anything else. A
+/// deployment that moved its configuration into a vault to stop holding it on
+/// disk went on holding its password where `ps e`, a crash dump and every
+/// child process can read it.
+///
+/// # What the name means
+///
+/// `password_var` names *where the password is*. `EnvSecrets` reads that name
+/// as a variable; this reads it as a secret in the vault. The field is not
+/// renamed, because the string is a reference and the source is what resolves
+/// it — and because renaming it would break every configuration file in
+/// existence to make one paragraph read better.
+///
+/// # The scope this cannot paper over
+///
+/// A `config`-scoped token **cannot read a secret**: the vault gives its
+/// bundle no field for the vault key, so this is cryptography rather than a
+/// permission check. A binary that fetches its document with one and then asks
+/// for a password gets a refusal — a real one, carrying the vault's own
+/// sentence, which is why [`galata_datawatch::config::ConfigError::SecretRefused`]
+/// exists rather than the document's *"is not set"*.
+///
+/// Which token reaches both is the operator's decision — one `read` token, two
+/// tokens, or a child vault holding one binary's credentials — and this type
+/// deliberately makes all three askable without choosing.
+#[derive(Debug, Clone, Copy)]
+pub struct VaultSecrets<'a> {
+    vault: &'a Vault,
+}
+
+impl<'a> VaultSecrets<'a> {
+    /// Secrets from an already-open vault.
+    ///
+    /// **It takes an opened vault, never a token.** How a vault client
+    /// authenticates is the vault's rule, stated once in its own
+    /// documentation; `check-secret-reach.sh` refuses a copy of it here,
+    /// because a second implementation of a naming rule disagrees rather than
+    /// fails.
+    pub fn new(vault: &'a Vault) -> VaultSecrets<'a> {
+        VaultSecrets { vault }
+    }
+}
+
+impl SecretSource for VaultSecrets<'_> {
+    fn secret(&self, name: &str) -> Result<Secret, ConfigError> {
+        let value = self
+            .vault
+            .secret(name)
+            .map_err(|error| ConfigError::SecretRefused {
+                name: name.to_owned(),
+                // The vault's own message. It knows whether the token is
+                // revoked, the secret absent, or the scope unable to decrypt
+                // one at all; restating that here would be a second rule that
+                // disagrees rather than fails.
+                detail: error.message().to_owned(),
+            })?;
+
+        // **A password is text, and a vault holds bytes.** Anything that is
+        // not UTF-8 is refused by name rather than lossily converted: a
+        // password silently mangled into replacement characters authenticates
+        // against nothing and the refusal would come from the broker, naming
+        // the wrong thing.
+        let text = std::str::from_utf8(value.expose()).map_err(|_| ConfigError::SecretRefused {
+            name: name.to_owned(),
+            detail: format!(
+                "the vault holds {} bytes under this name and they are not UTF-8. A password is \
+                 text; this was written by something that did not think so",
+                value.len()
+            ),
+        })?;
+
+        Ok(Secret::new(text))
+    }
+}

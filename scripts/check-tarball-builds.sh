@@ -18,8 +18,10 @@
 # existed, two of this workspace's four crates could not be verified before
 # publishing at all, and check-package.sh's header said so.
 #
-# **This passes today**, which is the moment to hold it: a guard added while
-# it is green is a guard that was never a bug report.
+# **This passed today**, which was the moment to hold it: a guard added while
+# it is green is a guard that was never a bug report. It also passed for a
+# reason it did not have — see the cache note below, found 2026-09-23 when it
+# failed on source that was no longer in the tree.
 #
 # WHAT IT DOES NOT CHECK: verification builds DEFAULT FEATURES. A tarball that
 # compiles with defaults and fails with `default-features = false` passes here
@@ -74,6 +76,59 @@ PLANTPY
 fi
 
 cd "$ROOT"
+
+# **THIS GUARD WAS VERIFYING SOURCE THAT NO LONGER EXISTED.**
+#
+# Cargo identifies a registry crate by name and version, and every crate here
+# is 0.1.0 and stays 0.1.0. Two caches key on that pair and neither notices
+# when the content behind it changes:
+#
+#   1. the EXTRACTED SOURCE, `$CARGO_HOME/registry/src/<hash>/<name>-<ver>/`,
+#      reused whenever the directory already exists;
+#   2. the COMPILED ARTIFACT in the target directory. Cargo normalises an
+#      extracted registry file's mtime to a fixed date — Jul 24 2006, which is
+#      what `ls` shows — so the fingerprint is identical for old and new
+#      content and the cached `.rlib` is reused. This one survives deleting
+#      the first.
+#
+# Observed 2026-09-23. A variant added to `galata-datawatch` was in the
+# freshly built tarball, in the freshly extracted source, AND STILL the
+# dependent crate compiled against a stale rlib and failed on code that was
+# nowhere in the tree. `--verbose` named it:
+# `--extern galata_datawatch=target/debug/deps/libgalata_datawatch-*.rlib`.
+#
+# **The direction that matters is the other one.** A sibling change that
+# BREAKS a dependent would have been verified against last week's artifact and
+# reported green — which is precisely the failure this guard exists to catch,
+# so it was a guard that could not have caught it.
+#
+# Both caches are purged for THIS WORKSPACE's own crates, and only those: they
+# are unpublished, nothing else can supply them, and the very command below
+# reproduces them. The names come from cargo rather than a list here that would
+# go stale.
+members=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
+for pkg in json.load(sys.stdin)["packages"]:
+    print(pkg["name"] + "-" + pkg["version"])')
+if [[ -z "$members" ]]; then
+    echo "$(basename "$0"): cargo metadata named no workspace member — refusing to skip the purge and call the result a check" >&2
+    exit 2
+fi
+
+target=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
+print(json.load(sys.stdin)["target_directory"])')
+
+for spec in $members; do
+    name="${spec%-*}"
+    underscored="${name//-/_}"
+    for dir in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"$spec"; do
+        [[ -d "$dir" ]] && rm -rf "$dir"
+    done
+    # The compiled halves, and the fingerprints that would let cargo skip
+    # rebuilding them.
+    rm -f "$target"/debug/deps/lib"$underscored"-*.rlib \
+          "$target"/debug/deps/lib"$underscored"-*.rmeta 2>/dev/null || true
+    rm -rf "$target"/debug/.fingerprint/"$name"-* 2>/dev/null || true
+done
 
 if ! output=$(cargo package --workspace --allow-dirty 2>&1); then
     echo "tarball builds: a crate does not build from what it would ship" >&2
