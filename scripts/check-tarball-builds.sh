@@ -58,13 +58,18 @@
 #
 # Measured on this workspace: about 19s warm, about 95s on a cold tree.
 #
-# Usage: check-tarball-builds.sh [check|plant] [root]
+# Usage: check-tarball-builds.sh [check|plant|key] [root]
+#
+# `key` prints the content key and exits. It exists so that WHAT THE KEY
+# REACTS TO can be tested in milliseconds instead of by waiting out a
+# two-minute run per case — which is the difference between a cache whose
+# discrimination was checked and one whose author believed in it.
 
 set -euo pipefail
 
 VERB=check
 if [[ $# -gt 0 ]]; then
-    case "$1" in check|plant) VERB="$1"; shift ;; esac
+    case "$1" in check|plant|key) VERB="$1"; shift ;; esac
 fi
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PLANT="$ROOT/crates/galata-broker/Cargo.toml"
@@ -150,6 +155,70 @@ fi
 target=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
 print(json.load(sys.stdin)["target_directory"])')
 
+# **THE PURGE BELOW IS ONLY WORTH PAYING WHEN SOMETHING MOVED.**
+#
+# Purging is correct and stays, and this sits BEFORE it: a skip that ran after
+# the purge would have emptied the caches and then declined to refill them,
+# leaving the next run to pay for this one. What is not worth repeating is
+# re-deriving the
+# same verdict about the same bytes: measured 2026-09-23, `cargo package
+# --workspace` warm is 22s and this guard with the purge is 2m17s, in a gate
+# that takes 9m07s.
+#
+# So a key is computed over everything that could change the answer, and a run
+# that PASSES records it. Four of the inputs ship nothing and are here anyway,
+# each for a reason:
+#
+#   the workspace root Cargo.toml   `[workspace.dependencies]` is what cargo
+#                                   inlines into the rewritten manifest, and it
+#                                   appears in no member's file list
+#   Cargo.lock                      a dependency version changes what compiles
+#   rustc -V, cargo -V              a toolchain change is exactly when a
+#                                   package that built last week stops
+#   THIS SCRIPT                     so editing the check re-runs the check. The
+#                                   change before this one added three
+#                                   configurations here; under a key without
+#                                   the script they would never have run.
+#
+# `cargo package --list` is what says which files ship — asked of cargo rather
+# than guessed from the `include` globs — and costs 0.32s for all five members.
+#
+# **A skip is printed, never silent.** A cache that prints the same `ok` as a
+# real run is how a guard becomes a lie.
+key_now() {
+    {
+        rustc -V
+        cargo -V
+        cat "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "${BASH_SOURCE[0]}"
+        for spec in $members; do
+            name="${spec%-*}"
+            echo "== $name"
+            # The list itself, so an added or removed file moves the key even
+            # if every surviving file is byte-identical.
+            files=$(cargo package --list --allow-dirty -p "$name" 2>/dev/null)
+            echo "$files"
+            while IFS= read -r rel; do
+                # Cargo synthesises a few entries (Cargo.toml.orig, .cargo_vcs_info.json)
+                # that have no file on disk; the real ones are hashed.
+                [[ -f "$ROOT/crates/$name/$rel" ]] && cat "$ROOT/crates/$name/$rel"
+            done <<< "$files"
+        done
+    } 2>/dev/null | shasum -a 256 | cut -d' ' -f1
+}
+
+KEY_FILE="$target/.tarball-check-verified"
+key=$(key_now)
+
+if [[ "$VERB" == key ]]; then
+    echo "$key"
+    exit 0
+fi
+
+if [[ -z "${GALATA_TARBALL_FORCE:-}" && -f "$KEY_FILE" && "$(cat "$KEY_FILE")" == "$key" ]]; then
+    echo "tarball builds: ok, carried from the last run that passed — nothing that ships, no manifest, no lockfile, no toolchain and not this script has changed since (key ${key:0:12}). GALATA_TARBALL_FORCE=1 to verify anyway"
+    exit 0
+fi
+
 for spec in $members; do
     name="${spec%-*}"
     underscored="${name//-/_}"
@@ -211,5 +280,13 @@ for shape in "${shapes[@]}"; do
         exit 1
     fi
 done
+
+# **Only now**, and only here: a failure above exits without writing, so a red
+# guard stays red until the thing is fixed rather than until somebody re-runs
+# it. Recomputed rather than reused, because the shapes above compile from the
+# unpacked tarballs and nothing here should record a key for a tree it did not
+# just verify.
+mkdir -p "$(dirname "$KEY_FILE")"
+key_now > "$KEY_FILE"
 
 echo "tarball builds: ok. $built crate(s) compiled from their tarballs with default features, and ${#shapes[@]} configuration(s) a stranger takes — no-default-features (galata-tower's) and the venue features the README advertises — built from the same unpacked sources"
