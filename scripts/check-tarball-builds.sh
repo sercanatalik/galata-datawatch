@@ -23,11 +23,33 @@
 # reason it did not have — see the cache note below, found 2026-09-23 when it
 # failed on source that was no longer in the tree.
 #
-# WHAT IT DOES NOT CHECK: verification builds DEFAULT FEATURES. A tarball that
-# compiles with defaults and fails with `default-features = false` passes here
-# — and that is the combination galata-tower takes.
-# `check-feature-matrix.sh` holds feature combinations; this holds packaging.
-# A guard a reader could take for more than it is would be worse than none.
+# `cargo package` has no feature flags — verification builds DEFAULT FEATURES
+# and there is no way to ask it for another set. So the configurations anybody
+# else actually takes are built separately, from the same unpacked tarballs:
+#
+#   --no-default-features        what galata-tower takes, called "the whole
+#                                dependency argument" in its own manifest. It
+#                                takes these crates by PATH today and says they
+#                                "become registry dependencies when its Tier 10
+#                                lands" — so this shape had never been compiled
+#                                from a tarball at all.
+#   --features <venue>           the line this crate's README tells a reader to
+#                                type: `cargo add galata-datawatch --features
+#                                rh-chain`.
+#
+# **What that adds over `check-feature-matrix.sh`, precisely.** The matrix
+# builds fourteen combinations in the WORKSPACE, against path dependencies: it
+# proves the CODE compiles. This proves the PACKAGE does. The difference is the
+# manifest, which cargo rewrites when it packages — path dependencies stripped,
+# features kept. What it catches is a feature that resolves through the
+# workspace and not through a registry.
+#
+# WHAT IT STILL DOES NOT CHECK, and the previous header overstated: *which
+# files ship* cannot vary by feature in this tree. Every publishable crate's
+# `include` is `/src/**`, and there is no `include_str!` or `include_bytes!`
+# anywhere — both greped for, 2026-09-23 — so no file is reachable under one
+# feature and absent under another. A guard a reader could take for more than
+# it is would be worse than none.
 #
 # `--allow-dirty` because the gate runs mid-change. A packaging check that
 # refused uncommitted work would be unavailable during exactly the edit that
@@ -106,6 +128,17 @@ cd "$ROOT"
 # are unpublished, nothing else can supply them, and the very command below
 # reproduces them. The names come from cargo rather than a list here that would
 # go stale.
+# The version a member carries, asked of cargo rather than written here — this
+# tree's crates are all 0.1.0 and a literal would be right until the day it
+# silently was not.
+version_of() {
+    local want="$1" spec
+    for spec in $members; do
+        [[ "${spec%-*}" == "$want" ]] && { echo "${spec##*-}"; return 0; }
+    done
+    return 1
+}
+
 members=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
 for pkg in json.load(sys.stdin)["packages"]:
     print(pkg["name"] + "-" + pkg["version"])')
@@ -140,4 +173,43 @@ if ! output=$(cargo package --workspace --allow-dirty 2>&1); then
 fi
 
 built=$(echo "$output" | grep -cE "^   Verifying " || true)
-echo "tarball builds: ok. $built crate(s) unpacked and compiled from their tarballs, siblings resolved from the packaged registry (default features; check-feature-matrix.sh holds the rest)"
+
+# **Patched to the PACKAGED directories, never to the workspace.**
+#
+# `cargo package` leaves each crate unpacked beside its tarball, so a `patch`
+# pointing there compiles the SHIPPED files with whatever features are asked
+# for. The obvious alternative was tried first and is wrong:
+# `source.crates-io.replace-with` aimed at `tmp-registry` replaces crates.io
+# ENTIRELY, so `arrow` is not found either. A patch redirects only the crates
+# under test and leaves third-party resolution alone.
+patches=()
+for spec in $members; do
+    dir="$ROOT/target/package/$spec"
+    [[ -d "$dir" ]] || continue
+    patches+=(--config "patch.crates-io.${spec%-*}.path='$dir'")
+done
+
+# The configurations somebody else takes. `under` is the crate being built;
+# the rest are patched in around it.
+shapes=(
+    "galata-datawatch|--no-default-features|the shape galata-tower takes"
+    "galata-datawatch|--no-default-features --features hyperliquid|cargo add --features hyperliquid"
+    "galata-datawatch|--no-default-features --features rh-chain|cargo add --features rh-chain, the README's own line"
+)
+
+for shape in "${shapes[@]}"; do
+    IFS='|' read -r crate flags why <<< "$shape"
+    manifest="$ROOT/target/package/$crate-$(version_of "$crate")/Cargo.toml"
+    if [[ ! -f "$manifest" ]]; then
+        echo "tarball builds: $crate was not unpacked — the packaging step changed shape" >&2
+        exit 2
+    fi
+    # shellcheck disable=SC2086
+    if ! shaped=$(cargo check --manifest-path "$manifest" $flags "${patches[@]}" 2>&1); then
+        echo "tarball builds: what ships does not build as \`$flags\` — $why" >&2
+        echo "$shaped" | grep -E "^(error|error\[)" | head -8 >&2
+        exit 1
+    fi
+done
+
+echo "tarball builds: ok. $built crate(s) compiled from their tarballs with default features, and ${#shapes[@]} configuration(s) a stranger takes — no-default-features (galata-tower's) and the venue features the README advertises — built from the same unpacked sources"

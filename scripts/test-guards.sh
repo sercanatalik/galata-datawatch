@@ -185,6 +185,19 @@ prove "check-tarball-builds (a crate whose tarball is missing its modules)" \
       ./scripts/check-tarball-builds.sh \
       crates/galata-broker/Cargo.toml own
 
+# The second half: `cargo package` verifies DEFAULT FEATURES and offers no way
+# to ask for another set, so the guard builds the shapes somebody else takes
+# from the same unpacked tarballs. This plant compiles perfectly with defaults
+# and not without them — which is the configuration galata-tower takes, and the
+# one nobody develops in.
+prove "check-tarball-builds (what ships fails without default features)" \
+      ./scripts/check-tarball-builds.sh \
+      crates/galata-datawatch/src/lib.rs \
+      replace 'pub mod config;' \
+      'pub mod config;
+#[cfg(not(feature = "capture"))]
+const _PLANTED: () = this_does_not_exist();'
+
 # The documentation builds clean. Plants for itself: it must insert before the
 # tests, and an appended broken link would land in a region cargo doc still
 # reads — but the plant belongs beside the rule either way.
