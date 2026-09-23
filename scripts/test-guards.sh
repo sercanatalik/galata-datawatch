@@ -172,6 +172,13 @@ prove "check-clock-discipline (a clock reading below the loop)" \
 
 # What a publish would actually ship. Plants for itself: it drops the licence
 # from the include whitelist, which still builds and still publishes.
+# The changelog's newest release is the version that will publish. Plants for
+# itself: the fault is a DISAGREEMENT between two files, which an append
+# cannot produce.
+prove "check-changelog (a version the workspace does not have)" \
+      ./scripts/check-changelog.sh \
+      CHANGELOG.md own
+
 # The release document names exactly the crates that publish. Two plants, for
 # the two directions: a crate that publishes and is not named, and a name that
 # does not publish. One direction would rot in the direction nobody notices.
