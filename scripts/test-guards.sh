@@ -43,8 +43,14 @@ fails=0
 # planted by appending: the violation lands in the region the check deliberately
 # ignores, the planted run passes, and the harness reports the GUARD as broken
 # when the PLANT is. Such a guard carries its own plant beside its own rule.
+# **Each plant reports what it cost**, because the gate's own timing named this
+# harness as its largest part and the next question was immediately "which
+# plant". The answer is worth having in the output rather than re-derived: a
+# plant that recompiles the tree is tens of seconds, and one that edits a
+# manifest is nothing.
 prove() {
     local name="$1" guard="$2" file="$3" mode="$4"; shift 4
+    local began=$SECONDS
 
     if ! "$guard" >/dev/null 2>&1; then
         echo "  $name: expected green before planting, and the guard is already red" >&2
@@ -75,7 +81,7 @@ PY
         echo "  $name: PLANTED ITS VIOLATION AND STAYED GREEN — the guard does not work" >&2
         fails=$((fails + 1))
     else
-        echo "  $name: red on its violation, green without it"
+        echo "  $name: red on its violation, green without it ($(( SECONDS - began ))s)"
     fi
 
     restore; PLANTED=""
