@@ -172,6 +172,24 @@ prove "check-clock-discipline (a clock reading below the loop)" \
 
 # What a publish would actually ship. Plants for itself: it drops the licence
 # from the include whitelist, which still builds and still publishes.
+# The release document names exactly the crates that publish. Two plants, for
+# the two directions: a crate that publishes and is not named, and a name that
+# does not publish. One direction would rot in the direction nobody notices.
+
+# 1. A publishable crate the document forgets. Plants for itself: the fault is
+#    an ABSENCE, which an append cannot produce.
+prove "check-release-doc (a crate that publishes and is not named)" \
+      ./scripts/check-release-doc.sh \
+      RELEASING.md own
+
+# 2. The private crate claimed as published — the wall that keeps the four
+#    vault-free, described away.
+prove "check-release-doc (a name that does not publish)" \
+      ./scripts/check-release-doc.sh \
+      RELEASING.md \
+      replace '| `galata-datawatch-vault` | **no** | `publish = false` |' \
+      '| `galata-datawatch-vault` | yes | `publish = false` |'
+
 prove "check-package (a crate that would ship without its licence)" \
       ./scripts/check-package.sh \
       crates/galata-wire/Cargo.toml own
