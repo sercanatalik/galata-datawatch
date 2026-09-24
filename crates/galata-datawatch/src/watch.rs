@@ -110,6 +110,7 @@ pub fn watch(
     today: &str,
     thresholds: &Thresholds,
     now_micros: i64,
+    venues: &[&str],
 ) -> Report {
     let mut report = Report::default();
 
@@ -179,16 +180,35 @@ pub fn watch(
         }
     }
 
-    if let Some(max_age) = thresholds.max_record_age_secs
-        && let Some((_, position)) = galata_segments::last_durable(archive_root)
-    {
-        let age_secs = (now_micros - position as i64).div_euclid(1_000_000);
-        if age_secs > max_age as i64 {
-            report.findings.push(Finding {
-                observed: format!("the newest segment is {age_secs} s old"),
-                expected: format!("at most {max_age} s"),
-                at: archive_root.to_path_buf(),
-            });
+    // **Per declared venue.** Each venue is its own capture process, so the
+    // newest segment of the whole archive is only the freshest venue's — and
+    // a max across venues hid every other one: one process could die while
+    // another kept writing, and this reported a clean record indefinitely.
+    // Declared venues, not every `venue=` found: an archive keeps a retired
+    // venue's record, and judging it would apply a bound nobody set for it.
+    if let Some(max_age) = thresholds.max_record_age_secs {
+        for venue in venues {
+            let scope = format!("venue={venue}");
+            let at = archive_root.join(&scope);
+            match galata_segments::last_durable_for_scope(archive_root, &scope) {
+                // The most stale a declared venue can be — and it used to
+                // read as clean.
+                None => report.findings.push(Finding {
+                    observed: format!("{venue} is declared and has captured nothing"),
+                    expected: format!("a segment at most {max_age} s old"),
+                    at,
+                }),
+                Some((_, position)) => {
+                    let age_secs = (now_micros - position as i64).div_euclid(1_000_000);
+                    if age_secs > max_age as i64 {
+                        report.findings.push(Finding {
+                            observed: format!("{venue}'s newest segment is {age_secs} s old"),
+                            expected: format!("at most {max_age} s"),
+                            at,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -238,6 +258,7 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             300,
+            &[],
         );
         assert!(report.findings.is_empty(), "{:?}", report.findings);
     }
@@ -261,6 +282,7 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             300,
+            &[],
         );
         assert!(report.findings.is_empty(), "{:?}", report.findings);
     }
@@ -287,6 +309,7 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             300,
+            &[],
         );
         let said = report
             .findings
@@ -312,6 +335,7 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             0,
+            &[],
         );
         assert!(!report.is_clean());
         assert!(
@@ -331,6 +355,7 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             0,
+            &[],
         );
         assert!(report.is_clean());
     }
@@ -361,6 +386,7 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             0,
+            &[],
         );
         assert!(report.is_clean());
         assert!(report.had_nothing(), "an empty tree read as merely clean");
@@ -374,7 +400,9 @@ mod tests {
         // here. One root doing both made an archive segment a tape segment,
         // which the tape now reports for carrying no venue label.
         let tape = tempfile::tempdir().unwrap();
-        let dir = root.path().join("kind=quotes/date=2026-09-20");
+        let dir = root
+            .path()
+            .join("venue=hyperliquid/kind=quotes/date=2026-09-20");
         let batch = arrow::record_batch::RecordBatch::try_new(
             std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
                 arrow::datatypes::Field::new(
@@ -412,6 +440,7 @@ mod tests {
             "2026-09-21",
             &thresholds,
             160 * SECOND,
+            &["hyperliquid"],
         );
         assert!(
             !report.is_clean(),
@@ -430,6 +459,7 @@ mod tests {
             "2026-09-21",
             &thresholds,
             110 * SECOND,
+            &["hyperliquid"],
         );
         assert!(fresh.is_clean(), "{:?}", fresh.findings);
     }
@@ -443,7 +473,7 @@ mod tests {
             max_segments_in_closed_partition: Some(1),
             max_record_age_secs: None,
         };
-        assert!(watch(root.path(), root.path(), "2026-09-21", &thresholds, 0).is_clean());
+        assert!(watch(root.path(), root.path(), "2026-09-21", &thresholds, 0, &[]).is_clean());
     }
 
     #[test]
@@ -494,11 +524,94 @@ mod tests {
             "2026-09-21",
             &Thresholds::default(),
             0,
+            &[],
         );
         assert!(
             report.is_clean(),
             "the archive was judged by the tape's rule: {:?}",
             report.findings
         );
+    }
+
+    fn aged() -> Thresholds {
+        Thresholds {
+            max_segments_in_closed_partition: None,
+            max_record_age_secs: Some(300),
+        }
+    }
+
+    #[test]
+    fn one_venue_stopping_is_reported_while_another_runs() {
+        // Reproduced before the fix: venue-a silent 600 s beside a venue-b
+        // written 5 s ago, and the watch reported nothing at all.
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tempfile::tempdir().unwrap();
+        segments(
+            archive.path(),
+            "venue=venue-a/kind=quotes/date=1970-01-01",
+            &["t-100000000_100000000_1_1.parquet"],
+        );
+        segments(
+            archive.path(),
+            "venue=venue-b/kind=quotes/date=1970-01-01",
+            &["t-695000000_695000000_2_1.parquet"],
+        );
+        let report = watch(
+            archive.path(),
+            tape.path(),
+            "1970-01-02",
+            &aged(),
+            700 * SECOND,
+            &["venue-a", "venue-b"],
+        );
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        assert!(report.findings[0].observed.starts_with("venue-a"));
+        assert!(report.findings[0].at.ends_with("venue=venue-a"));
+    }
+
+    #[test]
+    fn a_declared_venue_that_captured_nothing_is_reported() {
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tempfile::tempdir().unwrap();
+        segments(
+            archive.path(),
+            "venue=venue-b/kind=quotes/date=1970-01-01",
+            &["t-695000000_695000000_2_1.parquet"],
+        );
+        let report = watch(
+            archive.path(),
+            tape.path(),
+            "1970-01-02",
+            &aged(),
+            700 * SECOND,
+            &["venue-b", "venue-c"],
+        );
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        assert!(report.findings[0].observed.contains("captured nothing"));
+    }
+
+    #[test]
+    fn an_undeclared_venue_is_not_judged() {
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tempfile::tempdir().unwrap();
+        segments(
+            archive.path(),
+            "venue=retired/kind=quotes/date=1970-01-01",
+            &["t-1000000_1000000_1_1.parquet"],
+        );
+        segments(
+            archive.path(),
+            "venue=venue-b/kind=quotes/date=1970-01-01",
+            &["t-695000000_695000000_2_1.parquet"],
+        );
+        let report = watch(
+            archive.path(),
+            tape.path(),
+            "1970-01-02",
+            &aged(),
+            700 * SECOND,
+            &["venue-b"],
+        );
+        assert!(report.is_clean(), "{:?}", report.findings);
     }
 }

@@ -90,12 +90,16 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     galata_segments::scannable(&config.paths.archive)?;
     galata_segments::scannable(&config.paths.tape)?;
 
+    // Judged per declared venue: each is its own capture process, and one
+    // stopping must not hide behind another still writing.
+    let venues: Vec<&str> = config.venue.keys().map(String::as_str).collect();
     let report = watch::watch(
         &config.paths.archive,
         &config.paths.tape,
         &today,
         &thresholds,
         now,
+        &venues,
     );
 
     for finding in &report.findings {

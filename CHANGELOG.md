@@ -86,6 +86,9 @@ First release. Nothing is on crates.io yet, so everything is new.
 - `AdapterConfig::for_replay` and `Endpoint::Withheld`: an adapter built for a
   tool that does not connect reads no secret, and a keyed provider it declares
   is named and withheld — never replaced by the public node.
+- `galata-watch` judges record age per declared venue, and reports a declared
+  venue that has captured nothing — one venue stopping no longer hides behind
+  another still writing.
 - Binaries: `galata-datawatch <venue>`, `galata-tape-rebuild`, `galata-retain`,
   `galata-watch`, `measure`.
 

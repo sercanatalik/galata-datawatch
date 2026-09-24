@@ -478,6 +478,12 @@ each flow against a copy of the real record before it was called done.
   heartbeat is a claim, a closed partition still holding 1,412 segments is a
   fact on disk. It closes the half-made decision from Tier 1, where the status
   surface refused to judge and nothing else did either.
+- **Freshness is judged per declared venue** (2026-09-24, `stale-per-venue`).
+  It was the newest segment of the whole archive — the freshest venue's — so
+  one capture process could die beside another still writing and the watch
+  reported clean indefinitely; reproduced before the fix. A declared venue
+  that has captured nothing is reported too. Legacy's `Kind::Silence` was per
+  subject, which is per venue; the move into this watcher had lost that.
 
 ### Still open in this tier
 
