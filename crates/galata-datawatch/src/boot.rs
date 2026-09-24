@@ -18,7 +18,7 @@ use galata_wire::{Clipped, Series, Ticker};
 
 use crate::adapters::{self, AdapterConfig, History};
 use crate::capture::{Capture, Clock, SystemClock, WalkInterval, WalkRequest, Wiring};
-use crate::config::{Adapters, Config, ConfigSource, EnvSecrets, SecretSource};
+use crate::config::{Adapters, Config, ConfigSource, SecretSource};
 use crate::sink::{NatsSink, NullSink, Outbound, Sink};
 use crate::venue::Subscription;
 
@@ -76,7 +76,12 @@ pub fn boot(
         .get(&venue_name)
         .ok_or_else(|| format!("{venue_name} is not a venue this configuration declares"))?;
 
-    let adapter_config = AdapterConfig::from_declared(&venue_name, venue, &EnvSecrets)?;
+    // **Through the secret source this process was handed**, not the
+    // environment's by name. Until `poll-a-venue` this read `&EnvSecrets`, so
+    // under the vault binary a chain provider's URL — and now a signing
+    // venue's keys — came from the process environment rather than the vault,
+    // which is exactly where the vault exists to keep them from.
+    let adapter_config = AdapterConfig::from_declared(&venue_name, venue, secrets)?;
 
     let declared: Vec<Subscription> = venue
         .instruments
@@ -92,6 +97,12 @@ pub fn boot(
         .collect::<Result<_, _>>()?;
 
     let declared_series: Vec<Series> = venue.series.clone();
+    // Each declared instrument once — what a poll's gap is attributed to.
+    let about: Vec<Ticker> = venue
+        .instruments
+        .iter()
+        .map(|instrument| Ticker::new(instrument.ticker.clone()))
+        .collect::<Result<_, _>>()?;
     let walk_config = adapter_config.clone();
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -208,42 +219,64 @@ pub fn boot(
             tracing::info!(gaps, "published the window this process was not covering");
         }
 
-        // **A cursor venue is a different program.** No walk, no session, no
-        // rotation: the cursor loop IS the backfill, because asking for old
-        // blocks and asking for new ones is the same call at a different
-        // position.
-        if !adapter_transport.is_stream() {
-            // **The cursor loop is behind `rh-chain`**, because `capture::cursor`
-            // is. Ungated, this line made `cargo build -p galata-datawatch` fail
-            // on the crate's OWN default features, and nothing noticed: the
-            // feature-matrix guard builds `--lib` only, so the one target that
-            // could not compile was the one target it never compiled.
-            #[cfg(feature = "rh-chain")]
-            {
+        // **One arm per transport, matched.** This used to be "not a stream,
+        // so a cursor" — and a poll venue would have been captured as a chain.
+        // A match makes the next transport a compile error here rather than a
+        // fall-through into one of these.
+        match adapter_transport {
+            crate::venue::Transport::Stream { .. } => {}
+            // **A cursor venue is a different program.** No walk, no session,
+            // no rotation: the cursor loop IS the backfill, because asking for
+            // old blocks and asking for new ones is the same call at a
+            // different position.
+            crate::venue::Transport::Cursor { .. } => {
+                // **The cursor loop is behind `rh-chain`**, because
+                // `capture::cursor` is. Ungated, this line made `cargo build -p
+                // galata-datawatch` fail on the crate's OWN default features,
+                // and nothing noticed: the feature-matrix guard builds `--lib`
+                // only, so the one target that could not compile was the one
+                // target it never compiled.
+                #[cfg(feature = "rh-chain")]
+                {
+                    let shutdown = tokio_util::sync::CancellationToken::new();
+                    let signal = shutdown.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::signal::ctrl_c().await;
+                        signal.cancel();
+                    });
+                    return capture
+                        .run_cursor(
+                            shutdown,
+                            config.capture.cold_start_days as u64 * BLOCKS_PER_DAY,
+                        )
+                        .await
+                        .map_err(Box::<dyn std::error::Error>::from);
+                }
+                // Refused by name rather than by a link error or, worse, by
+                // falling through into the stream path and capturing a chain as
+                // though it were a socket.
+                #[cfg(not(feature = "rh-chain"))]
+                {
+                    return Err(format!(
+                        "{venue_name} is a cursor venue and this build has no cursor \
+                         loop. Rebuild with --features rh-chain."
+                    )
+                    .into());
+                }
+            }
+            // **A poll venue asks on a timer, and serves no history** — so no
+            // walk: the restart gap above is the whole of what it can say about
+            // the time this process was not running.
+            crate::venue::Transport::Poll { .. } => {
                 let shutdown = tokio_util::sync::CancellationToken::new();
                 let signal = shutdown.clone();
                 tokio::spawn(async move {
                     let _ = tokio::signal::ctrl_c().await;
                     signal.cancel();
                 });
-                return capture
-                    .run_cursor(
-                        shutdown,
-                        config.capture.cold_start_days as u64 * BLOCKS_PER_DAY,
-                    )
-                    .await
-                    .map_err(Box::<dyn std::error::Error>::from);
-            }
-            // Refused by name rather than by a link error or, worse, by falling
-            // through into the stream path and capturing a chain as though it
-            // were a socket.
-            #[cfg(not(feature = "rh-chain"))]
-            {
-                return Err(format!(
-                    "{venue_name} is a cursor venue and this build has no cursor \
-                     loop. Rebuild with --features rh-chain."
-                )
-                .into());
+                let polls = capture.run_polled(shutdown, &about).await?;
+                tracing::info!("{}", polls.report());
+                return Ok(());
             }
         }
 

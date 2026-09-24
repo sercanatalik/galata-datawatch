@@ -74,6 +74,19 @@ pub enum CaptureError {
         /// What it declared.
         endpoint: String,
     },
+    /// A polled venue that signs every request, with nothing to sign with.
+    ///
+    /// Refused before any request, because the alternative is an unsigned ask
+    /// answered by a refusal that looks exactly like a revoked key.
+    #[error(
+        "{endpoint} authenticates every request and this process has no signer for it. The \
+         venue's block names the variables that supply one; set them, or run a replay, which \
+         never asks"
+    )]
+    Unsigned {
+        /// What it declared.
+        endpoint: String,
+    },
 }
 
 /// Everything the loop is given.
@@ -598,6 +611,14 @@ impl Capture {
     /// The venue.
     pub fn venue(&self) -> &Venue {
         self.wiring.adapter.venue()
+    }
+
+    /// Bytes that arrived, as this venue's adapter files them.
+    ///
+    /// For the loops that fetch outside the adapter — a poll's answer — and
+    /// hand the bytes back to be classified by the one thing that knows how.
+    pub fn classify(&self, bytes: &[u8], recv_micros: i64) -> crate::record::Payload {
+        self.wiring.adapter.classify(bytes, recv_micros)
     }
 
     /// The clock the loop owns.

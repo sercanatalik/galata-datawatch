@@ -22,6 +22,8 @@
 //! [`Adapter`], which is a trait.
 
 pub mod backoff;
+#[cfg(feature = "capture")]
+pub mod poll;
 pub mod stream;
 
 pub use backoff::Backoff;

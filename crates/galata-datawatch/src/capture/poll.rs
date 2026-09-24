@@ -67,6 +67,44 @@ impl Polls {
 }
 
 impl Capture {
+    /// Poll the venue this capture was wired for, until the token is
+    /// cancelled — the ask built from its own [`Transport::Poll`].
+    ///
+    /// **Venue-free.** Where to ask, what, and what signs it all arrive in the
+    /// transport the adapter declared; the one signed `GET` is
+    /// [`crate::source::poll::PollSource`].
+    pub async fn run_polled(
+        &mut self,
+        shutdown: tokio_util::sync::CancellationToken,
+        about: &[Ticker],
+    ) -> Result<Polls, CaptureError> {
+        let (rest_url, path, symbols, signer) = match self.venue_transport() {
+            Transport::Poll {
+                rest_url,
+                path,
+                symbols,
+                signer,
+                ..
+            } => (rest_url, path, symbols, signer),
+            other => {
+                return Err(CaptureError::NotAPoll {
+                    endpoint: other.endpoint().to_string(),
+                });
+            }
+        };
+        let Some(signer) = signer else {
+            return Err(CaptureError::Unsigned {
+                endpoint: rest_url.to_string(),
+            });
+        };
+        let source = crate::source::poll::PollSource::new(rest_url, path, &symbols, signer);
+        self.run_poll(shutdown, about, |at| {
+            let source = source.clone();
+            async move { source.ask(at).await }
+        })
+        .await
+    }
+
     /// Poll until the token is cancelled.
     ///
     /// The fetch is a closure, like the walk's — which is not a concession to
@@ -76,6 +114,10 @@ impl Capture {
     /// `about` is the instrument a gap is attributed to; a poll covering many
     /// symbols still has to say *what* was missed, and the venue's answer
     /// covers all of them at once.
+    ///
+    /// **The fetch returns bytes, not a payload.** Classifying them is the
+    /// adapter's, and the moment they arrived is the loop's clock — read after
+    /// the answer, because receipt is when bytes arrived, not when we asked.
     pub async fn run_poll<F, Fut>(
         &mut self,
         shutdown: tokio_util::sync::CancellationToken,
@@ -84,7 +126,7 @@ impl Capture {
     ) -> Result<Polls, CaptureError>
     where
         F: Fn(i64) -> Fut,
-        Fut: std::future::Future<Output = Result<crate::record::Payload, Refusal>>,
+        Fut: std::future::Future<Output = Result<Vec<u8>, Refusal>>,
     {
         let interval = match self.venue_transport() {
             Transport::Poll {
@@ -107,7 +149,8 @@ impl Capture {
             let mut wait = Duration::from_micros(interval.max(1) as u64);
 
             match fetch(now).await {
-                Ok(payload) => {
+                Ok(bytes) => {
+                    let payload = self.classify(&bytes, self.now());
                     // **Archived whether or not it changed.** The record
                     // records arrivals, and *we asked and the venue answered*
                     // is an arrival. Collapsing identical states is a
@@ -191,95 +234,25 @@ mod tests {
     use super::*;
     use crate::adapters::rh_crypto;
     use crate::capture::{TestClock, Wiring};
-    use crate::normalise::{Normalise, NormaliseError};
-    use crate::record::{Payload, PayloadAddress};
     use crate::sink::testing::RecordingSink;
-    use crate::venue::{Adapter, Budget, ConnectionPolicy, Declaration, Paging};
-    use galata_wire::{Origin, Series, Venue};
-    use std::collections::BTreeMap;
+    use crate::venue::Adapter;
     use std::sync::Arc;
 
     const SECOND: i64 = 1_000_000;
     const AT: i64 = 1_789_941_180_000_000;
 
-    /// A polled venue, reduced to what the loop needs.
-    struct Polled {
-        venue: Venue,
-        declaration: Declaration,
-        tickers: BTreeMap<String, Ticker>,
-    }
-
-    impl Polled {
-        fn new() -> Polled {
-            Polled {
-                venue: Venue::new(rh_crypto::VENUE).unwrap(),
-                declaration: Declaration {
-                    streams: Vec::new(),
-                    historical: Vec::new(),
-                    paging: BTreeMap::from([(Series::Quotes, Paging::forward_from_start(1))]),
-                    budget: Budget {
-                        requests_per_minute: 12.0,
-                        min_historical_interval_ms: 5_000,
-                    },
-                    connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 0 },
-                    ws_url: "",
-                    rest_url: rh_crypto::REST_URL,
-                },
-                tickers: BTreeMap::from([("BTC-USD".into(), Ticker::new("BTC").unwrap())]),
-            }
-        }
-    }
-
-    impl Normalise for Polled {
-        fn venue(&self) -> &Venue {
-            &self.venue
-        }
-        fn normalise(&self, payload: &Payload) -> Result<Vec<Envelope>, NormaliseError> {
-            let parsed = rh_crypto::wire::response(&payload.payload)?;
-            Ok(rh_crypto::wire::read(
-                &self.venue,
-                &parsed,
-                &self.tickers,
-                payload.recv_micros,
-            ))
-        }
-    }
-
-    impl Adapter for Polled {
-        fn declaration(&self) -> &Declaration {
-            &self.declaration
-        }
-        fn transport(&self) -> Transport {
-            Transport::Poll {
-                rest_url: crate::venue::Endpoint::public(rh_crypto::REST_URL),
-                path: rh_crypto::BEST_BID_ASK_PATH,
-                interval_micros: 5 * SECOND,
-            }
-        }
-        fn series_of_channel(&self, channel: &str) -> Option<Series> {
-            (channel == "best_bid_ask").then_some(Series::Quotes)
-        }
-        fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload {
-            Payload {
-                seq: 0,
-                recv_micros,
-                address: PayloadAddress::Venue(rh_crypto::VENUE.into()),
-                channel: "best_bid_ask".into(),
-                kind: Series::Quotes.as_str().to_string(),
-                symbol: None,
-                origin: Origin::Fetched,
-                payload: bytes.to_vec(),
-            }
-        }
-        fn venue_symbol(&self, _ticker: &Ticker) -> Option<String> {
-            Some("BTC-USD".into())
-        }
-        fn interval_label(&self, _micros: i64) -> Option<String> {
-            None
-        }
-        fn venue_ticker(&self, _channel: &str, symbol: &str) -> Option<Ticker> {
-            self.tickers.get(symbol).cloned()
-        }
+    /// The real adapter, unsigned — these tests drive `run_poll` with their
+    /// own fetch, so nothing here asks the venue. This was a test-only
+    /// fixture until `poll-a-venue`, which made it the venue's adapter.
+    fn polled() -> Box<dyn Adapter> {
+        Box::new(
+            rh_crypto::RhCrypto::new(rh_crypto::Config {
+                tickers: vec!["BTC".into()],
+                poll_secs: 5,
+                credential: None,
+            })
+            .unwrap(),
+        )
     }
 
     struct Fixture {
@@ -290,11 +263,15 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with(polled())
+    }
+
+    fn fixture_with(adapter: Box<dyn Adapter>) -> Fixture {
         let root = tempfile::tempdir().unwrap();
         let clock = Arc::new(TestClock::at(AT));
         let sink = Arc::new(RecordingSink::default());
         let capture = Capture::new(Wiring {
-            adapter: Box::new(Polled::new()),
+            adapter,
             sink: sink.clone(),
             clock: clock.clone(),
             archive_root: root.path().join("archive"),
@@ -345,12 +322,12 @@ mod tests {
         let mut f = fixture();
         let (shutdown, left) = after(3);
         let stop = shutdown.clone();
-        let adapter = Polled::new();
 
         let polls = f
             .capture
             .run_poll(shutdown, &[Ticker::new("BTC").unwrap()], |at| {
-                let payload = adapter.classify(&unchanged(), at);
+                let _ = at;
+                let payload = unchanged();
                 if left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) <= 1 {
                     stop.cancel();
                 }
@@ -376,13 +353,13 @@ mod tests {
         let clock = f.clock.clone();
         let (shutdown, left) = after(4);
         let stop = shutdown.clone();
-        let adapter = Polled::new();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         f.capture
             .run_poll(shutdown, &[Ticker::new("BTC").unwrap()], |at| {
                 let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let payload = adapter.classify(&unchanged(), at);
+                let _ = at;
+                let payload = unchanged();
                 clock.advance(5 * SECOND);
                 if left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) <= 1 {
                     stop.cancel();
@@ -438,13 +415,13 @@ mod tests {
         let clock = f.clock.clone();
         let (shutdown, left) = after(2);
         let stop = shutdown.clone();
-        let adapter = Polled::new();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         f.capture
             .run_poll(shutdown, &[Ticker::new("BTC").unwrap()], |at| {
                 let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let payload = adapter.classify(&unchanged(), at);
+                let _ = at;
+                let payload = unchanged();
                 clock.advance(5 * SECOND);
                 if left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) <= 1 {
                     stop.cancel();
@@ -506,5 +483,166 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, CaptureError::NotAPoll { .. }), "{error}");
+    }
+
+    /// rh-crypto, signed, asking the local stand-in rather than the venue.
+    fn signed_reaching(url: &'static str) -> Box<dyn Adapter> {
+        use base64::Engine;
+        let seed = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        Box::new(
+            rh_crypto::RhCrypto::new(rh_crypto::Config {
+                tickers: vec!["BTC".into(), "ETH".into()],
+                poll_secs: 1,
+                credential: Some(Arc::new(
+                    rh_crypto::sign::Credential::new("API-KEY", &seed).unwrap(),
+                )),
+            })
+            .unwrap()
+            .reaching(url),
+        )
+    }
+
+    /// Cancel once the stand-in has been asked `n` times.
+    fn stop_after_asked(
+        asked: Arc<std::sync::Mutex<Vec<rh_crypto::adapter::stand_in::Asked>>>,
+        n: usize,
+    ) -> tokio_util::sync::CancellationToken {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            while asked.lock().unwrap().len() < n {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // Past the answer's handling, not merely its arrival.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            stop.cancel();
+        });
+        shutdown
+    }
+
+    #[tokio::test]
+    async fn an_answered_poll_is_archived_through_the_one_path() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, asked) =
+            rh_crypto::adapter::stand_in::serve(200, rh_crypto::adapter::stand_in::ANSWER).await;
+        let mut f = fixture_with(signed_reaching(url));
+        let shutdown = stop_after_asked(asked.clone(), 1);
+        let about = [Ticker::new("BTC").unwrap(), Ticker::new("ETH").unwrap()];
+
+        let polls = f.capture.run_polled(shutdown, &about).await.unwrap();
+
+        assert!(polls.answered >= 1, "{}", polls.report());
+        let quoted: std::collections::BTreeSet<String> = f
+            .sink
+            .emitted()
+            .iter()
+            .filter(|e| matches!(e.event, Event::Quote(_)))
+            .filter_map(|e| e.ticker().map(|t| t.as_str().to_string()))
+            .collect();
+        assert_eq!(
+            quoted,
+            ["BTC", "ETH"].iter().map(|s| s.to_string()).collect(),
+            "one answer, both instruments, through the one path"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_throttled_answer_is_a_throttled_gap() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Answered once, then throttled: a gap is dated from the last durable
+        // receipt, so a first poll that fails has nothing to bound it from —
+        // the restart gap at boot covers that time instead.
+        let (url, asked) = rh_crypto::adapter::stand_in::serve_script(&[
+            (200, rh_crypto::adapter::stand_in::ANSWER),
+            (429, "slow down"),
+        ])
+        .await;
+        let mut f = fixture_with(signed_reaching(url));
+        // The loop's clock is a test clock, frozen unless moved; a gap is the
+        // time between the last answer and the failure, so time must pass.
+        let clock = f.clock.clone();
+        let watched = asked.clone();
+        tokio::spawn(async move {
+            while watched.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            clock.advance_secs(2);
+        });
+        let shutdown = stop_after_asked(asked, 2);
+
+        let polls = f
+            .capture
+            .run_polled(shutdown, &[Ticker::new("BTC").unwrap()])
+            .await
+            .unwrap();
+
+        assert!(polls.missed >= 1 && polls.gaps >= 1, "{}", polls.report());
+        assert!(
+            f.sink.emitted().iter().any(|e| matches!(
+                &e.event,
+                Event::Gap(g) if g.cause == GapCause::Throttled
+            )),
+            "the gap does not say it was throttled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_with_no_signer_refuses_before_asking() {
+        let (url, asked) = rh_crypto::adapter::stand_in::serve(200, "{}").await;
+        let _ = url;
+        let mut f = fixture();
+        let refused = f
+            .capture
+            .run_polled(
+                tokio_util::sync::CancellationToken::new(),
+                &[Ticker::new("BTC").unwrap()],
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(CaptureError::Unsigned { .. })),
+            "{refused:?}"
+        );
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "an unsigned request was sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_polled_archive_rebuilds_with_no_credential() {
+        // What the scheduled lane does nightly: rebuild the tape from what the
+        // poll archived, with an adapter built by `for_replay` — no signer, no
+        // key, nothing that could ask.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, asked) =
+            rh_crypto::adapter::stand_in::serve(200, rh_crypto::adapter::stand_in::ANSWER).await;
+        let mut f = fixture_with(signed_reaching(url));
+        let shutdown = stop_after_asked(asked, 1);
+        let about = [Ticker::new("BTC").unwrap(), Ticker::new("ETH").unwrap()];
+        f.capture.run_polled(shutdown, &about).await.unwrap();
+
+        let replay = rh_crypto::RhCrypto::new(rh_crypto::Config {
+            tickers: vec!["BTC".into(), "ETH".into()],
+            poll_secs: 1,
+            credential: None,
+        })
+        .unwrap();
+        let archive = f._root.path().join("archive");
+        let tape = f._root.path().join("tape");
+        let rebuilt =
+            crate::tape::rebuild(&archive, &tape, &replay, None, i64::MIN, i64::MAX).unwrap();
+        assert!(rebuilt.rows >= 2, "{}", rebuilt.report());
+        assert_eq!(crate::tape::check_layout(&tape), Vec::new());
+        let labelled: Vec<String> = galata_segments::partitions(&tape)
+            .iter()
+            .flat_map(|p| galata_segments::list_segments(p))
+            .filter_map(|(_, path)| {
+                galata_segments::label(&path, crate::tape::VENUE_LABEL).unwrap()
+            })
+            .collect();
+        assert!(
+            !labelled.is_empty() && labelled.iter().all(|v| v == "rh-crypto"),
+            "{labelled:?}"
+        );
     }
 }

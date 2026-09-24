@@ -350,6 +350,23 @@ pub struct VenueConfig {
     /// every reader can reach.
     #[serde(default)]
     pub rpc_url_var: Option<String>,
+    /// Seconds between polls, **on a poll venue**, and required there.
+    ///
+    /// Also the width of the gap a single failed poll produces, which is why
+    /// it is declared rather than defaulted — and why no default is invented
+    /// for a venue whose limits are undocumented and explicitly variable.
+    #[serde(default)]
+    pub poll_secs: Option<u32>,
+    /// The variable naming this venue's API key, **on a signing venue**.
+    ///
+    /// A name, never the key — resolved through the `SecretSource`, like every
+    /// other secret, and never read by a tool that does not connect.
+    #[serde(default)]
+    pub api_key_var: Option<String>,
+    /// The variable naming this venue's signing key (a base64 Ed25519 seed),
+    /// **on a signing venue**. A name, never the key.
+    #[serde(default)]
+    pub private_key_var: Option<String>,
 }
 
 /// Everything the process was told.

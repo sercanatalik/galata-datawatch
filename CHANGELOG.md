@@ -66,8 +66,10 @@ First release. Nothing is on crates.io yet, so everything is new.
 - The rh-chain adapter: capture at the head, readers bounded at finalized,
   reorgs recorded as rows and joined to what they contradict. A provider URL is
   a secret — `Endpoint` prints a public URL and withholds a held one.
-- The rh-crypto adapter's signing and poll semantics. **The live endpoint has
-  not been called**: no credentials were obtained and none should be.
+- The rh-crypto adapter: declarable (`poll_secs` required, keys named by
+  variable), booted as a poll, every request signed over its path and query.
+  **The live endpoint has not been called**: no credentials were obtained and
+  none should be; the request is proved against a local server.
 - The tape: parquet a `SELECT` can read with no flags, rebuilt deterministically
   — twice over a frozen archive gives identical segment names and identical
   bytes. Every tape segment holds one venue and says so in its footer

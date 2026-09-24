@@ -41,6 +41,8 @@ pub fn known() -> Vec<&'static str> {
         hyperliquid::VENUE,
         #[cfg(feature = "rh-chain")]
         rh_chain::VENUE,
+        #[cfg(feature = "rh-crypto")]
+        rh_crypto::VENUE,
     ]
     .to_vec()
 }
@@ -88,6 +90,9 @@ pub enum AdapterConfig {
     /// Robinhood Chain.
     #[cfg(feature = "rh-chain")]
     RhChain(rh_chain::Config),
+    /// Robinhood Crypto.
+    #[cfg(feature = "rh-crypto")]
+    RhCrypto(rh_crypto::Config),
 }
 
 /// Whether a venue supplies a series, by either route.
@@ -110,6 +115,9 @@ pub fn supplies(venue: &str, series: galata_wire::Series) -> bool {
             series,
             galata_wire::Series::Transfers | galata_wire::Series::Mints
         ),
+        // The venue serves one thing: the current top of book, when asked.
+        #[cfg(feature = "rh-crypto")]
+        rh_crypto::VENUE => series == galata_wire::Series::Quotes,
         _ => false,
     }
 }
@@ -239,6 +247,68 @@ impl AdapterConfig {
                     })
                     .collect::<Result<Vec<_>, ResolveError>>()?,
             })),
+            #[cfg(feature = "rh-crypto")]
+            rh_crypto::VENUE => {
+                // **Required, and no default invented.** The venue documents no
+                // limit — "undocumented and explicitly variable" — and the
+                // interval is also the width of the gap one failure produces.
+                let poll_secs = match venue.poll_secs {
+                    Some(secs) if secs >= 1 => secs,
+                    Some(_) => {
+                        return Err(ResolveError::Unknown {
+                            name: "rh-crypto declares poll_secs = 0; a poll needs at least a \
+                                   second between asks"
+                                .into(),
+                            known: known().join(", "),
+                        });
+                    }
+                    None => {
+                        return Err(ResolveError::Unknown {
+                            name: "rh-crypto declares no `poll_secs`. The venue's limits are \
+                                   undocumented and variable, and the interval is also the \
+                                   width of a gap one failed poll produces, so it is declared \
+                                   rather than defaulted"
+                                .into(),
+                            known: known().join(", "),
+                        });
+                    }
+                };
+                let credential = match secrets {
+                    // Replay normalises bytes and never asks, so it reads no
+                    // key at all — the lane can rebuild this venue's tape.
+                    Secrets::Withhold => None,
+                    Secrets::Resolve(secrets) => {
+                        let named = |field: &str, var: &Option<String>| {
+                            var.clone().ok_or_else(|| ResolveError::Unknown {
+                                name: format!(
+                                    "rh-crypto declares no `{field}`. Every request to this \
+                                     venue is signed, market data included, and an unsigned \
+                                     one is a 401 that looks exactly like a revoked key"
+                                ),
+                                known: known().join(", "),
+                            })
+                        };
+                        let api_key_var = named("api_key_var", &venue.api_key_var)?;
+                        let private_key_var = named("private_key_var", &venue.private_key_var)?;
+                        let api_key = secrets.secret(&api_key_var).map_err(ResolveError::Secret)?;
+                        let private_key = secrets
+                            .secret(&private_key_var)
+                            .map_err(ResolveError::Secret)?;
+                        let credential =
+                            rh_crypto::sign::Credential::from_secrets(&api_key, &private_key)
+                                .map_err(|error| ResolveError::Unknown {
+                                    name: format!("{private_key_var}: {error}"),
+                                    known: known().join(", "),
+                                })?;
+                        Some(std::sync::Arc::new(credential))
+                    }
+                };
+                Ok(AdapterConfig::RhCrypto(rh_crypto::Config {
+                    tickers: venue.instruments.iter().map(|i| i.ticker.clone()).collect(),
+                    poll_secs,
+                    credential,
+                }))
+            }
             other => Err(ResolveError::Unknown {
                 name: other.to_string(),
                 known: known().join(", "),
@@ -260,12 +330,12 @@ impl AdapterConfig {
 #[cfg(feature = "capture")]
 pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> {
     // See `History::for_config`: an empty `AdapterConfig` still needs an arm.
-    #[cfg(not(any(feature = "hyperliquid", feature = "rh-chain")))]
+    #[cfg(not(any(feature = "hyperliquid", feature = "rh-chain", feature = "rh-crypto")))]
     {
         let _ = config;
         return Ok(());
     }
-    #[cfg(any(feature = "hyperliquid", feature = "rh-chain"))]
+    #[cfg(any(feature = "hyperliquid", feature = "rh-chain", feature = "rh-crypto"))]
     match config {
         #[cfg(feature = "hyperliquid")]
         AdapterConfig::Hyperliquid(c) => {
@@ -300,6 +370,12 @@ pub async fn check_universe(config: &AdapterConfig) -> Result<(), ResolveError> 
         // provider.
         #[cfg(feature = "rh-chain")]
         AdapterConfig::RhChain(_) => Ok(()),
+        // **Unchecked, and said so.** The listing endpoint is signed like every
+        // other, and how the venue answers an unknown symbol has not been
+        // observed — no credentials were obtained. The first poll is where an
+        // unlisted symbol shows itself, and the archive keeps that answer.
+        #[cfg(feature = "rh-crypto")]
+        AdapterConfig::RhCrypto(_) => Ok(()),
     }
 }
 
@@ -314,6 +390,10 @@ pub fn build(config: AdapterConfig) -> Result<Box<dyn Adapter>, ResolveError> {
         }
         #[cfg(feature = "rh-chain")]
         AdapterConfig::RhChain(c) => Ok(Box::new(rh_chain::RhChain::new(c)?) as Box<dyn Adapter>),
+        #[cfg(feature = "rh-crypto")]
+        AdapterConfig::RhCrypto(c) => {
+            Ok(Box::new(rh_crypto::RhCrypto::new(c)?) as Box<dyn Adapter>)
+        }
     }
 }
 
@@ -356,11 +436,17 @@ impl History {
                 name: "rh-chain has no separate history walk; its cursor loop backfills".into(),
                 known: known().join(", "),
             }),
+            // The venue serves the current state and nothing before it.
+            #[cfg(feature = "rh-crypto")]
+            AdapterConfig::RhCrypto(_) => Err(ResolveError::Unknown {
+                name: "rh-crypto serves no history; it is polled for the current state".into(),
+                known: known().join(", "),
+            }),
             // **`AdapterConfig` is EMPTY with no venue feature on**, and a
             // match over a reference to an empty enum is not exhaustive on its
             // own — Rust will not infer unreachability through the reference.
             // This arm cannot run, because no value of the type can be built.
-            #[cfg(not(any(feature = "hyperliquid", feature = "rh-chain")))]
+            #[cfg(not(any(feature = "hyperliquid", feature = "rh-chain", feature = "rh-crypto")))]
             _ => Err(ResolveError::Unknown {
                 name: "this build compiles in no venue".into(),
                 known: String::new(),
@@ -458,6 +544,9 @@ mod tests {
                 decimals: Some(18),
             }],
             rpc_url_var: rpc_url_var.map(str::to_string),
+            poll_secs: None,
+            api_key_var: None,
+            private_key_var: None,
         }
     }
 
@@ -536,5 +625,94 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(said.contains("contract"), "{said}");
+    }
+
+    /// Two named secrets, for a venue that signs.
+    #[cfg(feature = "rh-crypto")]
+    struct Keys;
+
+    #[cfg(feature = "rh-crypto")]
+    impl SecretSource for Keys {
+        fn secret(&self, name: &str) -> Result<Secret, ConfigError> {
+            match name {
+                "GALATA_RHCRYPTO_API_KEY" => Ok(Secret::new("API-KEY")),
+                // A valid base64 32-byte seed.
+                "GALATA_RHCRYPTO_PRIVATE_KEY" => {
+                    Ok(Secret::new("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="))
+                }
+                other => Err(ConfigError::SecretAbsent {
+                    name: other.to_string(),
+                }),
+            }
+        }
+    }
+
+    #[cfg(feature = "rh-crypto")]
+    fn crypto_venue(poll_secs: Option<u32>) -> VenueConfig {
+        VenueConfig {
+            market: "mainnet".into(),
+            series: vec![galata_wire::Series::Quotes],
+            candle: "1m".into(),
+            instruments: vec![crate::config::InstrumentDecl {
+                ticker: "BTC".into(),
+                dex: None,
+                contract: None,
+                decimals: None,
+            }],
+            rpc_url_var: None,
+            poll_secs,
+            api_key_var: Some("GALATA_RHCRYPTO_API_KEY".into()),
+            private_key_var: Some("GALATA_RHCRYPTO_PRIVATE_KEY".into()),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "rh-crypto")]
+    fn rh_crypto_is_declared_with_its_interval() {
+        assert!(known().contains(&rh_crypto::VENUE));
+        assert!(supplies(rh_crypto::VENUE, galata_wire::Series::Quotes));
+        let AdapterConfig::RhCrypto(config) =
+            AdapterConfig::from_declared(rh_crypto::VENUE, &crypto_venue(Some(5)), &Keys).unwrap()
+        else {
+            panic!("rh-crypto");
+        };
+        assert_eq!(config.poll_secs, 5);
+        assert!(config.credential.is_some(), "capture signs");
+        let adapter = build(AdapterConfig::RhCrypto(config)).unwrap();
+        let crate::venue::Transport::Poll {
+            interval_micros,
+            signer,
+            ..
+        } = adapter.transport()
+        else {
+            panic!("a poll");
+        };
+        assert_eq!(interval_micros, 5_000_000);
+        assert!(signer.is_some());
+    }
+
+    #[test]
+    #[cfg(feature = "rh-crypto")]
+    fn no_interval_is_refused_and_none_invented() {
+        for poll_secs in [None, Some(0)] {
+            let said =
+                AdapterConfig::from_declared(rh_crypto::VENUE, &crypto_venue(poll_secs), &Keys)
+                    .unwrap_err()
+                    .to_string();
+            assert!(said.contains("poll_secs"), "{said}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "rh-crypto")]
+    fn replay_builds_rh_crypto_with_no_credential() {
+        // No secret source exists here to ask, and none is needed.
+        let AdapterConfig::RhCrypto(config) =
+            AdapterConfig::for_replay(rh_crypto::VENUE, &crypto_venue(Some(5))).unwrap()
+        else {
+            panic!("rh-crypto");
+        };
+        assert!(config.credential.is_none());
+        build(AdapterConfig::RhCrypto(config)).unwrap();
     }
 }

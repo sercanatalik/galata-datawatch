@@ -174,6 +174,13 @@ pub enum Transport {
         /// **Also the width of a gap a single failure produces**, which is why
         /// it is a declaration rather than a tuning knob.
         interval_micros: i64,
+        /// The venue's symbols, asked for in one request as repeated `symbol`
+        /// parameters — **sorted**, so one declaration is one request shape
+        /// across restarts.
+        symbols: Vec<String>,
+        /// What signs each request, carried the way `Cursor` carries a held
+        /// provider URL. `None` from a replay, which does not connect.
+        signer: Option<Signer>,
     },
     /// We ask, by position, and the position is a block number.
     Cursor {
@@ -214,6 +221,47 @@ impl Transport {
             Transport::Poll { rest_url, .. } => rest_url,
             Transport::Cursor { rpc_url, .. } => rpc_url,
         }
+    }
+}
+
+/// Signs one request, for a venue that authenticates every ask.
+///
+/// A trait rather than a type because this module sits above the seam and a
+/// venue's key type does not: the credential lives with its adapter, behind
+/// its feature, and hands only this across.
+pub trait RequestSigner: Send + Sync {
+    /// The headers that authenticate `method path_and_query` with `body`, at
+    /// a moment the loop read from its own clock.
+    ///
+    /// **`path_and_query` is exactly what is requested**, query included:
+    /// signing a shorter string than the one sent is a refusal on every
+    /// request with no other symptom.
+    fn headers(
+        &self,
+        at_micros: i64,
+        path_and_query: &str,
+        method: &str,
+        body: &str,
+    ) -> Vec<(&'static str, String)>;
+}
+
+/// A shared [`RequestSigner`] — compared by identity, printed as nothing.
+#[derive(Clone)]
+pub struct Signer(pub std::sync::Arc<dyn RequestSigner>);
+
+impl PartialEq for Signer {
+    fn eq(&self, other: &Signer) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Signer {}
+
+impl std::fmt::Debug for Signer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A signer holds a private key. Its presence is the whole of what may
+        // be said.
+        f.write_str("Signer(withheld)")
     }
 }
 

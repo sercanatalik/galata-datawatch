@@ -420,10 +420,24 @@ called**, and that is stated rather than implied.*
 
 ### Still open in this tier
 
+- ~~**Nothing a user runs could reach any of it.**~~ **Done, 2026-09-24
+  (`poll-a-venue`)**: `rh-crypto` was absent from `known()`, `AdapterConfig`
+  and `build()`, its only adapter was a test fixture, `run_poll` had no caller
+  outside tests — and `boot` sent *every* non-stream transport to the cursor
+  loop, so a poll venue would have been captured as a chain. Now it is
+  declarable (`poll_secs` required, keys by variable name), `boot` matches the
+  transport three ways, and `Capture::run_polled` asks through one venue-free
+  signed `GET` (`source/poll.rs`). Proved against a local server: the
+  signature **verifies** over the path *with* its query, a `429` is a
+  `Throttled` gap, and a polled archive rebuilds with no credential.
+  Found on the way: `boot` resolved the adapter with a hard-coded
+  `&EnvSecrets`, so under the vault binary a chain provider's URL came from
+  the environment rather than the vault — fixed.
 - **The live endpoint.** No credentials were obtained and none should be. The
   response shape rests on published documentation that **disagrees with itself**
-  about whether a top-level `price` exists; the decoder requires none, and the
-  record is what will settle it.
+  about whether a top-level `price` exists — and, since, about whether the path
+  is `/api/v1/` or `/api/v2/`; the decoder requires no `price`, the path is one
+  constant, and the record is what will settle both.
 - ~~**The poll loop itself**~~ — **done**: `Capture::run_poll`, with every poll
   archived (including unchanged ones), consecutive failures widening **one**
   gap, and a `429` backing off where an unreachable venue does not. Exercised

@@ -117,6 +117,31 @@ instruments = [
 # before and after a corporate action would otherwise carry amounts computed
 # under different multipliers with nothing saying which.
 
+# ROBINHOOD CRYPTO IS NOT DECLARED HERE, BECAUSE EVERY REQUEST IS SIGNED.
+#
+# Market data included: there is no anonymous read. To poll it:
+#
+#   [venue.rh-crypto]
+#   market = "mainnet"
+#   candle = "1m"
+#   series = ["quotes"]
+#   # REQUIRED, and no default is invented: the venue's limits are
+#   # undocumented and variable, and the interval is also the width of the gap
+#   # one failed poll produces.
+#   poll_secs = 5
+#   # NAMES OF VARIABLES, never the keys -- resolved through the secret source
+#   # (the environment, or the vault binary's vault). The private key is the
+#   # base64 32-byte Ed25519 SEED, not a 64-byte keypair and not PKCS#8; each
+#   # of those is refused by name.
+#   api_key_var = "GALATA_RHCRYPTO_API_KEY"
+#   private_key_var = "GALATA_RHCRYPTO_PRIVATE_KEY"
+#   # The ticker as this tree names it; the venue's `BTC-USD` is composed.
+#   instruments = [{ ticker = "BTC" }, { ticker = "ETH" }]
+#
+# NOT YET CALLED LIVE. The request, its signature over the path WITH its query,
+# and the 429 mapping are proved against a local server; the published docs
+# disagree on /api/v1/ versus /api/v2/, and the first live poll settles it.
+
 # NOR IS [watch], AND THAT MEANS ONLY STRUCTURAL PROBLEMS ARE CHECKED.
 #
 # The status surface REPORTS AND NEVER JUDGES -- a threshold inside capture

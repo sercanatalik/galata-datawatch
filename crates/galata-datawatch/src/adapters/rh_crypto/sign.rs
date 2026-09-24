@@ -122,6 +122,17 @@ impl Credential {
         })
     }
 
+    /// The same, from the two secrets a configuration names.
+    ///
+    /// **The one place their values leave the `Secret` type**, and they leave
+    /// it to become a signing key, which prints as nothing either.
+    pub fn from_secrets(
+        api_key: &crate::config::Secret,
+        private_key: &crate::config::Secret,
+    ) -> Result<Credential, SignError> {
+        Credential::new(api_key.expose(), private_key.expose())
+    }
+
     /// The key, which is not a secret.
     pub fn api_key(&self) -> &str {
         &self.api_key
@@ -173,6 +184,20 @@ impl Signed {
             ("x-timestamp", self.timestamp.to_string()),
             ("x-signature", self.signature.clone()),
         ]
+    }
+}
+
+impl crate::venue::RequestSigner for Credential {
+    fn headers(
+        &self,
+        at_micros: i64,
+        path_and_query: &str,
+        method: &str,
+        body: &str,
+    ) -> Vec<(&'static str, String)> {
+        self.sign(at_micros, path_and_query, method, body)
+            .headers()
+            .to_vec()
     }
 }
 

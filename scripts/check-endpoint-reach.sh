@@ -88,6 +88,12 @@ root = pathlib.Path(sys.argv[1])
 # dialled. Nowhere else.
 EXPOSE_ALLOWED = {
     "crates/galata-datawatch/src/source/stream.rs",
+    # The one signed GET every polled venue shares — the poll's `stream.rs`.
+    # Added 2026-09-24 with `poll-a-venue`.
+    "crates/galata-datawatch/src/source/poll.rs",
+    # Where two `Secret`s become a signing key (`Secret::expose`, not
+    # `Endpoint::expose` — see the note below). Added with `poll-a-venue`.
+    "crates/galata-datawatch/src/adapters/rh_crypto/sign.rs",
     "crates/galata-datawatch/src/adapters/rh_chain/client.rs",
     "crates/galata-datawatch/src/venue/transport.rs",   # the accessor itself
     "crates/galata-datawatch/src/config/source.rs",     # Secret::expose lives here
