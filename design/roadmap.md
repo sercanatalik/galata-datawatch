@@ -344,6 +344,21 @@ comment.
 > record's segment counts per closed day, and a chart — with no node process
 > running.
 
+**Exit, met through the API — 2026-09-24**, against the release tower (on
+`:8787`, because an operator's tower already held `:8777`) and the real
+record: six instruments with their ages (`/v1/instruments`: BTC, ETH, HYPE,
+GOLD, XYZ100, CL, each last seen 61.4 h before — capture has not run since
+2026-09-22), segment counts per closed day (`/v1/overdue`), 19,041 candle rows
+behind the chart (`/v1/tape/candles`), the page served by the binary alone,
+and no vite or node server running. **Not observed: the chart rendering on
+screen** — no browser was reachable from the session, and a pixel is not
+something the API can vouch for.
+
+**Noticed and left alone:** the real `var/archive` has never been compacted —
+`venue=hyperliquid/kind=quotes/date=2026-09-20` holds 1,101 segments —
+because the Tier 9 lane is not installed on this machine. Compacting the
+operator's record is the operator's step.
+
 ---
 
 ## Tier 7 — rh-chain
