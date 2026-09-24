@@ -845,8 +845,115 @@ vault is ever vendored under another name. Planted, the guard goes red naming
 optional dependency even with its feature off"*, so an unreachable git URL fails
 the build regardless, and concluded that galata-vault needed a public remote
 before galata could depend on it in any form. True when taken, and void now:
-galata-vault is a registry dependency at 0.1.0. The finding did not expire
-because it was wrong; it expired because somebody published the crate.
+galata-vault became a registry dependency at 0.1.0 and is now resolved at
+0.4.0. The finding did not expire because it was wrong; it expired because
+somebody published the crate.
+
+### The 0.1 graph before the 0.4 migration — 2026-09-23
+
+The earlier `221 / 310 -> 414 / 104` figures do not reproduce as written under
+the workspace's pinned Cargo 1.98.1. The upgrade therefore measures package
+sets again rather than editing one number into another:
+
+```
+  rustc                                           1.98.1
+  cargo                                           1.98.1
+
+  cargo tree --workspace --prefix none
+    unique output packages                            496
+
+  cargo tree -p galata-datawatch --features bin --prefix none
+    unique output packages                            335
+
+  cargo tree -p galata-vault --prefix none
+    unique output packages                            276
+
+  cargo tree -p galata-datawatch-vault --prefix none
+    unique output packages                            484
+    packages not in the `bin` Datawatch tree          157
+```
+
+These counts are package-output lines from `cargo tree`, deduplicated with
+`sort -u`; the marginal figure is the set difference between the vault-backed
+member and the `bin` Datawatch tree. The post-upgrade section below repeats the
+same commands so the two graphs are comparable.
+
+### The 0.4 graph after the registry migration — 2026-09-23
+
+The workspace now resolves `galata-vault 0.4.0` from crates.io. The lockfile
+contains one Vault package and none of the former `client`, `keys`, `proto` or
+`seal` packages:
+
+```
+                                      0.1 graph     0.4 graph     change
+  workspace union                         496           489          -7
+  galata-datawatch --features bin         335           335           0
+  galata-vault alone                      276           268          -8
+  galata-datawatch-vault                  484           478          -6
+  marginal over datawatch `bin`           157           151          -6
+```
+
+The consolidation does not make the vault boundary disappear. It removes six
+packages from Datawatch's marginal vault graph, while the wall still contains
+151 packages outside the published `bin` tree. Those figures count output lines
+under Cargo 1.98.1; they do not retroactively make the older `221 / 104 /
+310 -> 414` table reproducible, and the table above is the comparison this
+change owns.
+
+### Published 0.4.0 canary — 2026-09-23
+
+The canary used the GitHub `v0.4.0` macOS ARM64 release archives, not a local
+Vault build. Their published SHA-256 values verified before extraction:
+
+```
+  gv-aarch64-apple-darwin.tar.xz
+    26ba96d1bbbda7ef8b8bfa286f584b6ea9d25f4c515cc6f8f5faa4b6839245dd
+  gv-server-aarch64-apple-darwin.tar.xz
+    d3e893f8d4ba79945ab058af0b705d2983db585655c92aba268c003eea012b75
+```
+
+`gv --version` reported `0.4.0`; Datawatch's lockfile resolved the crates.io
+`galata-vault 0.4.0` package. The published server first refused a `0755` data
+directory and started only after mode `0700`, as required. A fresh project,
+`prod` environment, recovery kit, config document and two secrets were created
+in an isolated home. A real Hyperliquid walk and a local NATS connection were
+used for startup.
+
+```text
+  credential / condition                         observed result
+  config scope, no broker                        capture started; venue walk ran
+  read --only GALATA_DATAWATCH_PASSWORD          NATS connected; archive created
+  config scope, broker-backed                    GALATA_DATAWATCH_PASSWORD named;
+                                                 cannot decrypt secrets
+  no token                                       neither token source was set
+  revoked token                                  unknown, revoked, or expired vault
+  one-second token after three seconds            token has expired
+  both token sources                             set exactly one
+  token file mode 0644                            must be 0600 or 0400
+```
+
+After the broker-backed process was running, the Vault server was stopped. The
+process remained alive for the following twelve seconds and its `var` tree grew
+from 6 to 30 files. A fresh process with the Vault still down refused to start;
+it did not read a file or cached document.
+
+Ten broker-backed starts were then measured from process spawn to the first
+`publishing` log, including Vault config fetch, broker-secret fetch and NATS
+connection. The first followed a Vault server restart; the remaining nine were
+warm:
+
+```
+  first after server restart                 708.825 ms
+  warm median                               719.599 ms
+  warm mean                                 770.977 ms
+  warm range                                485.960 .. 1520.509 ms
+```
+
+These are canary observations, not startup constants. The rollback boundary is
+the one in the design: a Datawatch binary may return to `0.1` only before it
+has used `0.4`-created vault state. This canary created such state, so its safe
+client version remains `0.4`; rollback means restoring the server and Datawatch
+process, not downgrading the client.
 
 ---
 

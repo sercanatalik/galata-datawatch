@@ -262,31 +262,32 @@ different shape from the one planned here.
 
 ## Tier 5 — the vault
 
-*The seam is built. **The release-ordering blocker was a conflation and is
-gone.***
+*Built against the published `galata-vault 0.4` SDK.*
 
-This tier used to read *"blocked on galata-vault 0.1.0 reaching crates.io"*,
-and then *"still unpublished"*. **Published 2026-09-21**: `cargo search
-galata-vault` returns all ten crates at 0.1.0. Nothing in this tier is blocked
-any more.
+The first release was `0.1.0` on 2026-09-21. The current release is `0.4.0`,
+which consolidates the former ten packages into one feature-gated crate. The
+unpublished `galata-datawatch-vault` member now resolves that registry package;
+its root API required no source migration.
 
-`Config::load_from_str` takes the text and its provenance rather than a path,
-and `Origin::Document { name, version }` has existed since Tier 0. So a
-vault-backed loader is three lines wherever the vault client already is:
+`Config::load_from_str` takes text and provenance rather than a path, and
+`Origin::Document { name, version }` has existed since Tier 0. The vault-backed
+member fetches the document once, then sends the exact text through that same
+validator:
 
 ```rust
-let (text, version) = vault.get("datawatch").await?;
-Config::load_from_str(&text, Origin::Document { name, version }, &Resolver)
+let vault = Vault::from_env()?;
+let config = VaultConfig::fetch(&vault, "datawatch")?;
 ```
 
-**This crate takes no vault dependency to be vault-backed**, and therefore
-publishes without one. The decision made three tiers ago to name the second
-source before it existed turned out to buy more than tidy refusals.
+**The published crates take no vault dependency to be vault-backed.** The
+dependency stops at a fifth, unpublished workspace member, and
+`check-vault-reach.sh` asks Cargo rather than trusting the boundary to a
+comment.
 
 ### Done
 
-- **`ConfigSource` / `SecretSource`**, with `FileSource` and `EnvSecrets`. A
-  vault implementation of either needs nothing from here but the trait.
+- **`ConfigSource` / `SecretSource`**, with `FileSource`, `EnvSecrets`,
+  `VaultConfig`, and `VaultSecrets`.
 - **`Secret`** — no `Display`, and a `Debug` that withholds. A secret reaches a
   log through the most ordinary line somebody writes.
 - **Both `GALATA_CONFIG` and `GALATA_CONFIG_DOCUMENT` set is refused**, naming
@@ -296,26 +297,14 @@ source before it existed turned out to buy more than tidy refusals.
 - **`check-secret-reach.sh`** — a secret is read in one module, and no vault
   authentication variable is named anywhere. `GV_TOKEN` and `GV_TOKEN_FILE` are
   the vault's rule, stated once, in the vault.
-
-### Still open
-
-- ~~**A vault-backed binary**, which needs the vault published.~~ **Done**, and
-  it is `galata-datawatch-vault` — a fifth workspace member that does not
-  publish, so the four that do still link none of it. Measured: the vault costs
-  **104** crates on this tree, against the predecessor's carried 225, which was
-  its tree taken alone. The wall is `check-vault-reach.sh`, watched failing.
-- ~~**A secret the vault holds.**~~ **Done.** The document came from the vault
-  and the broker password came from the process environment, because `boot`
-  named `EnvSecrets` in its own body. It now takes a `&dyn SecretSource`, and
-  `VaultSecrets` is one. Measured against a real `gv-server local`: a `read`
-  token serves it, and a `config` token is refused with the vault's own
-  sentence — *"this credential can list names but cannot decrypt secrets"* —
-  which is the scope working by cryptography rather than by a check.
-- **Per-`(binary, venue)` capability** and child vaults per venue credential —
-  both are shapes of the vault's own token model, and belong with it. Now
-  **reachable and deliberately not chosen**: one `read` token, two tokens, and
-  a child vault per binary are all askable, and which is right depends on what
-  else is in an operator's vault.
+- **One credential at boot.** A config-only document uses `config` scope. A
+  broker-backed document uses one `read` credential, preferably restricted by a
+  secret allow-list. A child vault is the deployment answer when cryptographic
+  isolation is required; two role-specific tokens are not a supported mode.
+- **The 0.4 dependency boundary.** Under Cargo 1.98.1, the vault resolves 268
+  packages alone and adds 151 to the `bin` Datawatch tree (`335 -> 478`). The
+  old `221 / 104 / 310 -> 414` table is retained in `design/measured.md` as the
+  0.1 measurement it was, not as the current cost.
 
 > **Exit:** `hyperliquid` still builds with
 > `--no-default-features --features hyperliquid` — no vault, no broker — and a

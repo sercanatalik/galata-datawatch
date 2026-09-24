@@ -68,6 +68,55 @@ reuse is what makes a test pass for the wrong reason.
 docs.rs is told `all-features = true`, so every venue appears and every gated
 item carries a badge naming the feature it needs.
 
+## Vault-backed capture
+
+The unpublished `galata-datawatch-vault` binary fetches its configuration once
+at boot and hands the same text to the same validator as the file binary. When
+configuration names a broker password, it fetches that secret once too. The
+capture loop holds neither the vault nor the credential.
+
+Install the published `galata-vault 0.4` tools, then provision a project and
+environment. Keep the recovery kit produced by `gv init` somewhere safe.
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-server-installer.sh | sh
+
+gv-server local
+gv init galata-datawatch --server http://127.0.0.1:8750
+gv env add galata-datawatch/prod
+gv config set datawatch --format toml --env galata-datawatch/prod < config/datawatch.toml
+```
+
+The binary opens one vault through the SDK's environment contract: set
+`GV_SERVER`, then exactly one of `GV_TOKEN` or `GV_TOKEN_FILE`. A token file
+must be mode `0600` or `0400`; setting both token variables is refused. The
+Datawatch source does not duplicate the SDK's authentication rules.
+
+Use the smallest credential the document needs:
+
+```sh
+# No [broker] block: configuration documents only.
+gv token mint --scope config --env galata-datawatch/prod
+
+# With [broker]: read the document and only the named broker secret.
+printf %s "$BROKER_PASSWORD" | \
+  gv set GALATA_DATAWATCH_PASSWORD --env galata-datawatch/prod
+gv token mint --scope read --only GALATA_DATAWATCH_PASSWORD \
+  --env galata-datawatch/prod
+```
+
+`password_var` names an environment variable for the file binary's
+`EnvSecrets`, and a vault secret name for `VaultSecrets`. Use a child vault when
+credentials must be cryptographically isolated between Datawatch instances or
+venues; an allow-list is server policy, not a second encryption boundary.
+
+The integration removes the broker secret from the Datawatch capture process's
+environment. The current generated NATS authorization file still reads that
+password from the NATS server's environment.
+
 ## Two stores
 
 ```

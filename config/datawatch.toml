@@ -152,7 +152,8 @@ instruments = [
 #   # committed file -- and the connect line logs this URL.
 #   # Nothing connects anonymously.
 #   user = "datawatch"
-#   # THE NAME OF A VARIABLE, never a secret. This file is committed.
+#   # A REFERENCE, never a secret. The file binary reads this as an environment
+#   # variable; the vault binary reads it as a vault secret name.
 #   password_var = "GALATA_DATAWATCH_PASSWORD"
 #   # Exactly the number of events a broker stall may swallow before they
 #   # start being dropped. Dropped events are counted and appear on the

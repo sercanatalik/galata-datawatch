@@ -1396,81 +1396,28 @@ dependencies = [
 
 [[package]]
 name = "galata-vault"
-version = "0.1.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f05f6ec582c24b208229d5e69b4bd2dc42ce0ea1b667931faec17e01f914c5"
-dependencies = [
- "galata-vault-client",
- "galata-vault-keys",
- "galata-vault-proto",
- "galata-vault-seal",
- "serde",
- "serde_json",
- "toml 1.1.6+spec-1.1.0",
- "zeroize",
-]
-
-[[package]]
-name = "galata-vault-client"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "932c184f207ae73832b0613bcd120e183672c11747039b0d2731adf49203ba3f"
-dependencies = [
- "galata-vault-keys",
- "galata-vault-proto",
- "serde",
- "serde_json",
- "ureq",
- "zeroize",
-]
-
-[[package]]
-name = "galata-vault-keys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "badaca515f20364b4f3485e393cc116cbd4de3ba8ab2671942e12378d6010db2"
-dependencies = [
- "chacha20poly1305 0.11.0",
- "crypto_box",
- "ed25519-dalek 3.0.0",
- "galata-vault-proto",
- "getrandom 0.4.3",
- "hkdf 0.13.0",
- "hmac 0.13.0",
- "sha2 0.11.0",
- "thiserror 2.0.20",
- "zeroize",
-]
-
-[[package]]
-name = "galata-vault-proto"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b7b518b87abc3f1505b472af482a8c1dc75ca48a392309a0d35a88b0f02236"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "crc32fast",
- "ed25519-dalek 3.0.0",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.20",
- "zeroize",
-]
-
-[[package]]
-name = "galata-vault-seal"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d145dbc6d8d733c90fe0b29072c88659fb39451cb9310dff1728062eb7004ec"
+checksum = "a1372c44f2bfbe6c7f0d957c69f5f6f5878c151611bc9856946ca065609beee7"
 dependencies = [
  "age",
+ "base64 0.22.1",
  "bech32",
- "galata-vault-keys",
- "galata-vault-proto",
+ "blake3",
+ "chacha20poly1305 0.11.0",
+ "crc32fast",
+ "crypto_box",
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.20",
+ "toml 1.1.6+spec-1.1.0",
+ "ureq",
  "zeroize",
 ]
 

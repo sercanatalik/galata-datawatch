@@ -251,10 +251,12 @@ pub struct Broker {
     pub url: String,
     /// The identity this process presents. **Nothing connects anonymously.**
     pub user: String,
-    /// The environment variable holding the secret.
+    /// The name used to resolve the broker secret.
     ///
-    /// The name, not the secret. A password in a configuration file is a
-    /// password in version control, and this file is committed.
+    /// `EnvSecrets` reads this as an environment-variable name;
+    /// `VaultSecrets` reads it as a vault secret name. The field carries the
+    /// name, never the secret. A password in a configuration file is a password
+    /// in version control, and this file is committed.
     pub password_var: String,
     /// How many events may be outstanding towards the broker.
     ///

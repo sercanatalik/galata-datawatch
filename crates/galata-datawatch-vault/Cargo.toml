@@ -7,9 +7,10 @@ description = "Capture configured from a galata-vault document rather than a fil
 # turning it into a claim about a default feature — and Cargo unifies a
 # dependency's features across one build, so a feature could not have held it.
 #
-# Measured: galata-vault locks 221 crates on its own, and costs 104 on top of
-# this tree (310 -> 414). Every one of them stops at this crate's boundary,
-# which `scripts/check-vault-reach.sh` asserts.
+# Measured under Cargo 1.98.1 on 2026-09-23: galata-vault 0.4 resolves 268
+# packages alone and adds 151 packages to the `bin` Datawatch tree (335 -> 478).
+# Every one of them stops at this crate's boundary, which
+# `scripts/check-vault-reach.sh` asserts.
 publish = false
 version.workspace = true
 edition.workspace = true

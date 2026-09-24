@@ -21,9 +21,11 @@
 //!
 //! A `config`-scoped token cannot serve both — the vault gives that scope's
 //! bundle no field for the vault key, so it cannot decrypt a secret at all —
-//! and the refusal says so in the vault's own words. Which credential reaches
-//! both is the operator's: one `read` token, two tokens, or a child vault per
-//! binary. Nothing here picks.
+//! and the refusal says so in the vault's own words. A config-only deployment
+//! therefore uses `config`; a broker-backed deployment uses one `read` token,
+//! preferably with a secret allow-list. A child vault remains the answer when
+//! credentials need cryptographic isolation. One process opens one vault; two
+//! role-specific tokens are not a supported mode.
 
 use galata_datawatch::adapters;
 use galata_datawatch::boot;
