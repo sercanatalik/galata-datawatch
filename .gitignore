@@ -15,3 +15,7 @@
 
 # macOS Finder metadata.
 .DS_Store
+
+# The scheduling lane's environment and bytecode.
+/py/.venv/
+__pycache__/

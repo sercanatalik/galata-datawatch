@@ -315,6 +315,44 @@ prove "check-endpoint-reach (expose outside a connect site)" \
       '        let _planted = rpc_url.expose().to_string();
         let client = ChainClient::new(rpc_url);'
 
+# The scheduling lane: five rules, five plants.
+
+# 1. An import outside the list — `os`, the door an inherited environment
+#    comes through.
+prove "check-python-flows (a flow imports os)" \
+      ./scripts/check-python-flows.sh \
+      py/flows/watch.py replace \
+      'from __future__ import annotations' \
+      $'from __future__ import annotations\n\nimport os'
+
+# 2. A second module that spawns.
+prove "check-python-flows (subprocess outside the runner)" \
+      ./scripts/check-python-flows.sh \
+      py/flows/compact.py replace \
+      'from __future__ import annotations' \
+      $'from __future__ import annotations\n\nimport subprocess'
+
+# 3. A spawn that inherits the scheduler's environment.
+prove "check-python-flows (a spawn without env=)" \
+      ./scripts/check-python-flows.sh \
+      py/flows/_runner.py replace \
+      $'        env=job_env(config),\n' \
+      ''
+
+# 4. The retention flow asked to delete.
+prove "check-python-flows (a flow passes --delete)" \
+      ./scripts/check-python-flows.sh \
+      py/flows/retain.py replace \
+      '_runner.run("galata-retain", [], config)' \
+      '_runner.run("galata-retain", ["--delete"], config)'
+
+# 5. A credential handed to a job.
+prove "check-python-flows (a job is handed GV_TOKEN)" \
+      ./scripts/check-python-flows.sh \
+      py/flows/_runner.py replace \
+      '"NO_COLOR": NO_COLOR}' \
+      '"NO_COLOR": NO_COLOR, "GV_TOKEN": ""}'
+
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)
 present=$(find scripts -maxdepth 1 -name 'check-*.sh' ! -name 'check-all.sh' | wc -l | tr -d ' ')

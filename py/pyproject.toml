@@ -1,0 +1,33 @@
+# The scheduling lane: cereyan flows that give the record's maintenance
+# binaries a cadence. Not a crate, and it publishes nothing — no crate's
+# `include` reaches this directory.
+#
+# **Thin by rule.** Every flow is a subprocess call to a release binary that
+# already exists; nothing here reimplements a tool or computes a figure.
+# `scripts/check-python-flows.sh` holds the rule, and `design.md` of
+# `schedule-the-record` is the argument.
+#
+# `cereyan` is capped below 3 because the flows lean on 2.x's `Cron`,
+# `retry_on` and resource declarations, and a major bump is where those move.
+
+[project]
+name = "galata-flows"
+version = "0.1.0"
+description = "The schedule for galata-datawatch's record maintenance"
+requires-python = ">=3.11"
+dependencies = ["cereyan>=2.3,<3"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Tests are named after the claim they defend, and the claims read as
+# sentences — `a_watch_with_nothing_to_check_fails` — so pytest is told to
+# collect them by that shape rather than by a `test_` prefix.
+python_files = ["*.py"]
+python_functions = ["a_*", "an_*", "the_*", "every_*", "no_*"]

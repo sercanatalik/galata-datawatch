@@ -433,18 +433,48 @@ called**, and that is stated rather than implied.*
 
 ## Tier 9 — cereyan
 
-- `py/flows/` under four invariants: the run store is **deletable** (fixed
-  trailing windows, never cursors); **the schedule is the retry** (compaction
-  sweeps every closed day, so a failed night is repaired by the next); the lane
-  holds **no credential** beyond a `config` token; **registration is the
-  exposure boundary** — `run_flow` can start anything registered, so
-  `galata-retain --delete` is never a flow.
-- `galata-tape-rebuild` is the one exception to the retry rule: nobody
-  re-derives a range, so it runs as a backfill of **one run per date**.
+*Done, 2026-09-24, and run rather than only declared* — legacy's lane shipped
+saying *"what cannot be verified here is that any flow RUNS."* This one ran
+each flow against a copy of the real record before it was called done.
+
+- **`py/flows/`, five flows, each a subprocess call** to a release binary:
+  compaction nightly, the tape's projection nightly, the retention *report*
+  weekly, the watch hourly, and an unscheduled history rebuild. `cereyan
+  check --strict` and the lane's tests run in `check-all.sh`, offline.
+- **The four invariants, kept.** The run store is deletable (fixed windows,
+  never cursors); the schedule is the retry; the lane holds no credential;
+  registration is the exposure boundary, so `galata-retain --delete` is never
+  a flow.
+- **"Holds no credential" became "passes none."** A job's environment is
+  built — four variables — and nothing is inherited, so a token in the
+  scheduler's environment cannot reach a tool whatever it holds.
+  `check-python-flows.sh` reads the lane's import graph and refuses the
+  alternatives; five plants in `test-guards.sh` watch it fail.
+- **Departed: the rebuild is no longer the exception to the retry rule.** It
+  was, because nobody re-derives a range. With `--replace` (Tier 3) and a
+  fixed three-day window, the nightly projection is idempotent — identical
+  bytes, measured — so a missed night is re-projected by the next. Only
+  `rebuild-one-day`, for history outside the window, retries, and **only on
+  exit 1**: the exit taxonomy is read per tool, which pays the debt legacy
+  recorded as owed the day retries widened.
+- **The watch fails on *nothing to check*.** For the maintenance tools `3` is
+  a clean *nothing to do*; for `galata-watch` it is what an empty archive
+  looks like when capture has silently stopped.
 - **Nothing watches the scheduler.** `galata-watch` watches the *record*: a
   heartbeat is a claim, a closed partition still holding 1,412 segments is a
-  fact on disk. **Done** — and it closes the half-made decision from Tier 1,
-  where the status surface refused to judge and nothing else did either.
+  fact on disk. It closes the half-made decision from Tier 1, where the status
+  surface refused to judge and nothing else did either.
+
+### Still open in this tier
+
+- **A rebuild run by hand while the lane compacts.** The `galata-record`
+  resource orders the lane's own writers; `galata-tape-rebuild` takes no lock
+  of its own, so an operator's rebuild outside cereyan can still list a
+  segment a compaction is renaming away. The remedy is a shared hold in the
+  binary — a Rust change, and a small one — not more scheduling.
+- **The service itself.** The README gives the launchd shape; loading it on a
+  machine is the operator's step, and the record starts being maintained the
+  night it is taken.
 
 ---
 

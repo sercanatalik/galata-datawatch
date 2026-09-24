@@ -1,0 +1,9 @@
+# One writer of the record at a time.
+#
+# `galata-compact` rewrites archive segments that `galata-tape-rebuild` reads,
+# and only the compactor takes a lock. The three flows that write hold one
+# unit each of this resource, so a projection that finds a compaction still
+# running waits as AwaitingResource rather than listing a file that is about
+# to be renamed away. cereyan resources are machine-wide, hence the prefix.
+[resources]
+galata-record = 1

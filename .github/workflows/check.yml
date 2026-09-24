@@ -46,6 +46,14 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch --locked
 
+      # The scheduling lane's half of the same network step: `uv sync` fetches
+      # what `py/uv.lock` names, so `check-all.sh` can run the lane with
+      # `--offline`, as it runs cargo. `--locked` for the same reason as above.
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Fetch the scheduling lane's dependencies
+        run: uv sync --locked --project py
+
       - name: check-all
         run: ./scripts/check-all.sh
 

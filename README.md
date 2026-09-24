@@ -160,11 +160,52 @@ subscribe redelivers it on every reconnection — measured at 1.55% of a
 24-minute run, once per session rotation. Both receipts are recorded because
 both arrived; group on `trade_id` to count each execution once.
 
+## Scheduling the maintenance
+
+Capture writes the archive; four one-shot tools keep it. **The tape exists only
+when `galata-tape-rebuild` runs**, so without a schedule the queryable half
+stops at whatever day somebody last rebuilt by hand. `py/` is the schedule: a
+[cereyan](https://github.com/sercanatalik/cereyan) lane whose flows are
+subprocess calls to the release binaries, and nothing else.
+
+| Flow | Runs | When (UTC) |
+|---|---|---|
+| `compact-the-archive` | `galata-compact` | daily 00:10 |
+| `project-the-closed-days` | `galata-tape-rebuild --replace`, the last 3 closed days, per declared venue | daily 00:40 |
+| `report-what-retention-would-expire` | `galata-retain`, the report only | Sundays 01:30 |
+| `judge-the-record` | `galata-watch` | hourly at :05 |
+| `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | never; a backfill over history |
+
+```sh
+cargo build --release
+uv sync --project py
+CEREYAN_HOME=~/.cereyan uv run --project py cereyan serve py --no-open
+```
+
+Under launchd, that last line is the `ProgramArguments` of a `KeepAlive` agent
+(cereyan's [run-as-a-service guide](https://github.com/sercanatalik/cereyan/blob/main/docs/guides/run-as-a-service.md)
+has the plist). Loading it is left to you; nothing here installs a service.
+
+What the lane will not do, by construction rather than by care:
+
+- **Pass a credential.** A job's environment is built — `GALATA_CONFIG`,
+  `PATH`, `RUST_LOG`, `NO_COLOR` — and nothing is inherited from the scheduler.
+- **Delete.** `galata-retain --delete` is not a flow, because cereyan's MCP
+  `run_flow` starts any registered one.
+- **Hold truth.** Deleting cereyan's store changes nothing about what a flow
+  does next: the projection takes a fixed window, not a cursor.
+- **Retry what the next night repairs.** Only `rebuild-one-day` retries, only
+  on exit `1`, never on a bad argument.
+
+`scripts/check-python-flows.sh` holds those rules over the lane's import graph,
+and `check-all.sh` runs the lane's tests offline, so the gate needs
+[uv](https://docs.astral.sh/uv/).
+
 ## Building
 
 ```sh
 cargo test                 # no network is touched
-scripts/check-all.sh       # format, lints, guards, the guard harness, tests
+scripts/check-all.sh       # format, lints, guards, the guard harness, tests, the lane
 scripts/test-guards.sh     # proves every guard can fail
 ```
 

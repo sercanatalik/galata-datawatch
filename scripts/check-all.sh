@@ -91,4 +91,15 @@ step "the guards can fail"
 step "tests, offline"
 cargo test --all-features --offline
 
+# **The scheduling lane, offline too.** `uv` resolves the lane from its lock
+# and never the network, the same promise `--offline` makes for cargo. With no
+# `uv` this refuses by name rather than skipping: a gate that quietly checked
+# half of the tree would be green for the wrong reason.
+step "the scheduling lane"
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv is not installed, and the scheduling lane (py/) is part of this gate — https://docs.astral.sh/uv/" >&2
+    exit 1
+fi
+( cd py && uv run --offline --locked cereyan check . --strict && uv run --offline --locked pytest -q )
+
 printf '\nall green\n'

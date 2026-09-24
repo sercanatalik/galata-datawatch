@@ -3380,3 +3380,49 @@ Tier 0 or Tier 1, and **two of the three refuted the reasoning they replaced**
   and on the tape the *windowed* read — the one that matters — is flat across
   every codec, because pruning bounds how much is ever decompressed. `Zstd` on
   both, now for a reason.
+
+## Projecting the trailing window — 2026-09-24
+
+*Behind `TRAILING_DAYS = 3` in `py/flows/project.py`, and behind scheduling the
+projection after the compaction rather than beside it.* Measured with the
+release binaries, invoked through the lane's own runner (so with the scrubbed
+environment a scheduled job gets), on a copy of the 4-hour soak's archive:
+263 MB, 64,587 segments, 1,352,340 payloads, dates 2026-09-20 and 2026-09-21.
+
+```
+  galata-tape-rebuild --replace hyperliquid 2026-09-19 2026-09-22
+    uncompacted archive, first run      16.00 s   1,815,628 rows · 21 segments
+    uncompacted archive, again           9.34 s   21 partitions replaced
+  galata-compact                         9.44 s   64,587 → 13 segments
+  the same rebuild, compacted archive    4.70 s
+```
+
+**The three runs wrote identical segment names and identical bytes** —
+sha256 over all 21 files, compared before and after a second run, and after a
+compaction in between. So the window is safe to replace every night, and a
+compaction between two projections changes nothing a reader can see.
+
+Two decisions rest on this:
+
+- **Three days is cheap.** The soak holds roughly a sixth of a day at six
+  instruments; a full day's window at the compacted rate is on the order of a
+  minute, nightly. The window could be wider for a cost this small. It is not,
+  because two missed nights self-healing is the property wanted, and a wider
+  window is more partitions emptied by `--replace` while it runs.
+- **Compaction first is 3.4× cheaper**, not merely tidier: 4.70 s against
+  16.00 s for the same rows, because the rebuild pays per segment opened. That
+  is the measured half of why the projection is at 00:40 behind the 00:10
+  compaction, with the `galata-record` resource to order them when a
+  compaction overruns.
+
+The day-scale figure is an extrapolation from a sixth of a day, stated as one.
+It is re-measured when a second venue is declared, since the window is
+projected once per venue.
+
+The same session ran every scheduled flow once against a copy of `var/`:
+`compact-the-archive` 4,780 → 13 segments in 1.68 s; `project-the-closed-days`
+2,313 payloads → 15,391 rows in 0.61 s, then identical on the second run;
+`report-what-retention-would-expire` *nothing to do* (no `[retention]`
+block); `judge-the-record` *nothing to report* over 13 partitions. The first
+of those runs is also where `NO_COLOR` came from: tracing-subscriber coloured
+every line, and the run results were escape codes.
