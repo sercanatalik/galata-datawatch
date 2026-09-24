@@ -81,6 +81,9 @@ First release. Nothing is on crates.io yet, so everything is new.
 - Configuration from a file or from a vault document, through one validator, so
   a document refuses exactly as a file does. The broker password can come from
   either the environment or the vault.
+- `AdapterConfig::for_replay` and `Endpoint::Withheld`: an adapter built for a
+  tool that does not connect reads no secret, and a keyed provider it declares
+  is named and withheld — never replaced by the public node.
 - Binaries: `galata-datawatch <venue>`, `galata-tape-rebuild`, `galata-retain`,
   `galata-watch`, `measure`.
 

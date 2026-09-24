@@ -131,17 +131,50 @@ fn declaration_of_hyperliquid() -> Option<crate::venue::Declaration> {
     .map(|a| a.declaration().clone())
 }
 
+/// Whether resolution may read secrets, or must withhold what needs one.
+#[derive(Clone, Copy)]
+enum Secrets<'a> {
+    /// Capture: every declared secret is read, and an unset one refuses.
+    Resolve(&'a dyn crate::config::SecretSource),
+    /// Replay: nothing is read. A held endpoint is withheld.
+    Withhold,
+}
+
 impl AdapterConfig {
-    /// The adapter configuration a declared venue block means.
+    /// The adapter configuration a declared venue block means, **for a tool
+    /// that connects** — every declared secret resolved, an unset one refused.
     ///
     /// **The only place a venue's name becomes a variant**, which is what keeps
     /// the boundary checkable.
-    #[cfg_attr(not(feature = "hyperliquid"), allow(unused_variables))]
-    #[allow(unused_variables)]
     pub fn from_declared(
         name: &str,
         venue: &crate::config::VenueConfig,
         secrets: &dyn crate::config::SecretSource,
+    ) -> Result<AdapterConfig, ResolveError> {
+        AdapterConfig::resolve(name, venue, Secrets::Resolve(secrets))
+    }
+
+    /// The same, **for a tool that does not connect**: a replay normalising
+    /// archived bytes, where the adapter is built for `normalise` alone.
+    ///
+    /// Takes no secret source at all, so none can be reached. An endpoint the
+    /// configuration declares as held is [`crate::venue::Endpoint::Withheld`]:
+    /// named, not resolved, and never the public node in its place. Every
+    /// refusal about instruments, contracts and decimals is the same one
+    /// capture makes — they are written once, in `resolve`.
+    pub fn for_replay(
+        name: &str,
+        venue: &crate::config::VenueConfig,
+    ) -> Result<AdapterConfig, ResolveError> {
+        AdapterConfig::resolve(name, venue, Secrets::Withhold)
+    }
+
+    #[cfg_attr(not(feature = "hyperliquid"), allow(unused_variables))]
+    #[allow(unused_variables)]
+    fn resolve(
+        name: &str,
+        venue: &crate::config::VenueConfig,
+        secrets: Secrets<'_>,
     ) -> Result<AdapterConfig, ResolveError> {
         match name {
             #[cfg(feature = "hyperliquid")]
@@ -164,12 +197,13 @@ impl AdapterConfig {
                 // variable that is named and unset refuses here rather than
                 // falling back to the public node — a silent fallback is how a
                 // process runs for a week against the wrong provider.
-                rpc_url: match &venue.rpc_url_var {
-                    Some(var) => crate::venue::Endpoint::held(
+                rpc_url: match (&venue.rpc_url_var, secrets) {
+                    (Some(var), Secrets::Resolve(secrets)) => crate::venue::Endpoint::held(
                         var,
                         secrets.secret(var).map_err(ResolveError::Secret)?,
                     ),
-                    None => crate::venue::Endpoint::public(rh_chain::PUBLIC_RPC),
+                    (Some(var), Secrets::Withhold) => crate::venue::Endpoint::withheld(var),
+                    (None, _) => crate::venue::Endpoint::public(rh_chain::PUBLIC_RPC),
                 },
                 instruments: venue
                     .instruments
@@ -470,5 +504,37 @@ mod tests {
         .unwrap_err();
         let said = error.to_string();
         assert!(said.contains("GALATA_RHCHAIN_RPC_URL"), "{said}");
+    }
+
+    #[test]
+    fn replay_withholds_a_named_provider_without_reading_it() {
+        // No secret source is passed because none CAN be: `for_replay` takes
+        // none, so the variable's being unset cannot matter.
+        let AdapterConfig::RhChain(config) = AdapterConfig::for_replay(
+            rh_chain::VENUE,
+            &chain_venue(Some("GALATA_RHCHAIN_RPC_URL")),
+        )
+        .unwrap() else {
+            panic!("a chain");
+        };
+        assert!(config.rpc_url.is_withheld());
+        assert!(
+            config
+                .rpc_url
+                .to_string()
+                .contains("GALATA_RHCHAIN_RPC_URL")
+        );
+        // And the adapter builds from it, which is all a replay needs.
+        build(AdapterConfig::RhChain(config)).unwrap();
+    }
+
+    #[test]
+    fn replay_still_refuses_an_instrument_with_no_contract() {
+        let mut venue = chain_venue(Some("GALATA_RHCHAIN_RPC_URL"));
+        venue.instruments[0].contract = None;
+        let said = AdapterConfig::for_replay(rh_chain::VENUE, &venue)
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("contract"), "{said}");
     }
 }

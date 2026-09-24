@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Two rules about secrets, neither of which the compiler can hold.
+# Three rules about secrets, none of which the compiler can hold.
 #
 #   1. A SECRET IS READ IN ONE PLACE. `SecretSource::secret` is the door, and
 #      `config/source.rs` is the only module that reads the environment for
@@ -13,6 +13,12 @@
 #      documentation. A copy of that rule here would be a second
 #      implementation — and a second implementation of a naming rule does not
 #      fail when it drifts, it disagrees.
+#
+#   3. A TOOL THAT DOES NOT CONNECT NAMES NO SECRET SOURCE. The rebuild, the
+#      compactor, the retention sweep and the watch run from a scheduler that
+#      hands them no credential; one that reached for a secret source would
+#      fail nightly, and the fix on offer would be a key in the scheduler's
+#      environment. They build adapters with `AdapterConfig::for_replay`.
 #
 # Each file is read only as far as its first `#[cfg(test)]`: a test may name
 # whatever it needs to assert about, and a violation appended after the tests
@@ -103,6 +109,31 @@ for path in sorted(root.glob("crates/**/*.rs")):
             f"{allowed}. A secret is read in one place, so there is one place to get the "
             f"logging wrong."
         )
+
+# 3. A TOOL THAT DOES NOT CONNECT NAMES NO SECRET SOURCE. The scheduled lane
+#    passes these four no credential, so one that reached for a secret source
+#    would fail every night rather than run — and the remedy on offer would be
+#    to put a provider key into the scheduler's environment. By list, not by
+#    inference: a tool that starts connecting is a diff that moves itself off
+#    this list and says why.
+NON_CONNECTING = [
+    "crates/galata-datawatch/src/bin/galata-tape-rebuild.rs",
+    "crates/galata-datawatch/src/bin/galata-compact.rs",
+    "crates/galata-datawatch/src/bin/galata-retain.rs",
+    "crates/galata-datawatch/src/bin/galata-watch.rs",
+]
+for relative in NON_CONNECTING:
+    path = root / relative
+    if not path.exists():
+        problems.append(f"{relative}: listed as a tool that does not connect, and not there — the LIST is wrong")
+        continue
+    shipped = shipped_only(path.read_text())
+    for name in ("EnvSecrets", "VaultSecrets", "SecretSource"):
+        if name in shipped:
+            problems.append(
+                f"{relative}: names {name}, and this tool does not connect. Build its adapter "
+                f"with AdapterConfig::for_replay, which withholds what connecting needs."
+            )
 
 if problems:
     for p in problems:

@@ -353,6 +353,14 @@ prove "check-python-flows (a job is handed GV_TOKEN)" \
       '"NO_COLOR": NO_COLOR}' \
       '"NO_COLOR": NO_COLOR, "GV_TOKEN": ""}'
 
+# A tool that does not connect reaching for a secret source — the rebuild, which
+# the scheduled lane runs with no credential in its environment.
+prove "check-secret-reach (a tool that does not connect names a secret source)" \
+      ./scripts/check-secret-reach.sh \
+      crates/galata-datawatch/src/bin/galata-tape-rebuild.rs replace \
+      'use galata_datawatch::config::{Adapters, Config, FileSource};' \
+      'use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource};'
+
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)
 present=$(find scripts -maxdepth 1 -name 'check-*.sh' ! -name 'check-all.sh' | wc -l | tr -d ' ')

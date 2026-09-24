@@ -475,6 +475,14 @@ each flow against a copy of the real record before it was called done.
   writer states in each segment's footer, not by a statistic — and so are the
   layout check and the bounded reader's bound, which compared one venue's
   sequence against another's (`design/measured.md`).
+- ~~**A venue whose endpoint is a secret could not be rebuilt by the lane.**~~
+  **Done** — replay builds adapters with `AdapterConfig::for_replay`, which
+  takes no secret source and withholds a keyed provider (`Endpoint::Withheld`)
+  rather than reading it or falling back to the public node.
+  `check-secret-reach.sh` now holds that the four tools which do not connect
+  name no secret source. Proved by the nightly flow projecting hyperliquid
+  and rh-chain into one tape with `GV_TOKEN` set and the provider variable
+  empty in the scheduler's own environment.
 - **The service itself.** The README gives the launchd shape; loading it on a
   machine is the operator's step, and the record starts being maintained the
   night it is taken.

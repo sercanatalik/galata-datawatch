@@ -21,7 +21,7 @@
 
 use galata_datawatch::adapters::{self, AdapterConfig};
 use galata_datawatch::calendar::midnight_of;
-use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource};
+use galata_datawatch::config::{Adapters, Config, FileSource};
 use galata_datawatch::tape;
 use galata_segments::{Hold, Mode};
 
@@ -127,13 +127,12 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(BAD_ARGUMENT);
     };
 
-    // **No network.** The adapter is built for its `normalise`, which is a pure
-    // function of the bytes — the whole reason that seam has no async on it.
-    let adapter = adapters::build(AdapterConfig::from_declared(
-        &venue_name,
-        venue,
-        &EnvSecrets,
-    )?)?;
+    // **No network, and no secret.** The adapter is built for its `normalise`,
+    // which is a pure function of the bytes — the whole reason that seam has no
+    // async on it. So it is built by `for_replay`, which takes no secret source:
+    // a keyed provider is withheld rather than read, and the scheduled lane,
+    // which passes this process no credential, can rebuild every venue.
+    let adapter = adapters::build(AdapterConfig::for_replay(&venue_name, venue)?)?;
     let scope = format!("venue={venue_name}");
 
     // **A root that cannot be read is a refusal, not an empty result.** No

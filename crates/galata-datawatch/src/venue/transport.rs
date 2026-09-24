@@ -52,9 +52,29 @@ pub enum Endpoint {
         /// The URL itself.
         url: Secret,
     },
+    /// Declared as held, and **deliberately not resolved**, because the tool
+    /// that built it does not connect — a replay normalising archived bytes.
+    ///
+    /// Not `None`: the configuration named a provider, and *absent* would be
+    /// false. And never the public node in its place — that is the silent
+    /// fallback capture refuses by name, arriving by a different door.
+    Withheld {
+        /// The variable that would have supplied it.
+        var: String,
+    },
 }
 
+/// What a withheld endpoint gives anything that asks for its address: a string
+/// with no scheme any HTTP or WebSocket client accepts.
+const WITHHELD: &str = "withheld:";
+
 impl Endpoint {
+    /// One the configuration declares as held, not resolved here because
+    /// nothing here connects.
+    pub fn withheld(var: impl Into<String>) -> Endpoint {
+        Endpoint::Withheld { var: var.into() }
+    }
+
     /// A compiled-in endpoint.
     pub fn public(url: &'static str) -> Endpoint {
         Endpoint::Public(url)
@@ -76,7 +96,16 @@ impl Endpoint {
         match self {
             Endpoint::Public(url) => url,
             Endpoint::Held { url, .. } => url.expose(),
+            // **No address a client will dial.** A connect site that forgot
+            // this variant fails at the client, loudly, naming no credential —
+            // rather than succeeding against somewhere nobody chose.
+            Endpoint::Withheld { .. } => WITHHELD,
         }
+    }
+
+    /// Whether this one was declared as held and deliberately not resolved.
+    pub fn is_withheld(&self) -> bool {
+        matches!(self, Endpoint::Withheld { .. })
     }
 
     /// Whether this one came from a secret.
@@ -95,6 +124,10 @@ impl std::fmt::Display for Endpoint {
             // hostname, so "scheme + host" is a rule that is right for Alchemy
             // and wrong for QuickNode — the kind of rule that ships.
             Endpoint::Held { var, .. } => write!(f, "the provider named by {var}"),
+            Endpoint::Withheld { var } => write!(
+                f,
+                "the provider named by {var}, withheld: this tool does not connect"
+            ),
         }
     }
 }
@@ -221,6 +254,31 @@ mod tests {
         // And it is handed over only by a name that reads like a decision.
         assert_eq!(held.expose(), url);
         assert!(held.is_held());
+    }
+
+    #[test]
+    fn a_withheld_endpoint_names_its_variable_and_no_url() {
+        let withheld = Endpoint::withheld("GALATA_RHCHAIN_RPC_URL");
+        for rendered in [format!("{withheld}"), format!("{withheld:?}")] {
+            assert!(rendered.contains("GALATA_RHCHAIN_RPC_URL"), "{rendered}");
+            assert!(rendered.contains("withheld"), "{rendered}");
+            assert!(!rendered.contains("://"), "{rendered}");
+        }
+        assert!(withheld.is_withheld());
+        assert!(!withheld.is_held(), "it holds nothing");
+    }
+
+    #[test]
+    #[cfg(feature = "rh-chain")]
+    fn a_withheld_endpoint_is_not_the_public_node_and_not_dialable() {
+        // The fallback capture refuses by name must not arrive by this door.
+        let address = Endpoint::withheld("GALATA_RHCHAIN_RPC_URL")
+            .expose()
+            .to_string();
+        assert_ne!(address, crate::adapters::rh_chain::PUBLIC_RPC);
+        for scheme in ["http://", "https://", "ws://", "wss://"] {
+            assert!(!address.starts_with(scheme), "{address} would be dialled");
+        }
     }
 
     #[test]

@@ -54,11 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &Resolver,
     )?;
     let declared = config.venue.get(&venue).ok_or("venue not declared")?;
-    let adapter = adapters::build(AdapterConfig::from_declared(
-        &venue,
-        declared,
-        &galata_datawatch::config::EnvSecrets,
-    )?)?;
+    // `for_replay`: no secret source in reach, and a held endpoint withheld.
+    let adapter = adapters::build(AdapterConfig::for_replay(&venue, declared)?)?;
 
     // **The same archive it was read from.** If replay writes anything, it
     // writes here, and the count moves.
