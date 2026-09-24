@@ -3540,3 +3540,29 @@ done. Cargo treats a registry-sourced crate as immutable, so verifying
 galata-datawatch reused a galata-segments 0.1.0 compiled from the previous
 section's source, and failed on `label`, which the current source has. The purge
 is now a verb of this guard, and the tower calls it rather than copying it.
+
+## What the per-venue bound costs, and the cache that pays for it once — 2026-09-24
+
+The previous section extrapolated that labelling made the bound linear in
+segments. `examples/cost-of-labels.rs` measures it, on tapes of one-segment
+commits alternating two venues:
+
+```
+  segments   Bound::of, cold   Bound::of_cached, warm
+        10          809 µs              249 µs
+       100          3.3 ms              354 µs
+     1,000         25.7 ms              3.3 ms
+```
+
+About 20 µs a segment cold. galata-tower computes a bound for each of six
+kinds every second, so at 1,000 segments a kind the cold figure is ~150 ms of
+every second spent asking whether anything moved, growing with a tape
+retention keeps forever. `LabelCache` — path to (size, mtime, label), the key
+DataFusion's parquet metadata cache uses — reads each footer once per
+process; the tower's watch holds one for its lifetime.
+
+**Warm is still linear**, at about 3 µs a segment: the directory listing and
+one `stat` per segment to prove it unchanged. That is ~20 ms a second at
+1,000 segments a kind — 7.7× less, not free. Removing the `stat` would mean
+trusting a path not to be reused, which `--replace` does on purpose; the
+`stat` is what makes a replaced segment be read again.

@@ -42,7 +42,7 @@ pub mod schema;
 pub mod writer;
 
 pub use layout::{LayoutProblem, check_layout, partition_of};
-pub use reader::{Bound, ReadError, Reader, Window, unwritten};
+pub use reader::{Bound, LabelCache, ReadError, Reader, Window, unwritten};
 pub use rebuild::{Rebuilt, Replace, rebuild, rebuild_with};
 pub use schema::{PRUNE_ON, UNLABELLED_REMEDY, VENUE_LABEL, schema_for};
 pub use writer::{Row, Tape, TapeError};

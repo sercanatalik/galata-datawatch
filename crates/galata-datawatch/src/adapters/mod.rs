@@ -140,7 +140,15 @@ fn declaration_of_hyperliquid() -> Option<crate::venue::Declaration> {
 }
 
 /// Whether resolution may read secrets, or must withhold what needs one.
+///
+/// With no venue compiled in, nothing reads the source — a build the tower
+/// takes (`default-features = false`) — so the field is allowed to go unread
+/// there and nowhere else.
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    not(any(feature = "hyperliquid", feature = "rh-chain", feature = "rh-crypto")),
+    allow(dead_code)
+)]
 enum Secrets<'a> {
     /// Capture: every declared secret is read, and an unset one refuses.
     Resolve(&'a dyn crate::config::SecretSource),

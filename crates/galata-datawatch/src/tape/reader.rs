@@ -147,6 +147,17 @@ impl Bound {
     /// every such `(scope, venue)` is named. A caller reading datasets that not
     /// every venue supplies reads them one scope at a time.
     pub fn of(root: &Path, scopes: &[&str]) -> Result<Bound, ReadError> {
+        Bound::of_cached(root, scopes, &LabelCache::default())
+    }
+
+    /// The same, reading each segment's label through a cache the caller
+    /// owns — for a caller that computes the bound again and again over a tape
+    /// that mostly has not changed.
+    pub fn of_cached(
+        root: &Path,
+        scopes: &[&str],
+        labels: &LabelCache,
+    ) -> Result<Bound, ReadError> {
         if scopes.is_empty() {
             return Err(ReadError::NoScopes);
         }
@@ -156,7 +167,7 @@ impl Bound {
         }
         let mut frontiers = Vec::with_capacity(scopes.len());
         for scope in scopes {
-            frontiers.push((*scope, venue_frontiers(&root.join(scope))?));
+            frontiers.push((*scope, venue_frontiers(&root.join(scope), labels)?));
         }
         let venues: std::collections::BTreeSet<&String> =
             frontiers.iter().flat_map(|(_, f)| f.keys()).collect();
@@ -186,7 +197,10 @@ impl Bound {
 /// of its segments reaches.
 ///
 /// Whose a segment is comes from its label, never from a column statistic.
-fn venue_frontiers(scope_root: &Path) -> Result<BTreeMap<String, i64>, ReadError> {
+fn venue_frontiers(
+    scope_root: &Path,
+    labels: &LabelCache,
+) -> Result<BTreeMap<String, i64>, ReadError> {
     let mut out: BTreeMap<String, i64> = BTreeMap::new();
     for partition in galata_segments::partitions(scope_root) {
         for (cursor, path) in galata_segments::list_segments(&partition) {
@@ -194,12 +208,72 @@ fn venue_frontiers(scope_root: &Path) -> Result<BTreeMap<String, i64>, ReadError
                 return Err(ReadError::Incomparable);
             };
             let last = i64::try_from(last).map_err(|_| ReadError::Incomparable)?;
-            let venue = segment_venue(&path)?;
+            let venue = labels.venue(&path)?;
             let entry = out.entry(venue).or_insert(last);
             *entry = (*entry).max(last);
         }
     }
     Ok(out)
+}
+
+/// Segment labels already read, for a caller that asks again and again.
+///
+/// **Measured** (`examples/cost-of-labels.rs`): a label is a footer read at
+/// about 20 µs, so a bound over 1,000 segments cost 20.8 ms — and galata-tower
+/// computes one every second for each of six kinds, over a tape retention
+/// keeps forever. A segment is immutable once renamed, so its label cannot
+/// change while the file does not.
+///
+/// **Keyed by path, valid while the file's size and modification time are
+/// unchanged** — the key DataFusion's parquet metadata cache uses — so a
+/// segment replaced at the same path is read again. A `stat` guards every hit.
+/// Caller-owned rather than global: a library holding state nobody asked for
+/// is state nobody can bound or drop.
+#[derive(Debug, Default)]
+pub struct LabelCache {
+    entries: std::sync::Mutex<BTreeMap<PathBuf, (u64, std::time::SystemTime, String)>>,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl LabelCache {
+    /// A segment's venue, from the cache if the file is unchanged.
+    fn venue(&self, path: &Path) -> Result<String, ReadError> {
+        let meta = std::fs::metadata(path).map_err(|source| {
+            ReadError::Segment(galata_segments::SegmentError::Write {
+                path: path.to_path_buf(),
+                source,
+            })
+        })?;
+        let (len, modified) = (meta.len(), meta.modified().ok());
+        if let (Some(modified), Ok(entries)) = (modified, self.entries.lock())
+            && let Some((l, m, venue)) = entries.get(path)
+            && *l == len
+            && *m == modified
+        {
+            return Ok(venue.clone());
+        }
+        let venue = segment_venue(path)?;
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let (Some(modified), Ok(mut entries)) = (modified, self.entries.lock()) {
+            entries.insert(path.to_path_buf(), (len, modified, venue.clone()));
+        }
+        Ok(venue)
+    }
+
+    /// How many footers this cache has had to read — for asserting that a
+    /// warm cache reads none.
+    pub fn footer_reads(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Forget every segment that no longer exists, so the cache holds at most
+    /// what the tape holds. Called by whoever owns it, on its own cadence.
+    pub fn prune(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|path, _| path.exists());
+        }
+    }
 }
 
 /// Whose rows a tape segment holds, from its label, or a refusal naming it.
@@ -262,8 +336,17 @@ impl Reader {
     /// Open a reader, computing the bound **now**, from what the store has
     /// durably written.
     pub fn open(root: impl Into<PathBuf>, scopes: &[&str]) -> Result<Reader, ReadError> {
+        Reader::open_cached(root, scopes, &LabelCache::default())
+    }
+
+    /// The same, computing the bound through a label cache the caller owns.
+    pub fn open_cached(
+        root: impl Into<PathBuf>,
+        scopes: &[&str],
+        labels: &LabelCache,
+    ) -> Result<Reader, ReadError> {
         let root = root.into();
-        let bound = Bound::of(&root, scopes)?;
+        let bound = Bound::of_cached(&root, scopes, labels)?;
         Ok(Reader { root, bound })
     }
 
@@ -847,5 +930,63 @@ mod tests {
             Err(ReadError::Unlabelled { path }) => assert_eq!(path, written),
             other => panic!("expected Unlabelled, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_warm_cache_reads_no_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        for seq in [1, 2, 3] {
+            tape.take(row(seq, "venue-a", Some(100 * DAY + seq as i64)));
+            tape.commit().unwrap();
+        }
+        let labels = LabelCache::default();
+        let cold = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(labels.footer_reads(), 3);
+        let warm = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(labels.footer_reads(), 3, "a warm cache re-read a footer");
+        assert_eq!(cold, warm);
+    }
+
+    #[test]
+    fn a_bound_is_the_same_with_and_without_a_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(10, "venue-a", Some(100 * DAY)));
+        tape.take(row(20, "venue-b", Some(100 * DAY + 1)));
+        tape.commit().unwrap();
+        assert_eq!(
+            Bound::of(dir.path(), &["kind=quotes"]).unwrap(),
+            Bound::of_cached(dir.path(), &["kind=quotes"], &LabelCache::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_replaced_segment_is_read_again() {
+        // A replacement at the same path is a new file: new mtime, and here a
+        // new venue. The cache must not answer with the old label.
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(5, "venue-a", Some(100 * DAY)));
+        let written = tape.commit().unwrap().remove(0);
+        let labels = LabelCache::default();
+        let before = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(before.of_venue("venue-a"), Some(5));
+
+        // Same name, other venue, a moment later.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::remove_file(&written).unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(5, "venue-b", Some(100 * DAY)));
+        let rewritten = tape.commit().unwrap().remove(0);
+        assert_eq!(rewritten, written, "the same path");
+
+        let after = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(after.of_venue("venue-b"), Some(5));
+        assert_eq!(
+            after.of_venue("venue-a"),
+            None,
+            "answered from a stale entry"
+        );
     }
 }

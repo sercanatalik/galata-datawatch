@@ -75,6 +75,8 @@ First release. Nothing is on crates.io yet, so everything is new.
   bytes. Every tape segment holds one venue and says so in its footer
   (`galata.venue`); `--replace` replaces only the rebuilt venue's segments,
   since a partition is shared by every venue that supplies its dataset.
+- `LabelCache`, `Bound::of_cached`, `Reader::open_cached`: a caller asking
+  repeatedly reads each segment's label once, not once a call.
 - The bounded reader's `Bound` is a position **per venue** (`positions`,
   `of_venue`): each venue numbers its stream from its own process, so one
   position cannot bound two. A tape written before labelling refuses to open,
