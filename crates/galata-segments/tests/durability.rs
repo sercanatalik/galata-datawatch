@@ -617,3 +617,39 @@ fn a_root_that_cannot_be_read_is_refused_by_name() {
     assert!(galata_segments::scannable(real.path()).is_ok());
     assert!(list_segments(real.path()).is_empty());
 }
+
+#[test]
+fn a_label_round_trips_and_an_absent_key_is_absent() {
+    // A label is stated by the writer, not computed, so it must read back
+    // byte for byte — including at the longest a venue token may be.
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let value = "v".repeat(64);
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new(
+            "venue",
+            DataType::Utf8,
+            false,
+        )])),
+        vec![Arc::new(StringArray::from(vec![value.as_str()]))],
+    )
+    .unwrap();
+    let path = galata_segments::write_segment_labelled(
+        dir.path(),
+        galata_segments::Cursor::Seq { first: 1, last: 1 },
+        &batch,
+        galata_segments::Codec::Zstd,
+        &[],
+        &[("galata.venue", &value)],
+    )
+    .unwrap();
+    assert_eq!(
+        galata_segments::label(&path, "galata.venue").unwrap(),
+        Some(value)
+    );
+    assert_eq!(galata_segments::label(&path, "galata.other").unwrap(), None);
+}

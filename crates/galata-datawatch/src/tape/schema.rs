@@ -33,6 +33,19 @@ const PRICE: DataType = DataType::Decimal128(38, 18);
 /// neither inherits the other's answer.
 pub const PRUNE_ON: [&str; 3] = ["venue", "ticker", "at_micros"];
 
+/// The footer label naming the one venue whose rows a tape segment holds.
+///
+/// **Stated by the writer, never inferred.** `venue` is also a pruning column
+/// above, and its statistics may still EXCLUDE a segment from a read; they may
+/// not be used to say whose a segment is, because a statistic is computed and
+/// a wrong *yes* deletes or reveals another venue's rows. Every comparison of
+/// stream sequences — replacement, the layout check, the bound — reads this.
+pub const VENUE_LABEL: &str = "galata.venue";
+
+/// What a refusal over a segment without [`VENUE_LABEL`] tells the operator.
+pub const UNLABELLED_REMEDY: &str = "written before tape segments were labelled with their venue; \
+     the tape is a cache — remove it and rebuild";
+
 /// The five every row carries.
 fn common() -> Vec<Field> {
     vec![

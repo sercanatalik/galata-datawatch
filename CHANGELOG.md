@@ -41,6 +41,9 @@ First release. Nothing is on crates.io yet, so everything is new.
 - Holds on a root, exclusive for a writer and shared for a reader, on one
   advisory lock released by process exit — `hold`, `hold_shared`, and a
   bounded `wait`. Checked across processes, not only within one.
+- Writer-stated footer labels (`write_segment_labelled`, `label`), and
+  `overlapping_ranges_by_label` for a store whose partitions several
+  independently numbered streams share.
 
 **`galata-broker` — the bus, over NATS.**
 
@@ -67,8 +70,14 @@ First release. Nothing is on crates.io yet, so everything is new.
   not been called**: no credentials were obtained and none should be.
 - The tape: parquet a `SELECT` can read with no flags, rebuilt deterministically
   — twice over a frozen archive gives identical segment names and identical
-  bytes. `--replace` replaces only the rebuilt venue's segments: a partition
-  is shared by every venue that supplies its dataset.
+  bytes. Every tape segment holds one venue and says so in its footer
+  (`galata.venue`); `--replace` replaces only the rebuilt venue's segments,
+  since a partition is shared by every venue that supplies its dataset.
+- The bounded reader's `Bound` is a position **per venue** (`positions`,
+  `of_venue`): each venue numbers its stream from its own process, so one
+  position cannot bound two. A tape written before labelling refuses to open,
+  replace or pass `check_layout`, naming the remedy — it is a cache: remove it
+  and rebuild.
 - Configuration from a file or from a vault document, through one validator, so
   a document refuses exactly as a file does. The broker password can come from
   either the environment or the vault.

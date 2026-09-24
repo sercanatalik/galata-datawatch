@@ -69,7 +69,7 @@ set -euo pipefail
 
 VERB=check
 if [[ $# -gt 0 ]]; then
-    case "$1" in check|plant|key) VERB="$1"; shift ;; esac
+    case "$1" in check|plant|key|purge) VERB="$1"; shift ;; esac
 fi
 ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PLANT="$ROOT/crates/galata-broker/Cargo.toml"
@@ -155,6 +155,32 @@ fi
 target=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
 print(json.load(sys.stdin)["target_directory"])')
 
+# **The purge is its own verb**, because galata-tower's `check-against-
+# tarballs.sh` packages this workspace too, and did so without it: cargo
+# treats a registry-sourced crate as immutable, so verifying galata-datawatch
+# reused a galata-segments 0.1.0 compiled from an EARLIER source at the same
+# version, and failed on functions the current source has. One purge, called
+# from both, rather than a copy in the tower that drifts from this one.
+purge() {
+    for spec in $members; do
+        name="${spec%-*}"
+        underscored="${name//-/_}"
+        for dir in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"$spec"; do
+            [[ -d "$dir" ]] && rm -rf "$dir"
+        done
+        # The compiled halves, and the fingerprints that would let cargo skip
+        # rebuilding them.
+        rm -f "$target"/debug/deps/lib"$underscored"-*.rlib \
+              "$target"/debug/deps/lib"$underscored"-*.rmeta 2>/dev/null || true
+        rm -rf "$target"/debug/.fingerprint/"$name"-* 2>/dev/null || true
+    done
+}
+
+if [[ "$VERB" == purge ]]; then
+    purge
+    exit 0
+fi
+
 # **THE PURGE BELOW IS ONLY WORTH PAYING WHEN SOMETHING MOVED.**
 #
 # Purging is correct and stays, and this sits BEFORE it: a skip that ran after
@@ -219,18 +245,8 @@ if [[ -z "${GALATA_TARBALL_FORCE:-}" && -f "$KEY_FILE" && "$(cat "$KEY_FILE")" =
     exit 0
 fi
 
-for spec in $members; do
-    name="${spec%-*}"
-    underscored="${name//-/_}"
-    for dir in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/"$spec"; do
-        [[ -d "$dir" ]] && rm -rf "$dir"
-    done
-    # The compiled halves, and the fingerprints that would let cargo skip
-    # rebuilding them.
-    rm -f "$target"/debug/deps/lib"$underscored"-*.rlib \
-          "$target"/debug/deps/lib"$underscored"-*.rmeta 2>/dev/null || true
-    rm -rf "$target"/debug/.fingerprint/"$name"-* 2>/dev/null || true
-done
+purge
+
 
 if ! output=$(cargo package --workspace --allow-dirty 2>&1); then
     echo "tarball builds: a crate does not build from what it would ship" >&2

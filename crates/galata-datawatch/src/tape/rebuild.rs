@@ -43,28 +43,12 @@ pub enum RebuildError {
     /// The record refused.
     #[error(transparent)]
     Record(#[from] crate::record::RecordError),
-    /// A segment in a partition this run writes holds more than one venue.
-    ///
-    /// Replacing one venue inside it would mean rewriting the others' rows,
-    /// which a cache rebuild does not do behind anyone's back. Refused before
-    /// anything is removed.
-    #[error(
-        "{path} holds more than one venue, so replacing one of them would take the others; \
-         the tape is a cache — remove it and rebuild every venue it held"
-    )]
-    MixedVenues {
-        /// The segment.
-        path: std::path::PathBuf,
-    },
     /// A segment in a partition this run writes does not say whose rows it holds.
     ///
     /// Kept, it would overlap the replacement; removed, it might be another
-    /// venue's. Neither is this tool's to guess. Refused before anything is
-    /// removed.
-    #[error(
-        "{path} carries no exact venue statistics, so whose rows it holds is unknown; \
-         the tape is a cache — remove it and rebuild every venue it held"
-    )]
+    /// venue's. Neither is this tool's to guess, and a column statistic is not
+    /// evidence enough to act on. Refused before anything is removed.
+    #[error("{path}: {}", crate::tape::UNLABELLED_REMEDY)]
     UnknownVenue {
         /// The segment.
         path: std::path::PathBuf,
@@ -230,7 +214,7 @@ pub fn rebuild_with(
         // rebuild produced no trades* and *there are no trades* are different
         // claims. And a partition is `kind=/date=`, shared by every venue that
         // supplies the dataset — so *this venue's quotes* is not *the quotes*,
-        // and a segment is kept or removed by the venue its footer names.
+        // and a segment is kept or removed by the venue its label states.
         //
         // **Planned in full, then removed.** A refusal therefore means the
         // tape was not touched, never that it was half-replaced.
@@ -238,13 +222,9 @@ pub fn rebuild_with(
         let mut doomed = Vec::new();
         for partition in tape.pending_partitions() {
             for (_, segment) in galata_segments::list_segments(&tape_root.join(&partition)) {
-                match galata_segments::string_bounds(&segment, "venue")? {
-                    Some((low, high)) if low == high => {
-                        if ours.contains(&low) {
-                            doomed.push(segment);
-                        }
-                    }
-                    Some(_) => return Err(RebuildError::MixedVenues { path: segment }),
+                match galata_segments::label(&segment, crate::tape::VENUE_LABEL)? {
+                    Some(venue) if ours.contains(&venue) => doomed.push(segment),
+                    Some(_) => {}
                     None => return Err(RebuildError::UnknownVenue { path: segment }),
                 }
             }
@@ -655,11 +635,13 @@ mod tests {
     /// Commit `venue`'s quotes for the fixture's day straight onto the tape,
     /// as that venue's own rebuild would have: a segment holding its rows only.
     fn another_venues_quotes(tape: &Path, venue: &str) -> std::path::PathBuf {
-        venues_quotes(tape, &[venue, venue])
+        let mut written = venues_quotes(tape, &[venue, venue]);
+        assert_eq!(written.len(), 1);
+        written.remove(0)
     }
 
-    /// One committed segment holding one quote per venue named, in order.
-    fn venues_quotes(tape: &Path, venues: &[&str]) -> std::path::PathBuf {
+    /// One commit holding one quote per venue named, in order; what it wrote.
+    fn venues_quotes(tape: &Path, venues: &[&str]) -> Vec<std::path::PathBuf> {
         use galata_wire::{Envelope, Event, Num, Quote, Ticker, Venue};
         use std::str::FromStr;
         let mut writer = Tape::open(tape);
@@ -683,9 +665,7 @@ mod tests {
                 ),
             });
         }
-        let mut written = writer.commit().unwrap();
-        assert_eq!(written.len(), 1);
-        written.remove(0)
+        writer.commit().unwrap()
     }
 
     #[test]
@@ -739,42 +719,28 @@ mod tests {
     }
 
     #[test]
-    fn a_mixed_venue_segment_is_refused_before_anything_is_removed() {
-        let (dir, hl) = growing_archive();
-        let root = dir.path().join("archive");
-        let tape = dir.path().join("tape");
-
-        // hyperliquid's own segment, which a replacement WOULD remove…
-        rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
-        // …beside one holding two venues, which it cannot.
-        let mixed = venues_quotes(&tape, &["hyperliquid", "rh-crypto"]);
-        let before = quotes_segments(&tape);
-        assert_eq!(before.len(), 2);
-
-        grow(dir.path(), &hl, 100);
-        let refused = rebuild_with(
-            &root,
-            &tape,
-            &hl,
-            None,
-            i64::MIN,
-            i64::MAX,
-            Replace::Partitions,
-        );
-
-        match refused {
-            Err(RebuildError::MixedVenues { path }) => assert_eq!(path, mixed),
-            other => panic!("expected MixedVenues, got {other:?}"),
-        }
-        assert_eq!(
-            quotes_segments(&tape),
-            before,
-            "a refusal removed something"
-        );
+    fn a_commit_spanning_two_venues_writes_two_labelled_segments() {
+        // One venue per segment is what makes a segment *a venue's stream over
+        // a range* — the unit replacement, the layout check and the bound all
+        // compare sequences within. It used to be one mixed segment, which
+        // replacement had to refuse.
+        let dir = tempfile::tempdir().unwrap();
+        let written = venues_quotes(dir.path(), &["hyperliquid", "rh-crypto"]);
+        assert_eq!(written.len(), 2, "two venues, two segments");
+        let mut labels: Vec<String> = written
+            .iter()
+            .map(|path| {
+                galata_segments::label(path, crate::tape::VENUE_LABEL)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        labels.sort();
+        assert_eq!(labels, ["hyperliquid", "rh-crypto"]);
     }
 
     #[test]
-    fn a_segment_without_venue_statistics_is_refused() {
+    fn an_unlabelled_segment_is_refused_before_anything_is_removed() {
         use arrow::array::StringArray;
         use arrow::datatypes::{DataType, Field, Schema};
         use arrow::record_batch::RecordBatch;
@@ -783,8 +749,11 @@ mod tests {
         let root = dir.path().join("archive");
         let tape = dir.path().join("tape");
 
-        // A segment written without statistics on `venue`, as a tape from
-        // before `venue` joined PRUNE_ON would be.
+        // A segment with no venue label, as every tape segment written before
+        // labelling is. hyperliquid's own segment beside it must survive the
+        // refusal: planned in full, then removed.
+        rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+        let before = quotes_segments(&tape);
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![Field::new(
                 "venue",
@@ -816,18 +785,21 @@ mod tests {
             other => panic!("expected UnknownVenue, got {other:?}"),
         }
         assert!(silent.exists(), "an unknown segment was removed");
+        let mut after = quotes_segments(&tape);
+        after.retain(|path| path != &silent);
+        assert_eq!(after, before, "a refusal removed something");
     }
 
     #[test]
     fn the_longest_valid_venue_is_read_exactly() {
-        // Parquet may truncate string statistics. A venue is a token of at most
-        // 64 bytes, and a truncated bound would make its segment unknown.
+        // A venue is a token of at most 64 bytes, and the label must state it
+        // byte for byte — a statistic may be truncated, a label may not.
         let dir = tempfile::tempdir().unwrap();
         let longest = "v".repeat(galata_wire::MAX_TOKEN);
-        let segment = venues_quotes(dir.path(), &[&longest, &longest]);
+        let segment = another_venues_quotes(dir.path(), &longest);
         assert_eq!(
-            galata_segments::string_bounds(&segment, "venue").unwrap(),
-            Some((longest.clone(), longest))
+            galata_segments::label(&segment, crate::tape::VENUE_LABEL).unwrap(),
+            Some(longest)
         );
     }
 

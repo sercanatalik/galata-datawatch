@@ -18,11 +18,11 @@ use arrow::array::{
     UInt64Builder,
 };
 use arrow::record_batch::RecordBatch;
-use galata_segments::{Codec, Cursor, write_segment_pruned};
+use galata_segments::{Codec, Cursor, write_segment_labelled};
 use galata_wire::{Envelope, Event, Kind, Num};
 
 use crate::tape::layout::partition_of;
-use crate::tape::schema::{PRUNE_ON, schema_for};
+use crate::tape::schema::{PRUNE_ON, VENUE_LABEL, schema_for};
 
 /// The scale every price and size is written at: `decimal(38,18)`.
 const SCALE: u32 = 18;
@@ -160,7 +160,7 @@ impl Tape {
         let rows = std::mem::take(&mut self.buffered);
         let mut written = Vec::new();
 
-        for (partition, kind, mut group) in group(rows) {
+        for (partition, kind, venue, mut group) in group(rows) {
             // **Sorted by venue, then ticker, then venue time.** In that order
             // because it is decreasing cardinality and increasing selectivity:
             // a venue predicate skips whole row groups, a ticker predicate
@@ -184,12 +184,13 @@ impl Tape {
             if batch.num_rows() == 0 {
                 continue;
             }
-            written.push(write_segment_pruned(
+            written.push(write_segment_labelled(
                 &self.root.join(partition),
                 Cursor::Seq { first, last },
                 &batch,
                 self.codec,
                 &PRUNE_ON,
+                &[(VENUE_LABEL, &venue)],
             )?);
         }
         Ok(written)
@@ -216,8 +217,13 @@ fn ticker_of(envelope: &Envelope) -> &str {
 }
 
 /// Group into partitions, by dataset and by the date the row belongs to.
-fn group(rows: Vec<Row>) -> Vec<(PathBuf, Kind, Vec<Row>)> {
-    let mut out: BTreeMap<(String, Kind), Vec<Row>> = BTreeMap::new();
+fn group(rows: Vec<Row>) -> Vec<(PathBuf, Kind, String, Vec<Row>)> {
+    // **One venue per segment.** A stream sequence is numbered per venue, from
+    // that venue's own process, and a partition is shared by every venue that
+    // supplies the dataset. So a segment is made to be *one venue's stream over
+    // a range* — the unit every comparison of sequences needs — which legacy's
+    // `venue=` directory gave for free and this layout gives by grouping.
+    let mut out: BTreeMap<(String, Kind, String), Vec<Row>> = BTreeMap::new();
     for row in rows {
         let kind = row.envelope.kind();
         // **Partitioned by the venue's own time where it states one**, and by
@@ -226,12 +232,13 @@ fn group(rows: Vec<Row>) -> Vec<(PathBuf, Kind, Vec<Row>)> {
         // March writes it under today, and a date predicate finds nothing.
         let at = row.envelope.at_micros.unwrap_or(row.envelope.recv_micros);
         let partition = partition_of(kind, at);
-        out.entry((partition.to_string_lossy().to_string(), kind))
+        let venue = venue_of(&row.envelope).to_string();
+        out.entry((partition.to_string_lossy().to_string(), kind, venue))
             .or_default()
             .push(row);
     }
     out.into_iter()
-        .map(|((partition, kind), rows)| (PathBuf::from(partition), kind, rows))
+        .map(|((partition, kind, venue), rows)| (PathBuf::from(partition), kind, venue, rows))
         .collect()
 }
 
@@ -599,8 +606,9 @@ mod tests {
 
     #[test]
     fn rows_are_sorted_by_venue_then_ticker_then_time() {
-        // Decreasing cardinality, increasing selectivity: a venue predicate
-        // skips whole row groups, a ticker predicate skips within what is left.
+        // Decreasing cardinality, increasing selectivity. A venue predicate now
+        // skips whole SEGMENTS — one venue per segment — and within one, a
+        // ticker predicate skips row groups and time orders what is left.
         let root = tempfile::tempdir().unwrap();
         let mut tape = Tape::open(root.path());
         for row in [
@@ -612,13 +620,15 @@ mod tests {
             tape.take(row);
         }
         let written = tape.commit().unwrap();
+        assert_eq!(written.len(), 2, "one segment per venue");
+        assert_eq!(strings(&read(&written[1]), "venue"), ["rh-crypto"]);
         let batch = read(&written[0]);
 
         assert_eq!(
             strings(&batch, "venue"),
-            ["hyperliquid", "hyperliquid", "hyperliquid", "rh-crypto"]
+            ["hyperliquid", "hyperliquid", "hyperliquid"]
         );
-        assert_eq!(strings(&batch, "ticker"), ["BTC", "BTC", "ETH", "BTC"]);
+        assert_eq!(strings(&batch, "ticker"), ["BTC", "BTC", "ETH"]);
         let at = batch.column_by_name("at_micros").unwrap();
         let at = at
             .as_any()

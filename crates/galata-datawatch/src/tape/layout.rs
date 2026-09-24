@@ -57,7 +57,16 @@ pub enum LayoutProblem {
         /// What it said.
         name: String,
     },
-    /// Two segments claiming the same sequence range.
+    /// A segment that does not say whose rows it holds.
+    ///
+    /// Written before tape segments were labelled with their venue. It cannot
+    /// be compared with anything, because a sequence means something only
+    /// within one venue's stream.
+    Unlabelled {
+        /// Where.
+        path: PathBuf,
+    },
+    /// Two segments of one venue claiming the same sequence range.
     OverlappingRanges {
         /// One.
         a: PathBuf,
@@ -89,6 +98,9 @@ impl std::fmt::Display for LayoutProblem {
                 "{}: {name:?} is not a dataset this tape projects",
                 path.display()
             ),
+            LayoutProblem::Unlabelled { path } => {
+                write!(f, "{}: {}", path.display(), crate::tape::UNLABELLED_REMEDY)
+            }
             LayoutProblem::OverlappingRanges { a, b } => write!(
                 f,
                 "{} and {} claim overlapping sequence ranges — a redelivery that would \
@@ -146,8 +158,20 @@ pub fn check_layout(root: &Path) -> Vec<LayoutProblem> {
     // Reused rather than reimplemented: `galata-segments` already answers this,
     // and a second implementation of "do these ranges overlap" does not fail
     // when it drifts — it disagrees.
+    //
+    // **Within a venue.** A partition is shared by every venue that supplies
+    // the dataset, and each venue numbers its stream from its own process's
+    // boot — two venues started together have intersecting ranges that are no
+    // overlap at all. So ranges are compared per venue label.
+    let (overlaps, unlabelled) =
+        galata_segments::overlapping_ranges_by_label(root, crate::tape::VENUE_LABEL);
     problems.extend(
-        galata_segments::overlapping_ranges(root)
+        unlabelled
+            .into_iter()
+            .map(|path| LayoutProblem::Unlabelled { path }),
+    );
+    problems.extend(
+        overlaps
             .into_iter()
             .map(|(a, b)| LayoutProblem::OverlappingRanges { a, b }),
     );
@@ -274,5 +298,70 @@ mod tests {
         let path = partition_of(Kind::Quotes, 1_789_941_180_000_000);
         assert_eq!(path, PathBuf::from("kind=quotes").join("date=2026-09-20"));
         assert!(!path.to_string_lossy().contains("venue"));
+    }
+
+    /// Commit one venue's quotes at these sequences, as one segment.
+    fn committed(root: &Path, venue: &str, seqs: &[u64]) {
+        use crate::tape::writer::{Row, Tape};
+        use galata_wire::{Envelope, Event, Num, Quote, Ticker, Venue};
+        use std::str::FromStr;
+        let mut tape = Tape::open(root);
+        for (i, seq) in seqs.iter().enumerate() {
+            tape.take(Row {
+                stream_seq: *seq,
+                envelope: Envelope::new(
+                    Venue::new(venue).unwrap(),
+                    Ticker::new("BTC").unwrap(),
+                    Some(86_400_000_000 + i as i64),
+                    86_400_000_000,
+                    Event::Quote(Quote {
+                        bid_px: Some(Num::from_str("1").unwrap()),
+                        ask_px: None,
+                        bid_sz: None,
+                        ask_sz: None,
+                        bid_spread: None,
+                        ask_spread: None,
+                    }),
+                ),
+            });
+        }
+        tape.commit().unwrap();
+    }
+
+    #[test]
+    fn two_venues_ranges_intersecting_is_not_an_overlap() {
+        // Each venue numbers its stream from its own process's boot; two
+        // started together intersect, and that is no redelivery.
+        let dir = tempfile::tempdir().unwrap();
+        committed(dir.path(), "venue-a", &[100, 200]);
+        committed(dir.path(), "venue-b", &[150, 250]);
+        assert_eq!(check_layout(dir.path()), Vec::new());
+    }
+
+    #[test]
+    fn one_venues_ranges_intersecting_is() {
+        let dir = tempfile::tempdir().unwrap();
+        committed(dir.path(), "venue-a", &[100, 200]);
+        committed(dir.path(), "venue-a", &[150, 250]);
+        let problems = check_layout(dir.path());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(matches!(
+            problems[0],
+            LayoutProblem::OverlappingRanges { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unlabelled_segment_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        committed(dir.path(), "venue-a", &[100, 200]);
+        let date = dir.path().join("kind=quotes/date=1970-01-02");
+        let unlabelled = date.join("s-300_400.parquet");
+        std::fs::write(&unlabelled, b"written before labels").unwrap();
+        let problems = check_layout(dir.path());
+        assert_eq!(
+            problems,
+            vec![LayoutProblem::Unlabelled { path: unlabelled }]
+        );
     }
 }

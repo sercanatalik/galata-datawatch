@@ -49,6 +49,7 @@
 //! the caller `scripts/check-ingest-callers.sh` exists to refuse, and a reader
 //! that could write is a cache that can disagree with its source.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use arrow::record_batch::RecordBatch;
@@ -99,28 +100,52 @@ pub enum ReadError {
     /// A segment would not read.
     #[error(transparent)]
     Segment(#[from] galata_segments::SegmentError),
+    /// A segment does not say whose rows it holds, so it cannot be bounded.
+    #[error("{path}: {}", crate::tape::UNLABELLED_REMEDY)]
+    Unlabelled {
+        /// The segment.
+        path: PathBuf,
+    },
 }
 
-/// How far a root is readable.
+/// How far a root is readable — **per venue**.
 ///
 /// **A stream position, not a time.** See the module documentation for why the
 /// tape can state one and not the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **And one position per venue**, because a stream sequence is numbered per
+/// venue, from that venue's own process's boot. Two venues' numbers are
+/// related only by the accident of when each process started, so a single
+/// position bounds one venue and is arbitrary for the rest: it hid durable rows
+/// of a venue whose process started later, and would have shown undurable rows
+/// of one that started earlier.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bound {
-    /// The greatest stream sequence a caller may see.
-    pub position: i64,
+    /// The greatest stream sequence a caller may see, by venue.
+    pub positions: BTreeMap<String, i64>,
 }
 
 impl Bound {
-    /// The bound a root states about itself: the **minimum** durable frontier
-    /// across the declared scopes.
+    /// The greatest stream sequence a caller may see of one venue's rows.
+    ///
+    /// `None` for a venue the declared scopes hold nothing of: its rows are
+    /// withheld, because the safe direction is to withhold.
+    pub fn of_venue(&self, venue: &str) -> Option<i64> {
+        self.positions.get(venue).copied()
+    }
+
+    /// The bound a root states about itself: for each venue, the **minimum**
+    /// of that venue's durable frontier across the declared scopes.
     ///
     /// The maximum would claim coverage for a range some scope has not written,
     /// so a view taken at it is complete for one scope and holed for another.
     ///
     /// A scope that has written nothing means there is **no bound** — not
     /// "ignore that one", which is the silently-holed read arrived at by a
-    /// different route.
+    /// different route. The same holds one level down: a venue that has
+    /// written to one declared scope and not another has no bound either, and
+    /// every such `(scope, venue)` is named. A caller reading datasets that not
+    /// every venue supplies reads them one scope at a time.
     pub fn of(root: &Path, scopes: &[&str]) -> Result<Bound, ReadError> {
         if scopes.is_empty() {
             return Err(ReadError::NoScopes);
@@ -129,12 +154,59 @@ impl Bound {
         if !unwritten.is_empty() {
             return Err(ReadError::NoFrontier { scopes: unwritten });
         }
-        let (_, position) =
-            galata_segments::frontier(root, scopes).ok_or(ReadError::Incomparable)?;
-        Ok(Bound {
-            position: i64::try_from(position).map_err(|_| ReadError::Incomparable)?,
-        })
+        let mut frontiers = Vec::with_capacity(scopes.len());
+        for scope in scopes {
+            frontiers.push((*scope, venue_frontiers(&root.join(scope))?));
+        }
+        let venues: std::collections::BTreeSet<&String> =
+            frontiers.iter().flat_map(|(_, f)| f.keys()).collect();
+
+        let mut missing = Vec::new();
+        let mut positions = BTreeMap::new();
+        for venue in venues {
+            let mut least: Option<i64> = None;
+            for (scope, frontier) in &frontiers {
+                match frontier.get(venue) {
+                    Some(position) => least = Some(least.map_or(*position, |l| l.min(*position))),
+                    None => missing.push(format!("{scope} for venue={venue}")),
+                }
+            }
+            if let Some(position) = least {
+                positions.insert(venue.clone(), position);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ReadError::NoFrontier { scopes: missing });
+        }
+        Ok(Bound { positions })
     }
+}
+
+/// Each venue's durable frontier under one scope: the greatest sequence any
+/// of its segments reaches.
+///
+/// Whose a segment is comes from its label, never from a column statistic.
+fn venue_frontiers(scope_root: &Path) -> Result<BTreeMap<String, i64>, ReadError> {
+    let mut out: BTreeMap<String, i64> = BTreeMap::new();
+    for partition in galata_segments::partitions(scope_root) {
+        for (cursor, path) in galata_segments::list_segments(&partition) {
+            let galata_segments::Cursor::Seq { last, .. } = cursor else {
+                return Err(ReadError::Incomparable);
+            };
+            let last = i64::try_from(last).map_err(|_| ReadError::Incomparable)?;
+            let venue = segment_venue(&path)?;
+            let entry = out.entry(venue).or_insert(last);
+            *entry = (*entry).max(last);
+        }
+    }
+    Ok(out)
+}
+
+/// Whose rows a tape segment holds, from its label, or a refusal naming it.
+fn segment_venue(path: &Path) -> Result<String, ReadError> {
+    galata_segments::label(path, crate::tape::VENUE_LABEL)?.ok_or_else(|| ReadError::Unlabelled {
+        path: path.to_path_buf(),
+    })
 }
 
 /// The declared scopes that have written nothing.
@@ -196,8 +268,8 @@ impl Reader {
     }
 
     /// The bound this reader was opened at.
-    pub fn bound(&self) -> Bound {
-        self.bound
+    pub fn bound(&self) -> &Bound {
+        &self.bound
     }
 
     /// The rows a window holds, **as the bound permits**.
@@ -216,16 +288,21 @@ impl Reader {
         let mut out = Vec::new();
         for partition in self.partitions_for(window) {
             for (cursor, path) in galata_segments::list_segments(&partition) {
+                // **Bounded by its own venue's position.** A segment of a venue
+                // the declared scopes hold nothing of is withheld whole.
+                let Some(position) = self.bound.of_venue(&segment_venue(&path)?) else {
+                    continue;
+                };
                 // A segment whose every row is past the bound need not be
                 // opened. The name says so, which is the one exclusion a
                 // sequence-named segment can make cheaply.
                 if let galata_segments::Cursor::Seq { first, .. } = cursor
-                    && i64::try_from(first).is_ok_and(|first| first > self.bound.position)
+                    && i64::try_from(first).is_ok_and(|first| first > position)
                 {
                     continue;
                 }
                 for batch in galata_segments::read_segment(&path)? {
-                    let kept = self.keep(&batch, window)?;
+                    let kept = self.keep(&batch, window, position)?;
                     if kept.num_rows() > 0 {
                         out.push(kept);
                     }
@@ -248,7 +325,12 @@ impl Reader {
     /// also covers the day it was received. The alternative — scanning every
     /// partition on every read, in case one holds a timeless row — is the
     /// pruning thrown away for a case that is rare by construction.
-    fn keep(&self, batch: &RecordBatch, window: &Window) -> Result<RecordBatch, ReadError> {
+    fn keep(
+        &self,
+        batch: &RecordBatch,
+        window: &Window,
+        position: i64,
+    ) -> Result<RecordBatch, ReadError> {
         use arrow::array::{Array, BooleanArray, Int64Array, StringArray, UInt64Array};
 
         let at = batch
@@ -271,9 +353,7 @@ impl Reader {
                     _ => true,
                 };
                 let permitted = match seq {
-                    Some(seq) => {
-                        i64::try_from(seq.value(i)).is_ok_and(|seq| seq <= self.bound.position)
-                    }
+                    Some(seq) => i64::try_from(seq.value(i)).is_ok_and(|seq| seq <= position),
                     // A tape row without a stream sequence cannot be placed
                     // relative to the bound, so it is NOT shown. The safe
                     // direction is to withhold, not to reveal.
@@ -469,7 +549,11 @@ mod tests {
         tape.commit().unwrap();
 
         let reader = Reader::open(dir.path(), &["kind=quotes", "kind=funding"]).unwrap();
-        assert_eq!(reader.bound().position, 3, "the lesser, not the greater");
+        assert_eq!(
+            reader.bound().of_venue("hyperliquid"),
+            Some(3),
+            "the lesser, not the greater"
+        );
     }
 
     #[test]
@@ -482,12 +566,14 @@ mod tests {
         tape.commit().unwrap();
 
         let reader = Reader::open(dir.path(), &["kind=quotes"]).unwrap();
-        assert_eq!(reader.bound().position, 2);
+        assert_eq!(reader.bound().of_venue("hyperliquid"), Some(2));
 
         // A reader opened at an earlier bound must not see the later row.
         let earlier = Reader {
             root: dir.path().to_path_buf(),
-            bound: Bound { position: 1 },
+            bound: Bound {
+                positions: [("hyperliquid".to_string(), 1)].into(),
+            },
         };
         let window = Window {
             kind: galata_wire::Kind::Quotes,
@@ -656,5 +742,110 @@ mod tests {
             ticker: Some("DOGE".to_owned()),
         };
         assert_eq!(rows_in(&reader.view(window).unwrap()), 0);
+    }
+
+    fn funding_row(seq: u64, venue: &str) -> Row {
+        Row {
+            stream_seq: seq,
+            envelope: Envelope::new(
+                Venue::new(venue).unwrap(),
+                Ticker::new("BTC").unwrap(),
+                Some(100 * DAY),
+                100 * DAY,
+                Event::Funding(galata_wire::Funding {
+                    rate: Num::from_str("0.1").unwrap(),
+                    next_micros: None,
+                }),
+            ),
+        }
+    }
+
+    fn quotes_window() -> Window {
+        Window {
+            kind: galata_wire::Kind::Quotes,
+            from_micros: 0,
+            to_micros: 200 * DAY,
+            ticker: None,
+        }
+    }
+
+    #[test]
+    fn each_venue_has_its_own_bound() {
+        // Each venue numbers its stream from its own process's boot, so the
+        // numbers are comparable within a venue and nowhere else.
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(1_000, "venue-a", Some(100 * DAY)));
+        tape.take(row(5_000_000, "venue-b", Some(100 * DAY + 1)));
+        tape.commit().unwrap();
+
+        let reader = Reader::open(dir.path(), &["kind=quotes"]).unwrap();
+        assert_eq!(reader.bound().of_venue("venue-a"), Some(1_000));
+        assert_eq!(reader.bound().of_venue("venue-b"), Some(5_000_000));
+    }
+
+    #[test]
+    fn another_venues_numbering_does_not_hide_a_row() {
+        // Reproduced before the fix: venue-b's funding set one bound of 150,
+        // and venue-a's durable quote at 5,000,000 vanished from the view with
+        // no error. The same tape now refuses the two-scope read (venue-a has
+        // no funding), and each scope read alone returns every durable row.
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(5_000_000, "venue-a", Some(100 * DAY)));
+        tape.take(row(100, "venue-b", Some(100 * DAY + 1)));
+        tape.take(funding_row(150, "venue-b"));
+        tape.commit().unwrap();
+
+        let reader = Reader::open(dir.path(), &["kind=quotes"]).unwrap();
+        assert_eq!(
+            seqs(&reader.view(quotes_window()).unwrap()),
+            vec![100, 5_000_000]
+        );
+    }
+
+    #[test]
+    fn a_venue_missing_from_one_declared_scope_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(5_000_000, "venue-a", Some(100 * DAY)));
+        tape.take(row(100, "venue-b", Some(100 * DAY + 1)));
+        tape.take(funding_row(150, "venue-b"));
+        tape.commit().unwrap();
+
+        match Reader::open(dir.path(), &["kind=quotes", "kind=funding"]) {
+            Err(ReadError::NoFrontier { scopes }) => {
+                assert_eq!(scopes, vec!["kind=funding for venue=venue-a".to_string()]);
+            }
+            other => panic!("expected NoFrontier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_segment_written_before_labelling_refuses_the_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(1, "hyperliquid", Some(100 * DAY)));
+        tape.commit().unwrap();
+        // The same rows, rewritten without a label — as every segment written
+        // before labelling is.
+        let batch = galata_segments::read_segment(
+            &galata_segments::list_segments(&dir.path().join("kind=quotes/date=1970-04-11"))[0].1,
+        )
+        .unwrap()
+        .remove(0);
+        let written = galata_segments::write_segment_pruned(
+            &dir.path().join("kind=quotes/date=1970-04-11"),
+            galata_segments::Cursor::Seq { first: 7, last: 9 },
+            &batch,
+            galata_segments::Codec::Zstd,
+            &crate::tape::PRUNE_ON,
+        )
+        .unwrap();
+
+        match Reader::open(dir.path(), &["kind=quotes"]) {
+            Err(ReadError::Unlabelled { path }) => assert_eq!(path, written),
+            other => panic!("expected Unlabelled, got {other:?}"),
+        }
     }
 }

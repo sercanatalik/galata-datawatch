@@ -471,8 +471,10 @@ each flow against a copy of the real record before it was called done.
   rebuild holds the archive shared and the tape exclusive, and deletion holds
   both. Found on the way, and worse: `--replace` removed **every venue's**
   rows of a kind and day, because the tape partitions by `kind=/date=` and
-  carries venue as a column. Replacement is now per venue, by the footer's
-  `venue` bounds (`design/measured.md`).
+  carries venue as a column. Replacement is now per venue — by a label the
+  writer states in each segment's footer, not by a statistic — and so are the
+  layout check and the bounded reader's bound, which compared one venue's
+  sequence against another's (`design/measured.md`).
 - **The service itself.** The README gives the launchd shape; loading it on a
   machine is the operator's step, and the record starts being maintained the
   night it is taken.

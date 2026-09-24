@@ -13,6 +13,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
 use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
 
@@ -177,7 +178,7 @@ impl Codec {
 /// reads by venue, ticker and venue time and never by receipt. A single
 /// constant would have made one of them pay for statistics it cannot use and
 /// left the other with none it can.
-fn properties(codec: Codec, prune_on: &[&str]) -> WriterProperties {
+fn properties(codec: Codec, prune_on: &[&str], labels: &[(&str, &str)]) -> WriterProperties {
     let mut builder = WriterProperties::builder()
         .set_compression(codec.to_parquet())
         .set_max_row_group_row_count(Some(MAX_ROW_GROUP_ROWS))
@@ -197,6 +198,18 @@ fn properties(codec: Codec, prune_on: &[&str]) -> WriterProperties {
     for column in prune_on {
         builder = builder
             .set_column_statistics_enabled(ColumnPath::from(*column), EnabledStatistics::Chunk);
+    }
+    // **Labels are stated, not computed.** A statistic is the writer's
+    // measurement of the rows and may answer only *no* — arrow-rs has shipped
+    // wrong string bounds. A label is what the caller says the segment is, read
+    // back byte for byte, so a reader may act on it as a *yes*.
+    if !labels.is_empty() {
+        builder = builder.set_key_value_metadata(Some(
+            labels
+                .iter()
+                .map(|(key, value)| KeyValue::new((*key).to_string(), (*value).to_string()))
+                .collect(),
+        ));
     }
     builder.build()
 }
@@ -243,6 +256,22 @@ impl SegmentWriter {
         codec: Codec,
         prune_on: &[&str],
     ) -> Result<Self, SegmentError> {
+        SegmentWriter::create_labelled(dir, cursor, schema, codec, prune_on, &[])
+    }
+
+    /// The same, stating labels in the footer's key-value metadata.
+    ///
+    /// Read back with [`crate::label`]. For a fact the writer knows and a
+    /// reader must be able to act on — whose rows these are — where a column
+    /// statistic would only be an inference.
+    pub fn create_labelled(
+        dir: &Path,
+        cursor: Cursor,
+        schema: SchemaRef,
+        codec: Codec,
+        prune_on: &[&str],
+        labels: &[(&str, &str)],
+    ) -> Result<Self, SegmentError> {
         std::fs::create_dir_all(dir).map_err(|source| SegmentError::CreateDir {
             path: dir.to_path_buf(),
             source,
@@ -260,7 +289,7 @@ impl SegmentWriter {
         // from the parquet logical types, and a both-ways read-parity test
         // holds that claim rather than assuming it.
         let options = ArrowWriterOptions::new()
-            .with_properties(properties(codec, prune_on))
+            .with_properties(properties(codec, prune_on, labels))
             .with_skip_arrow_metadata(true);
 
         let writer =
@@ -379,7 +408,23 @@ pub fn write_segment_pruned(
     if batch.num_rows() == 0 {
         return Err(SegmentError::Empty);
     }
-    let mut writer = SegmentWriter::create_pruned(dir, cursor, batch.schema(), codec, prune_on)?;
+    write_segment_labelled(dir, cursor, batch, codec, prune_on, &[])
+}
+
+/// Write one batch as a labelled segment. See [`SegmentWriter::create_labelled`].
+pub fn write_segment_labelled(
+    dir: &Path,
+    cursor: Cursor,
+    batch: &RecordBatch,
+    codec: Codec,
+    prune_on: &[&str],
+    labels: &[(&str, &str)],
+) -> Result<PathBuf, SegmentError> {
+    if batch.num_rows() == 0 {
+        return Err(SegmentError::Empty);
+    }
+    let mut writer =
+        SegmentWriter::create_labelled(dir, cursor, batch.schema(), codec, prune_on, labels)?;
     writer.write(batch)?;
     writer.finish()
 }

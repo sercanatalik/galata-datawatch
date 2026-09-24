@@ -28,9 +28,10 @@ pub use error::SegmentError;
 pub use hold::{HOLD_FILE, Hold, Mode, hold, hold_shared, wait};
 pub use listing::{
     frontier, last_durable, last_durable_for_scope, list_segments, mixed_cursors,
-    overlapping_ranges, partitions, scannable,
+    overlapping_ranges, overlapping_ranges_by_label, partitions, scannable,
 };
-pub use reader::{read_segment, read_segment_range, row_groups_for_range, string_bounds};
+pub use reader::{label, read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{
-    Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment, write_segment_pruned,
+    Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment, write_segment_labelled,
+    write_segment_pruned,
 };

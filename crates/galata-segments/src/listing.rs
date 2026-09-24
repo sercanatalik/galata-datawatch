@@ -190,16 +190,59 @@ pub fn frontier(root: &Path, scopes: &[&str]) -> Option<(Variant, i128)> {
 pub fn overlapping_ranges(root: &Path) -> Vec<(PathBuf, PathBuf)> {
     let mut overlaps = Vec::new();
     for dir in partitions(root) {
-        let listed = list_segments(&dir);
-        for window in listed.windows(2) {
-            let (a, a_path) = &window[0];
-            let (b, b_path) = &window[1];
-            if a.variant() == b.variant() && b.first_position() <= a.last_position() {
-                overlaps.push((a_path.clone(), b_path.clone()));
-            }
-        }
+        overlaps.extend(overlaps_in(&list_segments(&dir)));
     }
     overlaps
+}
+
+/// The same, comparing only segments that carry the same value for a label.
+///
+/// For a store whose partitions are shared by several independently numbered
+/// streams — the tape, where every venue that supplies a dataset writes into
+/// one `kind=/date=` partition and numbers its sequences from its own clock.
+/// Two streams' ranges intersecting there is not an overlap, and reporting it
+/// as one would fail every run that meets it.
+///
+/// Returns the overlaps, and every segment that carries no such label: it
+/// cannot be grouped, and guessing its group is the defect this exists to
+/// avoid. A segment whose footer will not read is returned as unlabelled too,
+/// since it is not known whose it is.
+pub fn overlapping_ranges_by_label(
+    root: &Path,
+    key: &str,
+) -> (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>) {
+    let mut overlaps = Vec::new();
+    let mut unlabelled = Vec::new();
+    for dir in partitions(root) {
+        let mut streams: std::collections::BTreeMap<String, Vec<(Cursor, PathBuf)>> =
+            std::collections::BTreeMap::new();
+        for (cursor, path) in list_segments(&dir) {
+            match crate::reader::label(&path, key) {
+                Ok(Some(value)) => streams.entry(value).or_default().push((cursor, path)),
+                Ok(None) | Err(_) => unlabelled.push(path),
+            }
+        }
+        for listed in streams.values() {
+            overlaps.extend(overlaps_in(listed));
+        }
+    }
+    (overlaps, unlabelled)
+}
+
+/// Consecutive segments of one sorted listing whose ranges intersect.
+///
+/// The one definition of *overlap* both of the above use, so the two cannot
+/// drift into disagreeing about it.
+fn overlaps_in(listed: &[(Cursor, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
+    listed
+        .windows(2)
+        .filter(|window| {
+            let (a, _) = &window[0];
+            let (b, _) = &window[1];
+            a.variant() == b.variant() && b.first_position() <= a.last_position()
+        })
+        .map(|window| (window[0].1.clone(), window[1].1.clone()))
+        .collect()
 }
 
 fn fold_cursors(dir: &Path, f: &mut impl FnMut(Cursor)) {

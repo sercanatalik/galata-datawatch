@@ -370,6 +370,10 @@ mod tests {
     fn a_stale_record_is_reported_against_the_callers_clock() {
         use galata_segments::{Codec, Cursor, write_segment};
         let root = tempfile::tempdir().unwrap();
+        // The record's age is the archive's; the tape is its own root, empty
+        // here. One root doing both made an archive segment a tape segment,
+        // which the tape now reports for carrying no venue label.
+        let tape = tempfile::tempdir().unwrap();
         let dir = root.path().join("kind=quotes/date=2026-09-20");
         let batch = arrow::record_batch::RecordBatch::try_new(
             std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
@@ -404,7 +408,7 @@ mod tests {
         // Sixty seconds later: stale.
         let report = watch(
             root.path(),
-            root.path(),
+            tape.path(),
             "2026-09-21",
             &thresholds,
             160 * SECOND,
@@ -422,7 +426,7 @@ mod tests {
         // Ten seconds later: not.
         let fresh = watch(
             root.path(),
-            root.path(),
+            tape.path(),
             "2026-09-21",
             &thresholds,
             110 * SECOND,

@@ -26,7 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("scopes: {}", borrowed.join(", "));
 
     let reader = Reader::open(&root, &borrowed)?;
-    println!("bound: stream_seq <= {}", reader.bound().position);
+    for (venue, position) in &reader.bound().positions {
+        println!("bound: {venue} stream_seq <= {position}");
+    }
 
     let batches = reader.view(Window {
         kind,

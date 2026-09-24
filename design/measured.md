@@ -3482,3 +3482,61 @@ showed, before running a line; the same binary run again started in about
 20 s and passed in 0.02 s. That is launch-time assessment of a new executable
 on macOS, not the tests. It is the likeliest reason `tests, offline` has
 varied between 44 s and 233 s in the gate's own timing.
+
+## A stream sequence is per venue, and the tape compared it across venues — 2026-09-24
+
+**The root cause of the previous section, found one layer down.** Each capture
+process numbers its archive from its own boot time in microseconds
+(`Capture::new`: `from_seq(now)`), one process per venue. Tier 3 removed the
+tape's `venue=` level, so every venue that supplies a dataset writes into one
+`kind=/date=` partition. Three things compared sequences there: replacement
+(fixed last section, by statistics), the layout check, and the bounded
+reader. Both remaining defects were reproduced on the unchanged code:
+
+```
+  check_layout, venue-a 100..200 beside venue-b 150..250
+    → OverlappingRanges { s-100_200, s-150_250 }      a problem that is not one
+
+  venue-a quotes at 5,000,000; venue-b quotes at 100, funding at 150
+  Reader::open(["kind=quotes", "kind=funding"])
+    → Bound { position: 150 }, quotes seen [100]      venue-a's durable row gone
+```
+
+The second is the worse: no error, and a view that silently omits a venue's
+durable rows because another venue's process booted later.
+
+**Statistics were the wrong evidence, and the tower had already said so.**
+Its `Instrument::last_micros` doc: *statistics in this tree may answer only
+no.* arrow-rs has shipped wrong string min/max (apache/arrow-rs #641, #6867)
+and a statistics bug in arrow 60, the version pinned here (#11073). The
+previous section used `min = max = v` as a *yes* to delete a segment. Now
+every tape segment holds one venue by construction (the writer groups by
+venue) and states it as key-value footer metadata, `galata.venue`: stated by
+the writer, read back byte for byte, at footer cost. Replacement, the layout
+check and the bound all read the label, and `string_bounds` is gone.
+
+**The bound is now a position per venue.** Measured with the tower's
+`cost-of-a-bound` against the rebuilt real tape (2 `quotes` segments):
+
+```
+  open + bound, before (names only)        53 µs
+  open + bound, now (one label per segment) 124 µs
+  a full view of the same kind              3.0 ms
+```
+
+Still 24× cheaper than reading, which is the ratio the tower's watch rests on.
+**But it is no longer flat**: a footer is opened per segment, about 35 µs each
+here, so the cost grows with retained history. That is affordable today, and
+the remedy is known without being built: a segment is immutable after its
+rename, so a label can be cached by path. It is measured again when history
+makes it matter, not guessed at now.
+
+`var/tape` was rebuilt: 14 segments, every one labelled `hyperliquid`,
+`check_layout` clean.
+
+**And one guard defect on the way.** galata-tower's `check-against-tarballs.sh`
+packaged this workspace without the purge `check-tarball-builds.sh` has always
+done. Cargo treats a registry-sourced crate as immutable, so verifying
+galata-datawatch reused a galata-segments 0.1.0 compiled from the previous
+section's source, and failed on `label`, which the current source has. The purge
+is now a verb of this guard, and the tower calls it rather than copying it.
