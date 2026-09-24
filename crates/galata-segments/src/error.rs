@@ -66,15 +66,16 @@ pub enum SegmentError {
     /// nothing is a lie a reader cannot detect.
     #[error("nothing to write")]
     Empty,
-    /// Another compaction holds this root.
+    /// Another holder has this root in a mode that excludes the one asked for.
     ///
     /// A scheduler beside an operator's hand is two compactors on one tree, and
     /// two compactors on one partition leave the same rows twice under two
-    /// names — a twin the interruption rule was never asked to resolve. So the
-    /// tool refuses.
-    #[error("another compaction holds {root}")]
+    /// names — a twin the interruption rule was never asked to resolve. A
+    /// reader beside a compactor lists a segment that is about to be removed.
+    /// So the holder that would collide refuses. See [the `hold` module](mod@crate::hold).
+    #[error("{root} is held by another writer or reader (a compaction, a deletion or a rebuild)")]
     Held {
-        /// The root somebody else is compacting.
+        /// The root somebody else holds.
         root: PathBuf,
     },
     /// The hold itself could not be taken.

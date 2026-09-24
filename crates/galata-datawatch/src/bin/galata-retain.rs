@@ -95,6 +95,21 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     galata_segments::scannable(&config.paths.archive)?;
     galata_segments::scannable(&config.paths.tape)?;
 
+    // **Deleting holds both stores, before it lists what to delete.** It
+    // removes whole partitions, so a rebuild or a compaction beside it would
+    // read a directory that vanishes under it. Refused rather than waited
+    // for: a deletion is not urgent, and a refusal names who was in the way.
+    // Archive before tape, the order every holder of both takes. The report
+    // removes nothing and takes nothing.
+    let _held = if delete {
+        Some((
+            galata_segments::hold(&config.paths.archive)?,
+            galata_segments::hold(&config.paths.tape)?,
+        ))
+    } else {
+        None
+    };
+
     let swept = retain::sweep(&config.paths.archive, &config.paths.tape, &policy, now);
 
     for path in &swept.unclassified {

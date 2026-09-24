@@ -467,11 +467,12 @@ each flow against a copy of the real record before it was called done.
 
 ### Still open in this tier
 
-- **A rebuild run by hand while the lane compacts.** The `galata-record`
-  resource orders the lane's own writers; `galata-tape-rebuild` takes no lock
-  of its own, so an operator's rebuild outside cereyan can still list a
-  segment a compaction is renaming away. The remedy is a shared hold in the
-  binary — a Rust change, and a small one — not more scheduling.
+- ~~**A rebuild run by hand while the lane compacts.**~~ **Done** — the
+  rebuild holds the archive shared and the tape exclusive, and deletion holds
+  both. Found on the way, and worse: `--replace` removed **every venue's**
+  rows of a kind and day, because the tape partitions by `kind=/date=` and
+  carries venue as a column. Replacement is now per venue, by the footer's
+  `venue` bounds (`design/measured.md`).
 - **The service itself.** The README gives the launchd shape; loading it on a
   machine is the operator's step, and the record starts being maintained the
   night it is taken.

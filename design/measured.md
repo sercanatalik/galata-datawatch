@@ -3426,3 +3426,59 @@ The same session ran every scheduled flow once against a copy of `var/`:
 block); `judge-the-record` *nothing to report* over 13 partitions. The first
 of those runs is also where `NO_COLOR` came from: tracing-subscriber coloured
 every line, and the run results were escape codes.
+
+## `--replace` took every venue's tape, and the holds that did not exist — 2026-09-24
+
+**Found by reading, reproduced before it was fixed.** The tape partitions by
+`kind=/date=` and carries `venue` as a column (Tier 3, above), and
+`--replace` removed each partition it would write with `remove_dir_all`. So
+replacing one venue's day removed **every** venue's rows of that kind and
+day. `another_venues_rows_survive_replacement` was written first and failed
+on the unchanged code: *"another venue's segment did not survive a
+replacement of hyperliquid."* Latent only because one venue is declared. The
+nightly projection rebuilds each declared venue in turn, so the day a second
+venue joined `quotes`, the second projected would have erased the first's,
+every night, with the gate green.
+
+**Fixed at segment granularity, by the footer.** `venue` is already a
+`PRUNE_ON` column, so every tape segment's footer states its venue bounds.
+Replacement now removes a segment only when `min = max = a venue this run
+rebuilds`, refuses a mixed or statistics-less segment by name, and plans every
+removal before making any. Checked against the real tape: all 14 segments in
+`var/tape` carry exact bounds (`hyperliquid` .. `hyperliquid`), so nothing
+existing refuses. **DuckDB 1.5.5's `parquet_metadata` reports `stats_min` and
+`stats_max` as NULL for every one of them.** Those are the deprecated footer
+fields; the bounds are in `stats_min_value`/`stats_max_value`. Asking the
+wrong column says a healthy tape has no statistics.
+
+Across processes, with the release binary, on a copy of the record: a
+`rh-crypto` quotes segment planted beside `hyperliquid`'s (39,231 rows beside
+40,611, written by DuckDB with exact statistics) was **byte-identical** after
+`galata-tape-rebuild --replace hyperliquid` (sha256 `825d3ceed6cfba8d…` before
+and after), and both venues' counts were unchanged.
+
+**Holds.** `galata-segments` gained a shared mode on the same `.compact.lock`.
+The rebuild holds the archive shared and the tape exclusive, and waits up to
+ten minutes. Deletion holds both exclusively and refuses. Observed with a
+second process holding the archive exclusively for 3 s: the rebuild logged
+that it was waiting and finished after 3.95 s. Deletion and compaction then
+each refused by name in **40 of 40** trials.
+
+**And three trials that did not.** The first three cross-process checks, run
+by hand, had `galata-compact` and `galata-retain --delete` take their
+exclusive hold beside a Python process's `flock(LOCK_EX)` on the same path.
+In the same minutes the rebuild's shared hold *was* refused by that holder,
+which rules out a wrong path. Nothing was rebuilt in between. Every one of the
+46 trials after them refused correctly, including three on a fresh copy with
+the holder's and the path's inode compared and equal. **Unexplained.** It is
+recorded rather than dropped, and the claim is now checked on every gate run
+by `tests/holds.rs`, where the test binary re-runs itself as the other
+holder. The unit tests had only ever taken both holds inside one process,
+which proves the modes and not the claim.
+
+**The same session found why this machine's test runs stall.** A freshly
+linked test binary sat in `_dyld_start` for over five minutes, as `sample`
+showed, before running a line; the same binary run again started in about
+20 s and passed in 0.02 s. That is launch-time assessment of a new executable
+on macOS, not the tests. It is the likeliest reason `tests, offline` has
+varied between 44 s and 233 s in the gate's own timing.

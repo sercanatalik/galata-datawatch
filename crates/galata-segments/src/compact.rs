@@ -20,7 +20,6 @@
 //! record. A *rebuild* would not be, and is not this.
 
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use crate::cursor::Cursor;
@@ -28,70 +27,6 @@ use crate::error::SegmentError;
 use crate::listing::{list_segments, mixed_cursors, partitions};
 use crate::reader::read_segment;
 use crate::writer::{Codec, SegmentWriter};
-
-/// The file a compaction holds for the length of its run.
-///
-/// Dotted and not a segment name, so it is neither a segment to a listing nor a
-/// reason to call its directory a partition.
-pub const HOLD_FILE: &str = ".compact.lock";
-
-/// One compaction's exclusive hold on a root.
-///
-/// Dropping it — or dying with it — releases the hold: the lock is the kernel's
-/// advisory lock on the open file, not a file whose presence means anything, so
-/// a killed compaction leaves nothing to clear.
-#[derive(Debug)]
-pub struct Hold {
-    _file: File,
-    root: PathBuf,
-}
-
-impl Hold {
-    /// The root this hold covers.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-}
-
-/// Take the hold on a root, or learn who has it.
-///
-/// Two compactors on one partition each write a replacement over the same
-/// originals; both renames succeed, both removals succeed, and the partition
-/// holds its rows twice under two names. The interruption rule below handles
-/// *nesting*, not twins — so the case is refused by construction rather than
-/// resolved after the fact.
-///
-/// The hold is the tool's, not a scheduler's: a `mkdir` lock in a shell would
-/// be one scheduler's opinion and would go stale on a kill.
-pub fn hold(root: &Path) -> Result<Hold, SegmentError> {
-    std::fs::create_dir_all(root).map_err(|source| SegmentError::CreateDir {
-        path: root.to_path_buf(),
-        source,
-    })?;
-    let path = root.join(HOLD_FILE);
-    let file = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .map_err(|source| SegmentError::Hold {
-            root: root.to_path_buf(),
-            source,
-        })?;
-    match file.try_lock() {
-        Ok(()) => Ok(Hold {
-            _file: file,
-            root: root.to_path_buf(),
-        }),
-        Err(std::fs::TryLockError::WouldBlock) => Err(SegmentError::Held {
-            root: root.to_path_buf(),
-        }),
-        Err(std::fs::TryLockError::Error(source)) => Err(SegmentError::Hold {
-            root: root.to_path_buf(),
-            source,
-        }),
-    }
-}
 
 /// What one partition's compaction did.
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -17,20 +17,20 @@
 pub mod compact;
 pub mod cursor;
 pub mod error;
+pub mod hold;
 pub mod listing;
 pub mod reader;
 pub mod writer;
 
-pub use compact::{
-    Compacted, HOLD_FILE, Hold, compact_closed, compact_partition, hold, nested, overdue_closed,
-};
+pub use compact::{Compacted, compact_closed, compact_partition, nested, overdue_closed};
 pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;
+pub use hold::{HOLD_FILE, Hold, Mode, hold, hold_shared, wait};
 pub use listing::{
     frontier, last_durable, last_durable_for_scope, list_segments, mixed_cursors,
     overlapping_ranges, partitions, scannable,
 };
-pub use reader::{read_segment, read_segment_range, row_groups_for_range};
+pub use reader::{read_segment, read_segment_range, row_groups_for_range, string_bounds};
 pub use writer::{
     Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment, write_segment_pruned,
 };

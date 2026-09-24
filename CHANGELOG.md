@@ -38,6 +38,9 @@ First release. Nothing is on crates.io yet, so everything is new.
 - Partitions, the frontier, `overdue_closed`, and a cursor API over segments.
 - Useful on its own: it is the crate a reader takes to ask what a record holds
   without taking a capture loop.
+- Holds on a root, exclusive for a writer and shared for a reader, on one
+  advisory lock released by process exit — `hold`, `hold_shared`, and a
+  bounded `wait`. Checked across processes, not only within one.
 
 **`galata-broker` — the bus, over NATS.**
 
@@ -64,7 +67,8 @@ First release. Nothing is on crates.io yet, so everything is new.
   not been called**: no credentials were obtained and none should be.
 - The tape: parquet a `SELECT` can read with no flags, rebuilt deterministically
   — twice over a frozen archive gives identical segment names and identical
-  bytes.
+  bytes. `--replace` replaces only the rebuilt venue's segments: a partition
+  is shared by every venue that supplies its dataset.
 - Configuration from a file or from a vault document, through one validator, so
   a document refuses exactly as a file does. The broker password can come from
   either the environment or the vault.

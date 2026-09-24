@@ -115,6 +115,48 @@ pub fn row_groups_for_range(
     Ok((selected, total))
 }
 
+/// A string column's exact bounds across every row group, from the footer.
+///
+/// `Ok(None)` when any row group carries no statistics for the column, or
+/// carries bounds the writer marked inexact (truncated): an answer made of
+/// some groups' bounds is not an answer about the segment. Reads the footer
+/// only — no data page is decoded.
+///
+/// Exists so a writer that removes segments can ask *whose rows are these*
+/// without reading them: the tape's replacement keeps another venue's segment
+/// by its `venue` bounds.
+pub fn string_bounds(path: &Path, column: &str) -> Result<Option<(String, String)>, SegmentError> {
+    let builder = builder(path)?;
+    let Some(index) = builder
+        .parquet_schema()
+        .columns()
+        .iter()
+        .position(|c| c.path().string() == column)
+    else {
+        return Ok(None);
+    };
+    let mut bounds: Option<(Vec<u8>, Vec<u8>)> = None;
+    for group in builder.metadata().row_groups() {
+        let Some(stats) = group.column(index).statistics() else {
+            return Ok(None);
+        };
+        let (Some(min), Some(max)) = (stats.min_bytes_opt(), stats.max_bytes_opt()) else {
+            return Ok(None);
+        };
+        if !stats.min_is_exact() || !stats.max_is_exact() {
+            return Ok(None);
+        }
+        bounds = Some(match bounds {
+            None => (min.to_vec(), max.to_vec()),
+            Some((lo, hi)) => (lo.min(min.to_vec()), hi.max(max.to_vec())),
+        });
+    }
+    Ok(
+        bounds
+            .and_then(|(lo, hi)| Some((String::from_utf8(lo).ok()?, String::from_utf8(hi).ok()?))),
+    )
+}
+
 fn builder(path: &Path) -> Result<ParquetRecordBatchReaderBuilder<File>, SegmentError> {
     let file = File::open(path).map_err(|source| SegmentError::Write {
         path: path.to_path_buf(),

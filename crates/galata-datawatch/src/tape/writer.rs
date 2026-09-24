@@ -138,6 +138,18 @@ impl Tape {
         out
     }
 
+    /// The venues among the buffered rows, sorted.
+    ///
+    /// What a replacing rebuild is entitled to remove: a partition is shared by
+    /// every venue that supplies its dataset, so *this run's partitions* is not
+    /// *this run's rows*, and the venue is what tells them apart.
+    pub fn pending_venues(&self) -> std::collections::BTreeSet<String> {
+        self.buffered
+            .iter()
+            .map(|row| venue_of(&row.envelope).to_string())
+            .collect()
+    }
+
     /// Take a row. Nothing is durable until [`Tape::commit`].
     pub fn take(&mut self, row: Row) {
         self.buffered.push(row);

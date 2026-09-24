@@ -23,6 +23,7 @@ use galata_datawatch::adapters::{self, AdapterConfig};
 use galata_datawatch::calendar::midnight_of;
 use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource};
 use galata_datawatch::tape;
+use galata_segments::{Hold, Mode};
 
 /// Done.
 const DONE: i32 = 0;
@@ -34,6 +35,14 @@ const BAD_ARGUMENT: i32 = 2;
 const NOTHING: i32 = 3;
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// How long to wait for a compaction or a deletion to release a root.
+///
+/// The longest hold measured is a compaction of the 4-hour soak's archive,
+/// 64,587 segments in 9.44 s; a full day extrapolates to about a minute. Ten
+/// minutes is ten times that, so a wait this long means a holder is stuck,
+/// and the refusal after it names the root.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
 
 struct Resolver;
 
@@ -78,8 +87,9 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             eprintln!(
                 "usage: galata-tape-rebuild [--replace] <venue> <date>\n       \
                  galata-tape-rebuild [--replace] <venue> <from-date> <to-date>   (half-open)\n\n\
-                 --replace removes the partitions this run will write, BEFORE writing them, so \
-                 they are empty for the duration of the rebuild. The tape is a cache and the \
+                 --replace removes this venue's segments from the partitions this run will write, \
+                 BEFORE writing them, so this venue's rows there are absent for the duration of the \
+                 rebuild. Other venues' segments in the same partitions are left alone. The tape is a cache and the \
                  archive is untouched, so the remedy for a crash in that window is to run it \
                  again.\n\n\
                  Without it, a re-run after the archive has grown leaves both copies and \
@@ -132,6 +142,15 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     // nobody checked.
     galata_segments::scannable(&config.paths.archive)?;
 
+    // **Read shared, write exclusive, archive before tape — for the whole run.**
+    // Shared on the archive so a compaction or a deletion cannot remove a
+    // segment between the listing and the read, while other readers carry on;
+    // exclusive on the tape because a replacement removes what another
+    // rebuild may be writing beside. Waiting rather than refusing: what this
+    // waits for is bounded, and a rebuild late is better than none.
+    let _reading = hold_or_wait(&config.paths.archive, Mode::Shared)?;
+    let _writing = hold_or_wait(&config.paths.tape, Mode::Exclusive)?;
+
     let report = tape::rebuild_with(
         &config.paths.archive,
         &config.paths.tape,
@@ -164,4 +183,15 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(BROKEN);
     }
     Ok(DONE)
+}
+
+/// Take a root's hold, saying so if another holder makes this wait.
+fn hold_or_wait(root: &std::path::Path, mode: Mode) -> Result<Hold, galata_segments::SegmentError> {
+    match galata_segments::wait(root, mode, std::time::Duration::ZERO) {
+        Err(galata_segments::SegmentError::Held { .. }) => {
+            tracing::info!(root = %root.display(), ?mode, "another holder has this root; waiting");
+            galata_segments::wait(root, mode, PATIENCE)
+        }
+        taken => taken,
+    }
 }

@@ -43,7 +43,36 @@ pub enum RebuildError {
     /// The record refused.
     #[error(transparent)]
     Record(#[from] crate::record::RecordError),
-    /// A partition could not be removed.
+    /// A segment in a partition this run writes holds more than one venue.
+    ///
+    /// Replacing one venue inside it would mean rewriting the others' rows,
+    /// which a cache rebuild does not do behind anyone's back. Refused before
+    /// anything is removed.
+    #[error(
+        "{path} holds more than one venue, so replacing one of them would take the others; \
+         the tape is a cache — remove it and rebuild every venue it held"
+    )]
+    MixedVenues {
+        /// The segment.
+        path: std::path::PathBuf,
+    },
+    /// A segment in a partition this run writes does not say whose rows it holds.
+    ///
+    /// Kept, it would overlap the replacement; removed, it might be another
+    /// venue's. Neither is this tool's to guess. Refused before anything is
+    /// removed.
+    #[error(
+        "{path} carries no exact venue statistics, so whose rows it holds is unknown; \
+         the tape is a cache — remove it and rebuild every venue it held"
+    )]
+    UnknownVenue {
+        /// The segment.
+        path: std::path::PathBuf,
+    },
+    /// A segment's footer would not read.
+    #[error(transparent)]
+    Footer(#[from] galata_segments::SegmentError),
+    /// A segment could not be removed.
     #[error("{path}: {source}")]
     Replace {
         /// Which.
@@ -64,7 +93,8 @@ pub struct Rebuilt {
     pub rows: usize,
     /// Segments the tape committed.
     pub segments: usize,
-    /// Partitions removed before writing, where replacement was asked for.
+    /// Segments removed before writing, where replacement was asked for —
+    /// only ever the rebuilt venues' own.
     pub replaced: usize,
     /// Payloads that would not normalise.
     ///
@@ -83,7 +113,7 @@ impl Rebuilt {
     /// A line an operator can act on.
     pub fn report(&self) -> String {
         format!(
-            "{} payloads → {} rows in {} segments ({} unparsed, {} partitions replaced)",
+            "{} payloads → {} rows in {} segments ({} unparsed, {} segments replaced)",
             self.payloads, self.rows, self.segments, self.unparsed, self.replaced
         )
     }
@@ -121,7 +151,9 @@ pub fn rebuild(
 pub enum Replace {
     /// Leave existing segments. An overlap is reported by `check_layout`.
     Never,
-    /// Remove the partitions this run will write, **before** writing them.
+    /// Remove, from the partitions this run will write, the segments holding
+    /// only the rebuilt venues' rows — **before** writing them. Another venue's
+    /// segment in the same partition is left alone.
     Partitions,
 }
 
@@ -193,19 +225,36 @@ pub fn rebuild_with(
     }
 
     if replace == Replace::Partitions {
-        // **Only the partitions this run will write.** A dataset with no rows
-        // in the range is left alone: *this rebuild produced no trades* and
-        // *there are no trades* are different claims, and only one of them is
-        // this tool's to make.
+        // **Only this run's venues, in only the partitions this run will
+        // write.** A dataset with no rows in the range is left alone: *this
+        // rebuild produced no trades* and *there are no trades* are different
+        // claims. And a partition is `kind=/date=`, shared by every venue that
+        // supplies the dataset — so *this venue's quotes* is not *the quotes*,
+        // and a segment is kept or removed by the venue its footer names.
+        //
+        // **Planned in full, then removed.** A refusal therefore means the
+        // tape was not touched, never that it was half-replaced.
+        let ours = tape.pending_venues();
+        let mut doomed = Vec::new();
         for partition in tape.pending_partitions() {
-            let path = tape_root.join(&partition);
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path).map_err(|source| RebuildError::Replace {
-                    path: path.clone(),
-                    source,
-                })?;
-                report.replaced += 1;
+            for (_, segment) in galata_segments::list_segments(&tape_root.join(&partition)) {
+                match galata_segments::string_bounds(&segment, "venue")? {
+                    Some((low, high)) if low == high => {
+                        if ours.contains(&low) {
+                            doomed.push(segment);
+                        }
+                    }
+                    Some(_) => return Err(RebuildError::MixedVenues { path: segment }),
+                    None => return Err(RebuildError::UnknownVenue { path: segment }),
+                }
             }
+        }
+        for segment in doomed {
+            std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {
+                path: segment.clone(),
+                source,
+            })?;
+            report.replaced += 1;
         }
     }
 
@@ -600,6 +649,185 @@ mod tests {
             crate::tape::check_layout(&tape),
             Vec::new(),
             "an overlap survived replacement"
+        );
+    }
+
+    /// Commit `venue`'s quotes for the fixture's day straight onto the tape,
+    /// as that venue's own rebuild would have: a segment holding its rows only.
+    fn another_venues_quotes(tape: &Path, venue: &str) -> std::path::PathBuf {
+        venues_quotes(tape, &[venue, venue])
+    }
+
+    /// One committed segment holding one quote per venue named, in order.
+    fn venues_quotes(tape: &Path, venues: &[&str]) -> std::path::PathBuf {
+        use galata_wire::{Envelope, Event, Num, Quote, Ticker, Venue};
+        use std::str::FromStr;
+        let mut writer = Tape::open(tape);
+        for (i, venue) in venues.iter().enumerate() {
+            let (seq, millis) = (900_000 + i as u64, 1_500 + 1_000 * i as i64);
+            writer.take(Row {
+                stream_seq: seq,
+                envelope: Envelope::new(
+                    Venue::new(*venue).unwrap(),
+                    Ticker::new("BTC").unwrap(),
+                    Some(millis * 1_000),
+                    millis * 1_000 + 7,
+                    Event::Quote(Quote {
+                        bid_px: Some(Num::from_str("81210.0").unwrap()),
+                        ask_px: Some(Num::from_str("81216.0").unwrap()),
+                        bid_sz: None,
+                        ask_sz: None,
+                        bid_spread: None,
+                        ask_spread: None,
+                    }),
+                ),
+            });
+        }
+        let mut written = writer.commit().unwrap();
+        assert_eq!(written.len(), 1);
+        written.remove(0)
+    }
+
+    #[test]
+    fn another_venues_rows_survive_replacement() {
+        // The tape partitions by kind and date; venue is a column. So a
+        // partition is shared by every venue that supplies the dataset, and
+        // replacing one venue's day must not take the others' with it.
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        let theirs = another_venues_quotes(&tape, "rh-crypto");
+        let before = std::fs::read(&theirs).unwrap();
+
+        rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        )
+        .unwrap();
+        grow(dir.path(), &hl, 100);
+        let report = rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        )
+        .unwrap();
+
+        assert!(report.replaced > 0, "nothing of hyperliquid's was replaced");
+        assert_eq!(
+            std::fs::read(&theirs).ok(),
+            Some(before),
+            "another venue's segment did not survive a replacement of hyperliquid"
+        );
+        assert_eq!(crate::tape::check_layout(&tape), Vec::new());
+    }
+
+    fn quotes_segments(tape: &Path) -> Vec<std::path::PathBuf> {
+        galata_segments::list_segments(&tape.join("kind=quotes/date=1970-01-01"))
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect()
+    }
+
+    #[test]
+    fn a_mixed_venue_segment_is_refused_before_anything_is_removed() {
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        // hyperliquid's own segment, which a replacement WOULD remove…
+        rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+        // …beside one holding two venues, which it cannot.
+        let mixed = venues_quotes(&tape, &["hyperliquid", "rh-crypto"]);
+        let before = quotes_segments(&tape);
+        assert_eq!(before.len(), 2);
+
+        grow(dir.path(), &hl, 100);
+        let refused = rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        );
+
+        match refused {
+            Err(RebuildError::MixedVenues { path }) => assert_eq!(path, mixed),
+            other => panic!("expected MixedVenues, got {other:?}"),
+        }
+        assert_eq!(
+            quotes_segments(&tape),
+            before,
+            "a refusal removed something"
+        );
+    }
+
+    #[test]
+    fn a_segment_without_venue_statistics_is_refused() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        // A segment written without statistics on `venue`, as a tape from
+        // before `venue` joined PRUNE_ON would be.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "venue",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["rh-crypto"]))],
+        )
+        .unwrap();
+        let silent = galata_segments::write_segment(
+            &tape.join("kind=quotes/date=1970-01-01"),
+            galata_segments::Cursor::Seq { first: 5, last: 5 },
+            &batch,
+            galata_segments::Codec::Zstd,
+        )
+        .unwrap();
+
+        let refused = rebuild_with(
+            &root,
+            &tape,
+            &hl,
+            None,
+            i64::MIN,
+            i64::MAX,
+            Replace::Partitions,
+        );
+        match refused {
+            Err(RebuildError::UnknownVenue { path }) => assert_eq!(path, silent),
+            other => panic!("expected UnknownVenue, got {other:?}"),
+        }
+        assert!(silent.exists(), "an unknown segment was removed");
+    }
+
+    #[test]
+    fn the_longest_valid_venue_is_read_exactly() {
+        // Parquet may truncate string statistics. A venue is a token of at most
+        // 64 bytes, and a truncated bound would make its segment unknown.
+        let dir = tempfile::tempdir().unwrap();
+        let longest = "v".repeat(galata_wire::MAX_TOKEN);
+        let segment = venues_quotes(dir.path(), &[&longest, &longest]);
+        assert_eq!(
+            galata_segments::string_bounds(&segment, "venue").unwrap(),
+            Some((longest.clone(), longest))
         );
     }
 
