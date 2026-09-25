@@ -706,6 +706,14 @@ fills the fold ran in 0.4 ms with no break and no skew at 2×10⁻⁵.*
 
 ### Tier 15 — derived statistics
 
+*Built 2026-09-25 (`derive-statistics`) as a library and `galata-derive`,
+with no schedule and nothing stored. Each bucket's closing bar makes a
+return two real closes one bucket apart; a first rule that dropped returns
+across recorded gaps dropped every one of the Portfolio design's window, whose
+candles the venue had handed back after a 32.6 h outage. On that window every
+figure has n = 65 and a backfilled share of 1.00, and the intervals show
+BTC/GOLD's typed 0.11 was noise ([−0.40, 0.09]).*
+
 - A grid of returns aligned across instruments: a return spanning a `gaps`
   row is dropped, never interpolated, and candles the venue backfilled are
   flagged. Every ρ, σ and β carries its n, its window, its backfilled share

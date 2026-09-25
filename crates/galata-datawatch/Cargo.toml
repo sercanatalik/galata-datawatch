@@ -136,6 +136,10 @@ name = "galata-compact"
 required-features = ["bin"]
 
 [[bin]]
+name = "galata-derive"
+required-features = ["bin"]
+
+[[bin]]
 name = "galata-ledger"
 required-features = ["bin", "ledger"]
 

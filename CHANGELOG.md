@@ -144,7 +144,13 @@ First release. Nothing is on crates.io yet, so everything is new.
   fold_position_tolerance`, `fold_relative_tolerance`); funding and fees
   per book, cash flows per dex, and no equity without a mark. The ledger
   writes `ledger-fold-<venue>.json` after each events pass.
-- Binaries: `galata-datawatch <venue>`, `galata-ledger <venue>`,
+- **Derived statistics** (`derive-statistics`): a returns grid of each
+  bucket's closing bar, close-to-close volatility annualised by
+  √(365 × 86,400 ÷ bucket), correlation per pair with a Fisher interval,
+  beta on a reference, and absent cells below a declared floor naming the
+  thinner instrument. Every figure carries its n, its backfilled share and
+  the tape bound it read to. `galata-derive` prints them as JSON.
+- Binaries: `galata-datawatch <venue>`, `galata-ledger <venue>`, `galata-derive`,
   `galata-tape-rebuild`, `galata-retain`, `galata-watch`, `measure`.
 
 ### The two clocks, which every user meets

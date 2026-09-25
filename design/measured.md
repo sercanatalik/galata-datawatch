@@ -3905,3 +3905,33 @@ accounts (`clearinghouseState`). Counts and figures only.*
   notional, and every one was within **1.31×10⁻⁵ of notional**; an
   absolute 0.01 would have called 13 of them skew. So the fold's realised
   check takes a tolerance relative to notional, suggested 2×10⁻⁵.
+
+## Statistics derived from the real tape, beside the ones the design typed — 2026-09-25
+
+*`galata-derive hyperliquid 30m --from 2026-09-20T21:14 --to
+2026-09-22T06:30 --min-observations 20 --z 2 --reference BTC`, on the real
+`var/tape`: the window and horizon of the tower's Portfolio design, whose
+figures were typed into it with a caption, "read ρ as indicative".*
+
+**The first rule dropped everything.** It dropped a return across any
+recorded gap; one 32.6 h `downtime` gap covered the window, and every
+figure came back absent with n = 0. Yet the window held 2,095 final BTC
+bars, 2,088 of them handed back by the venue after the outage. Real prices:
+the gap says capture was not listening, not that they are false. The grid
+now takes each bucket's closing bar, so every return is two real closes
+exactly one bucket apart, and backfill is a share on the figure.
+
+| | typed in the design | derived | 95% interval |
+|---|---|---|---|
+| ρ BTC/ETH | 0.79 | 0.70 | [0.55, 0.81] |
+| ρ BTC/HYPE | 0.47 | 0.41 | [0.18, 0.60] |
+| ρ ETH/HYPE | 0.51 | 0.55 | [0.35, 0.70] |
+| ρ BTC/GOLD | 0.11 | −0.16 | [−0.40, 0.09] |
+| ρ BTC/CL | −0.08 | 0.04 | [−0.21, 0.28] |
+| ρ CL/XYZ100 | −0.37 | −0.25 | [−0.47, −0.00] |
+| σ BTC, ETH, HYPE | 0.60, 0.73, 0.72 | 0.50, 0.58, 0.63 | |
+| σ GOLD, CL, XYZ100 | 0.24, 0.47, 0.14 | 0.19, 0.50, 0.15 | |
+
+Every figure: **n = 65, backfilled share 1.00**, the caption's warning as a
+number. The intervals say which figures carry meaning: BTC/GOLD's sign is
+not established over 65 returns, which a bare 0.11 did not show.

@@ -36,6 +36,7 @@ pub mod boot;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod config;
+pub mod derive;
 pub mod ingest;
 #[cfg(feature = "ledger")]
 pub mod ledger;
