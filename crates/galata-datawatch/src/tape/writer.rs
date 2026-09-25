@@ -22,7 +22,7 @@ use galata_segments::{Codec, Cursor, write_segment_labelled};
 use galata_wire::{Envelope, Event, Kind, Num};
 
 use crate::tape::layout::partition_of;
-use crate::tape::schema::{PRUNE_ON, VENUE_LABEL, schema_for};
+use crate::tape::schema::{PRUNE_ON, SOURCE_DAY_LABEL, VENUE_LABEL, schema_for};
 
 /// The scale every price and size is written at: `decimal(38,18)`.
 const SCALE: u32 = 18;
@@ -63,6 +63,13 @@ pub struct Row {
     /// The archive sequence of the payload this was normalised from — the road
     /// back from any row to the bytes that produced it.
     pub stream_seq: u64,
+    /// When that payload was **received** — our clock, as the archive filed it.
+    ///
+    /// Its UTC date is the segment's [`SOURCE_DAY_LABEL`]: the unit a rebuild
+    /// reads, and therefore the unit it may replace. Carried from the payload
+    /// rather than read off the envelope, because it is the payload the
+    /// rebuild selected by.
+    pub source_recv_micros: i64,
     /// The event.
     pub envelope: Envelope,
 }
@@ -160,7 +167,7 @@ impl Tape {
         let rows = std::mem::take(&mut self.buffered);
         let mut written = Vec::new();
 
-        for (partition, kind, venue, mut group) in group(rows) {
+        for (partition, kind, venue, source_day, mut group) in group(rows) {
             // **Sorted by venue, then ticker, then venue time.** In that order
             // because it is decreasing cardinality and increasing selectivity:
             // a venue predicate skips whole row groups, a ticker predicate
@@ -190,7 +197,7 @@ impl Tape {
                 &batch,
                 self.codec,
                 &PRUNE_ON,
-                &[(VENUE_LABEL, &venue)],
+                &[(VENUE_LABEL, &venue), (SOURCE_DAY_LABEL, &source_day)],
             )?);
         }
         Ok(written)
@@ -217,13 +224,20 @@ fn ticker_of(envelope: &Envelope) -> &str {
 }
 
 /// Group into partitions, by dataset and by the date the row belongs to.
-fn group(rows: Vec<Row>) -> Vec<(PathBuf, Kind, String, Vec<Row>)> {
+fn group(rows: Vec<Row>) -> Vec<(PathBuf, Kind, String, String, Vec<Row>)> {
     // **One venue per segment.** A stream sequence is numbered per venue, from
     // that venue's own process, and a partition is shared by every venue that
     // supplies the dataset. So a segment is made to be *one venue's stream over
     // a range* — the unit every comparison of sequences needs — which legacy's
     // `venue=` directory gave for free and this layout gives by grouping.
-    let mut out: BTreeMap<(String, Kind, String), Vec<Row>> = BTreeMap::new();
+    //
+    // **And one receipt day per segment**, because the partition is by the
+    // venue's time and a walk receives old history today: one partition holds
+    // rows of several receipt days, and a rebuild re-derives one receipt day at
+    // a time. A segment spanning two could be neither kept nor removed by a run
+    // over one of them — measured 2026-09-25, when that cost a real partition
+    // its rows (`design/measured.md`).
+    let mut out: BTreeMap<(String, Kind, String, String), Vec<Row>> = BTreeMap::new();
     for row in rows {
         let kind = row.envelope.kind();
         // **Partitioned by the venue's own time where it states one**, and by
@@ -233,12 +247,15 @@ fn group(rows: Vec<Row>) -> Vec<(PathBuf, Kind, String, Vec<Row>)> {
         let at = row.envelope.at_micros.unwrap_or(row.envelope.recv_micros);
         let partition = partition_of(kind, at);
         let venue = venue_of(&row.envelope).to_string();
-        out.entry((partition.to_string_lossy().to_string(), kind, venue))
+        let source_day = crate::calendar::date_of(row.source_recv_micros);
+        out.entry((partition.to_string_lossy().to_string(), kind, venue, source_day))
             .or_default()
             .push(row);
     }
     out.into_iter()
-        .map(|((partition, kind, venue), rows)| (PathBuf::from(partition), kind, venue, rows))
+        .map(|((partition, kind, venue, source_day), rows)| {
+            (PathBuf::from(partition), kind, venue, source_day, rows)
+        })
         .collect()
 }
 
@@ -554,6 +571,7 @@ mod tests {
     fn quote_row(seq: u64, venue: &str, ticker: &str, at: Option<i64>) -> Row {
         Row {
             stream_seq: seq,
+            source_recv_micros: at.unwrap_or(0) + 1_000,
             envelope: Envelope::new(
                 Venue::new(venue).unwrap(),
                 Ticker::new(ticker).unwrap(),
@@ -745,6 +763,7 @@ mod tests {
         tape.take(quote_row(1, "hyperliquid", "BTC", Some(DAY)));
         tape.take(Row {
             stream_seq: 2,
+            source_recv_micros: DAY,
             envelope: Envelope::new(
                 Venue::new("hyperliquid").unwrap(),
                 Ticker::new("BTC").unwrap(),
@@ -784,6 +803,7 @@ mod tests {
         };
         tape.take(Row {
             stream_seq: 1,
+            source_recv_micros: DAY,
             envelope: Envelope::new(
                 Venue::new("hyperliquid").unwrap(),
                 Ticker::new("BTC").unwrap(),

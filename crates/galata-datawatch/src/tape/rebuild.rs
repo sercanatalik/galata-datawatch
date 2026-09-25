@@ -43,7 +43,7 @@ pub enum RebuildError {
     /// The record refused.
     #[error(transparent)]
     Record(#[from] crate::record::RecordError),
-    /// A segment in a partition this run writes does not say whose rows it holds.
+    /// A segment in the tape does not say whose rows it holds.
     ///
     /// Kept, it would overlap the replacement; removed, it might be another
     /// venue's. Neither is this tool's to guess, and a column statistic is not
@@ -52,6 +52,35 @@ pub enum RebuildError {
     UnknownVenue {
         /// The segment.
         path: std::path::PathBuf,
+    },
+    /// A segment of a venue this run rebuilds does not say which receipt day
+    /// its rows came from.
+    ///
+    /// Removed, it might hold another day's rows, which is the defect this
+    /// refusal exists against; kept, it might duplicate this run's. Every
+    /// segment written before the label is one. Refused before anything is
+    /// removed.
+    #[error("{path}: {}", crate::tape::UNSOURCED_REMEDY)]
+    UnknownSource {
+        /// The segment.
+        path: std::path::PathBuf,
+    },
+    /// Replacement was asked for over a range that does not start and end on
+    /// UTC midnights.
+    ///
+    /// A replacement removes whole receipt days, so a range reading part of
+    /// one would remove rows it did not re-derive. Snapping the range would
+    /// read more than was asked for, so it is refused instead. An unbounded
+    /// end splits nothing and is accepted.
+    #[error(
+        "replacement needs whole UTC days, and [{from}, {to}) splits one: a replacement removes a \
+         receipt day's segments whole, so it may only be asked for days it reads whole"
+    )]
+    SplitDay {
+        /// Range start, in receipt micros.
+        from: i64,
+        /// Range end, exclusive.
+        to: i64,
     },
     /// A segment's footer would not read.
     #[error(transparent)]
@@ -135,10 +164,26 @@ pub fn rebuild(
 pub enum Replace {
     /// Leave existing segments. An overlap is reported by `check_layout`.
     Never,
-    /// Remove, from the partitions this run will write, the segments holding
-    /// only the rebuilt venues' rows — **before** writing them. Another venue's
-    /// segment in the same partition is left alone.
-    Partitions,
+    /// Remove, from anywhere in the tape, the segments of a venue this run
+    /// rebuilds whose **source day** lies in the run's receipt range —
+    /// **before** writing them. Everything else is left alone: another venue's
+    /// segment, and this venue's segment from another receipt day in the same
+    /// partition, which a walk puts there.
+    ///
+    /// Was `Partitions`, which removed every segment of the venue in each
+    /// partition the run wrote, and so removed rows from receipt days the run
+    /// never read (`design/measured.md`, 2026-09-25).
+    SourceDays,
+}
+
+/// Whether `[from, to)` reads every receipt day it touches whole.
+///
+/// An unbounded end reads every day on its side, so it splits none.
+fn whole_days(from_micros: i64, to_micros: i64) -> bool {
+    const DAY: i64 = 86_400_000_000;
+    let on_midnight = |micros: i64| micros.rem_euclid(DAY) == 0;
+    (from_micros == i64::MIN || on_midnight(from_micros))
+        && (to_micros == i64::MAX || on_midnight(to_micros))
 }
 
 /// The same, saying whether to replace.
@@ -176,6 +221,12 @@ pub fn rebuild_with(
     to_micros: i64,
     replace: Replace,
 ) -> Result<Rebuilt, RebuildError> {
+    if replace == Replace::SourceDays && !whole_days(from_micros, to_micros) {
+        return Err(RebuildError::SplitDay {
+            from: from_micros,
+            to: to_micros,
+        });
+    }
     let payloads = replay::read_range(archive_root, scopes, from_micros, to_micros)?;
     let mut report = Rebuilt {
         payloads: payloads.len(),
@@ -195,6 +246,7 @@ pub fn rebuild_with(
 
     for payload in payloads {
         let seq = payload.seq();
+        let received = payload.payload().recv_micros;
         let result = ingest_replayed(&mut archive, adapter, collected.as_ref(), payload)?;
         if result.unparsed {
             report.unparsed += 1;
@@ -202,30 +254,46 @@ pub fn rebuild_with(
         for envelope in collected.drain() {
             tape.take(Row {
                 stream_seq: seq,
+                source_recv_micros: received,
                 envelope,
             });
             report.rows += 1;
         }
     }
 
-    if replace == Replace::Partitions {
-        // **Only this run's venues, in only the partitions this run will
-        // write.** A dataset with no rows in the range is left alone: *this
-        // rebuild produced no trades* and *there are no trades* are different
-        // claims. And a partition is `kind=/date=`, shared by every venue that
-        // supplies the dataset — so *this venue's quotes* is not *the quotes*,
-        // and a segment is kept or removed by the venue its label states.
+    if replace == Replace::SourceDays {
+        // **Only what this run re-derives: this run's venues, and the receipt
+        // days it read.** A partition is `kind=/date=` by the venue's time, so
+        // it is shared by every venue that supplies the dataset *and* by every
+        // receipt day whose payloads carry that date — a walk receives last
+        // week today. A segment is kept or removed by the venue and the source
+        // day its labels state, never by the partition it sits in.
+        //
+        // **The whole tape, not the partitions this run writes.** A source day
+        // re-derived in full owns all its rows, so its segment in a partition
+        // this run no longer writes to holds rows the archive no longer
+        // produces, and is exactly what replacement is for.
         //
         // **Planned in full, then removed.** A refusal therefore means the
         // tape was not touched, never that it was half-replaced.
         let ours = tape.pending_venues();
         let mut doomed = Vec::new();
-        for partition in tape.pending_partitions() {
-            for (_, segment) in galata_segments::list_segments(&tape_root.join(&partition)) {
-                match galata_segments::label(&segment, crate::tape::VENUE_LABEL)? {
-                    Some(venue) if ours.contains(&venue) => doomed.push(segment),
-                    Some(_) => {}
-                    None => return Err(RebuildError::UnknownVenue { path: segment }),
+        for partition in galata_segments::partitions(tape_root) {
+            for (_, segment) in galata_segments::list_segments(&partition) {
+                let Some(venue) = galata_segments::label(&segment, crate::tape::VENUE_LABEL)?
+                else {
+                    return Err(RebuildError::UnknownVenue { path: segment });
+                };
+                if !ours.contains(&venue) {
+                    continue;
+                }
+                let source = galata_segments::label(&segment, crate::tape::SOURCE_DAY_LABEL)?
+                    .and_then(|day| crate::calendar::midnight_of(&day));
+                let Some(source) = source else {
+                    return Err(RebuildError::UnknownSource { path: segment });
+                };
+                if source >= from_micros && source < to_micros {
+                    doomed.push(segment);
                 }
             }
         }
@@ -609,7 +677,7 @@ mod tests {
             None,
             i64::MIN,
             i64::MAX,
-            Replace::Partitions,
+            Replace::SourceDays,
         )
         .unwrap();
         grow(dir.path(), &hl, 100);
@@ -620,7 +688,7 @@ mod tests {
             None,
             i64::MIN,
             i64::MAX,
-            Replace::Partitions,
+            Replace::SourceDays,
         )
         .unwrap();
 
@@ -649,6 +717,7 @@ mod tests {
             let (seq, millis) = (900_000 + i as u64, 1_500 + 1_000 * i as i64);
             writer.take(Row {
                 stream_seq: seq,
+                source_recv_micros: millis * 1_000 + 7,
                 envelope: Envelope::new(
                     Venue::new(*venue).unwrap(),
                     Ticker::new("BTC").unwrap(),
@@ -687,7 +756,7 @@ mod tests {
             None,
             i64::MIN,
             i64::MAX,
-            Replace::Partitions,
+            Replace::SourceDays,
         )
         .unwrap();
         grow(dir.path(), &hl, 100);
@@ -698,7 +767,7 @@ mod tests {
             None,
             i64::MIN,
             i64::MAX,
-            Replace::Partitions,
+            Replace::SourceDays,
         )
         .unwrap();
 
@@ -778,7 +847,7 @@ mod tests {
             None,
             i64::MIN,
             i64::MAX,
-            Replace::Partitions,
+            Replace::SourceDays,
         );
         match refused {
             Err(RebuildError::UnknownVenue { path }) => assert_eq!(path, silent),
@@ -803,32 +872,284 @@ mod tests {
         );
     }
 
+    /// An archive whose **receipt** day 10 holds live quotes for venue date
+    /// 10, and whose receipt day 13 holds quotes for that same venue date —
+    /// what a boot's walk of history does. One tape partition, two sources.
+    fn walked_archive() -> (tempfile::TempDir, Hyperliquid) {
+        let dir = tempfile::tempdir().unwrap();
+        let hl = adapter();
+        let mut archive = Archive::open(dir.path().join("archive"));
+        // (receipt, venue time in millis, sequence). Sequences rise with
+        // receipt, as capture's clock-seeded numbering makes them.
+        let frames = [
+            (10 * DAY + 1, 10 * DAY / 1_000 + 1_000, 1),
+            (10 * DAY + 2, 10 * DAY / 1_000 + 2_000, 2),
+            (13 * DAY + 1, 10 * DAY / 1_000 + 3_000, 100),
+            (13 * DAY + 2, 10 * DAY / 1_000 + 4_000, 101),
+        ];
+        for (recv, millis, seq) in frames {
+            let mut payload = hl.classify(&bbo("BTC", millis), recv);
+            payload.seq = seq;
+            archive.append(payload).unwrap();
+        }
+        archive.flush().unwrap();
+        (dir, hl)
+    }
+
+    /// The receipt times of every row in one tape partition, sorted.
+    fn receipts_in(tape: &Path, partition: &str) -> Vec<i64> {
+        use arrow::array::{Array, Int64Array};
+        let mut out = Vec::new();
+        for (_, segment) in galata_segments::list_segments(&tape.join(partition)) {
+            for batch in galata_segments::read_segment(&segment).unwrap() {
+                let recv = batch
+                    .column_by_name("recv_micros")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .clone();
+                out.extend((0..recv.len()).map(|i| recv.value(i)));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    const WALKED_PARTITION: &str = "kind=quotes/date=1970-01-11";
+
     #[test]
-    fn a_neighbouring_date_survives_replacement() {
-        // Replacement removes only the partitions this run will write.
-        let (dir, hl) = growing_archive();
+    fn a_walked_day_does_not_cost_the_live_day_its_rows() {
+        // Measured on the real record 2026-09-25: the nightly projection of
+        // receipt days 23–25 removed receipt day 22's rows from the date=09-22
+        // partition, because the 25th's walk had written into it.
+        let (dir, hl) = walked_archive();
         let root = dir.path().join("archive");
         let tape = dir.path().join("tape");
 
-        // A partition from some other day, which this rebuild has no rows for.
-        let elsewhere = tape.join("kind=quotes/date=2020-01-01");
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::fs::write(elsewhere.join("s-1_2.parquet"), b"not ours").unwrap();
+        rebuild(&root, &tape, &hl, None, 10 * DAY, 11 * DAY).unwrap();
+        rebuild_with(&root, &tape, &hl, None, 13 * DAY, 14 * DAY, Replace::SourceDays).unwrap();
 
-        rebuild_with(
-            &root,
+        assert_eq!(
+            receipts_in(&tape, WALKED_PARTITION),
+            vec![10 * DAY + 1, 10 * DAY + 2, 13 * DAY + 1, 13 * DAY + 2],
+            "rebuilding the walked day removed the live day's rows"
+        );
+    }
+
+    #[test]
+    fn rebuilding_the_live_day_leaves_the_walked_rows() {
+        // The obvious repair of the defect above, which removed the walked
+        // rows in turn: no order of per-day rebuilds converged.
+        let (dir, hl) = walked_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+
+        rebuild(&root, &tape, &hl, None, 13 * DAY, 14 * DAY).unwrap();
+        rebuild_with(&root, &tape, &hl, None, 10 * DAY, 11 * DAY, Replace::SourceDays).unwrap();
+
+        assert_eq!(
+            receipts_in(&tape, WALKED_PARTITION),
+            vec![10 * DAY + 1, 10 * DAY + 2, 13 * DAY + 1, 13 * DAY + 2],
+            "rebuilding the live day removed the walked day's rows"
+        );
+    }
+
+    /// Every `(source day, segment)` in one tape partition, sorted.
+    fn source_days_in(tape: &Path, partition: &str) -> Vec<String> {
+        let mut out: Vec<String> = galata_segments::list_segments(&tape.join(partition))
+            .into_iter()
+            .map(|(_, segment)| {
+                galata_segments::label(&segment, crate::tape::SOURCE_DAY_LABEL)
+                    .unwrap()
+                    .expect("a segment written without its source day")
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_commit_spanning_two_receipt_days_writes_two_labelled_segments() {
+        // One receipt day per segment is what lets a rebuild of one day keep
+        // or remove a segment whole: a segment spanning two could be neither.
+        let (dir, hl) = walked_archive();
+        let tape = dir.path().join("tape");
+        let report = rebuild(
+            &dir.path().join("archive"),
             &tape,
             &hl,
             None,
             i64::MIN,
             i64::MAX,
-            Replace::Partitions,
         )
         .unwrap();
 
-        assert!(
-            elsewhere.join("s-1_2.parquet").exists(),
+        assert_eq!(report.segments, 2, "two receipt days, two segments");
+        assert_eq!(
+            source_days_in(&tape, WALKED_PARTITION),
+            ["1970-01-11", "1970-01-14"]
+        );
+    }
+
+    #[test]
+    fn a_walked_row_is_filed_under_the_venue_date_and_labelled_with_the_receipt_day() {
+        // Venue date 10, received on day 13: the date predicate still finds it
+        // under its own day, and the label says which day's rebuild owns it.
+        let (dir, hl) = walked_archive();
+        let tape = dir.path().join("tape");
+        rebuild(
+            &dir.path().join("archive"),
+            &tape,
+            &hl,
+            None,
+            13 * DAY,
+            14 * DAY,
+        )
+        .unwrap();
+
+        assert_eq!(source_days_in(&tape, WALKED_PARTITION), ["1970-01-14"]);
+        assert_eq!(
+            receipts_in(&tape, WALKED_PARTITION),
+            vec![13 * DAY + 1, 13 * DAY + 2]
+        );
+    }
+
+    /// Commit one of `venue`'s quotes, dated `at` by the venue and received
+    /// at `received`, straight onto the tape; the segment it wrote.
+    fn quote_segment(
+        tape: &Path,
+        venue: &str,
+        at: i64,
+        received: i64,
+        seq: u64,
+    ) -> std::path::PathBuf {
+        use galata_wire::{Envelope, Event, Num, Quote, Ticker, Venue};
+        use std::str::FromStr;
+        let mut writer = Tape::open(tape);
+        writer.take(Row {
+            stream_seq: seq,
+            source_recv_micros: received,
+            envelope: Envelope::new(
+                Venue::new(venue).unwrap(),
+                Ticker::new("BTC").unwrap(),
+                Some(at),
+                received,
+                Event::Quote(Quote {
+                    bid_px: Some(Num::from_str("81210.0").unwrap()),
+                    ask_px: None,
+                    bid_sz: None,
+                    ask_sz: None,
+                    bid_spread: None,
+                    ask_spread: None,
+                }),
+            ),
+        });
+        let mut written = writer.commit().unwrap();
+        assert_eq!(written.len(), 1);
+        written.remove(0)
+    }
+
+    /// The fixture archive's one receipt day, `[DAY, 2 * DAY)`, replaced.
+    fn replace_the_fixture_day(dir: &Path, hl: &Hyperliquid) -> Result<Rebuilt, RebuildError> {
+        rebuild_with(
+            &dir.join("archive"),
+            &dir.join("tape"),
+            hl,
+            None,
+            DAY,
+            2 * DAY,
+            Replace::SourceDays,
+        )
+    }
+
+    #[test]
+    fn a_neighbouring_date_survives_replacement() {
+        // A segment of the rebuilt venue, dated elsewhere and received on a
+        // day this run does not read, is not this run's to remove.
+        let (dir, hl) = growing_archive();
+        let tape = dir.path().join("tape");
+        let elsewhere = quote_segment(&tape, "hyperliquid", 18_262 * DAY, 18_262 * DAY + 5, 7);
+        let before = std::fs::read(&elsewhere).unwrap();
+
+        replace_the_fixture_day(dir.path(), &hl).unwrap();
+
+        assert_eq!(
+            std::fs::read(&elsewhere).ok(),
+            Some(before),
             "a date this run never touched was removed"
         );
+    }
+
+    #[test]
+    fn a_rebuilt_source_day_outside_the_written_partitions_is_removed() {
+        // Received on the fixture's day, dated where this run writes nothing:
+        // the run re-derived every row of that day, and this is not among them.
+        let (dir, hl) = growing_archive();
+        let tape = dir.path().join("tape");
+        let stale = quote_segment(&tape, "hyperliquid", 18_262 * DAY, DAY + 5, 7);
+
+        let report = replace_the_fixture_day(dir.path(), &hl).unwrap();
+
+        assert!(!stale.exists(), "a stale segment of a rebuilt day survived");
+        assert_eq!(report.replaced, 1);
+    }
+
+    #[test]
+    fn a_segment_without_a_source_day_is_refused_before_anything_is_removed() {
+        use galata_segments::{Codec, Cursor, write_segment_labelled};
+
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+        rebuild(&root, &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+        let before = segment_names(&tape);
+
+        // hyperliquid's, labelled with its venue only — as every segment
+        // written before the source day was.
+        let written = quote_segment(dir.path(), "hyperliquid", DAY, DAY, 5);
+        let batch = galata_segments::read_segment(&written).unwrap().remove(0);
+        let unsourced = write_segment_labelled(
+            &tape.join("kind=quotes/date=1970-01-02"),
+            Cursor::Seq { first: 5, last: 5 },
+            &batch,
+            Codec::Zstd,
+            &crate::tape::PRUNE_ON,
+            &[(crate::tape::VENUE_LABEL, "hyperliquid")],
+        )
+        .unwrap();
+
+        match replace_the_fixture_day(dir.path(), &hl) {
+            Err(RebuildError::UnknownSource { path }) => assert_eq!(path, unsourced),
+            other => panic!("expected UnknownSource, got {other:?}"),
+        }
+        let mut after = segment_names(&tape);
+        after.retain(|name| name != unsourced.file_name().unwrap().to_str().unwrap());
+        assert_eq!(after, before, "a refusal removed something");
+    }
+
+    #[test]
+    fn a_replacement_that_splits_a_day_is_refused() {
+        let (dir, hl) = growing_archive();
+        let tape = dir.path().join("tape");
+        rebuild(&dir.path().join("archive"), &tape, &hl, None, i64::MIN, i64::MAX).unwrap();
+        let before = segment_names(&tape);
+
+        for (from, to) in [(DAY + 1, 2 * DAY), (DAY, 2 * DAY - 1), (i64::MIN, DAY + 1)] {
+            let refused = rebuild_with(
+                &dir.path().join("archive"),
+                &tape,
+                &hl,
+                None,
+                from,
+                to,
+                Replace::SourceDays,
+            );
+            assert!(
+                matches!(refused, Err(RebuildError::SplitDay { .. })),
+                "[{from}, {to}) was not refused: {refused:?}"
+            );
+        }
+        assert_eq!(segment_names(&tape), before, "a refusal removed something");
     }
 }

@@ -19,6 +19,7 @@ use galata_wire::{Envelope, Event, Num, Quote, Ticker, Venue};
 fn quote(seq: u64, venue: &str) -> Row {
     Row {
         stream_seq: seq,
+        source_recv_micros: 86_400_000_000 + seq as i64,
         envelope: Envelope::new(
             Venue::new(venue).unwrap(),
             Ticker::new("BTC").unwrap(),

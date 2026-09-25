@@ -19,6 +19,7 @@ fn main() {
         seq += 1;
         tape.take(Row {
             stream_seq: seq,
+            source_recv_micros: day + seq as i64 + 500,
             envelope: Envelope::new(
                 Venue::new(venue).unwrap(),
                 Ticker::new(ticker).unwrap(),

@@ -158,7 +158,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         from_micros,
         to_micros,
         if replace {
-            tape::Replace::Partitions
+            tape::Replace::SourceDays
         } else {
             tape::Replace::Never
         },

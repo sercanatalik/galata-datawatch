@@ -46,6 +46,23 @@ pub const VENUE_LABEL: &str = "galata.venue";
 pub const UNLABELLED_REMEDY: &str = "written before tape segments were labelled with their venue; \
      the tape is a cache — remove it and rebuild";
 
+/// The footer label naming the one UTC day, `YYYY-MM-DD`, on which every
+/// payload a tape segment's rows came from was **received**.
+///
+/// **The unit a rebuild may replace.** A rebuild reads the archive by receipt
+/// day, and the tape partitions by the venue's time, so a walk that receives
+/// last week's history today puts two receipt days into one partition. A run
+/// over one of them may remove only what it re-derives, and this is how it
+/// knows which segments those are. Stated, not read from `recv_micros`
+/// statistics, for the reason [`VENUE_LABEL`] is.
+pub const SOURCE_DAY_LABEL: &str = "galata.source_day";
+
+/// What a refusal over a segment without [`SOURCE_DAY_LABEL`] tells the
+/// operator.
+pub const UNSOURCED_REMEDY: &str = "written before tape segments were labelled with the day their \
+     payloads were received, so a replacement cannot tell whether it re-derives them; the tape is \
+     a cache — remove it and rebuild the whole archive range once";
+
 /// The five every row carries.
 fn common() -> Vec<Field> {
     vec![
