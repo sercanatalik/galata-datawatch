@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  One long-running galata service, for launchd.
+
+  A TEMPLATE, never loaded as it stands: @LABEL@, @REPO@, @SERVICE@, @ARG@
+  and @LOG@ are rendered by scripts/install-services.sh into
+  ~/Library/LaunchAgents/@LABEL@.plist, which is untracked — a plist is
+  nothing but this machine's absolute paths, and the tree carries none.
+
+  EVERY SERVICE RUNS THE SAME PROGRAM, scripts/run-service.sh, which gives it
+  its own secrets and nobody else's and then execs it. NO SECRET GOES HERE:
+  this file is rendered mode 0644, readable by every user on the machine.
+
+  KeepAlive restarts it whenever it exits; ThrottleInterval keeps a service
+  that fails at boot (a refused broker identity exits non-zero by design)
+  from spinning, at one attempt every ten seconds, each one a line in its
+  log. launchd stops it with SIGTERM, which capture treats as a clean
+  shutdown: flush, mark, exit.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>@LABEL@</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@REPO@/scripts/run-service.sh</string>
+        <string>@SERVICE@</string>
+        <string>@ARG@</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>@REPO@</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>@LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+</dict>
+</plist>

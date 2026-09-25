@@ -241,7 +241,7 @@ pub fn boot(
                     let shutdown = tokio_util::sync::CancellationToken::new();
                     let signal = shutdown.clone();
                     tokio::spawn(async move {
-                        let _ = tokio::signal::ctrl_c().await;
+                        shutdown_signal().await;
                         signal.cancel();
                     });
                     return capture
@@ -271,7 +271,7 @@ pub fn boot(
                 let shutdown = tokio_util::sync::CancellationToken::new();
                 let signal = shutdown.clone();
                 tokio::spawn(async move {
-                    let _ = tokio::signal::ctrl_c().await;
+                    shutdown_signal().await;
                     signal.cancel();
                 });
                 let polls = capture.run_polled(shutdown, &about).await?;
@@ -328,7 +328,7 @@ pub fn boot(
         let shutdown = tokio_util::sync::CancellationToken::new();
         let signal = shutdown.clone();
         tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown_signal().await;
             signal.cancel();
         });
 
@@ -339,6 +339,40 @@ pub fn boot(
     })?;
 
     Ok(())
+}
+
+/// Wait for a request to stop: an interrupt, **or a termination**.
+///
+/// SIGTERM is how a service manager stops a job — launchd (then SIGKILL after
+/// 20 s), systemd, Docker. Waiting on SIGINT alone left SIGTERM's default
+/// action in place, which ends the process at once: the buffer not yet
+/// committed was lost, no clean-shutdown marker was written, and the next
+/// start dated a planned stop as a kill. Reproduced under a scratch capture
+/// before this was written.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {
+                        tracing::info!("asked to terminate; stopping cleanly");
+                    }
+                }
+            }
+            // Without a SIGTERM handler, an interrupt is still a clean stop.
+            Err(error) => {
+                tracing::warn!(%error, "no SIGTERM handler; only an interrupt stops cleanly");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Drain the queue onto the bus.

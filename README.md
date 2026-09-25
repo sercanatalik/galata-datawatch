@@ -210,6 +210,31 @@ What the lane will not do, by construction rather than by care:
 and `check-all.sh` runs the lane's tests offline, so the gate needs
 [uv](https://docs.astral.sh/uv/).
 
+## Running as services
+
+On macOS, the deployment's four long-running processes are launchd agents,
+rendered from one tracked template and restarted whenever they exit:
+
+```sh
+cargo build --release                  # capture and the flows run release binaries
+(cd ../galata-tower && cargo build --release)
+scripts/install-services.sh            # nats, capture:hyperliquid, tower, flows
+scripts/install-services.sh capture:rh-chain      # one more venue
+scripts/install-services.sh --uninstall tower     # or remove one
+```
+
+Every agent runs `scripts/run-service.sh <service>`, which reads the broker
+passwords from `var/broker.env` (mode `0600`, never tracked) and hands **each
+service only its own**: NATS all of them, capture its venue's, the tower the
+`reader`'s, the flows none. No secret goes in a plist — launchd's are
+readable by every user. Logs are `var/logs/<service>.log`.
+
+A stop is SIGTERM, which capture treats as a clean shutdown — it flushes,
+marks, and the next start records the outage as `downtime` rather than a
+crash. Installing twice replaces the agent, and a hand-started instance of
+the same service is stopped first: two captures of one venue would be two
+writers of one archive scope.
+
 ## Building
 
 ```sh
