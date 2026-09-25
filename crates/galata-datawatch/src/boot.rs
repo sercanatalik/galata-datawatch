@@ -472,6 +472,16 @@ pub fn boot_ledger(
         "ledger starting"
     );
 
+    // Declared, or `Config::validate` refused the ledger. Said again here so
+    // no default can stand in for a tolerance nobody chose.
+    let tolerance = |value: Option<f64>, key: &str| -> Result<galata_wire::Num, String> {
+        let value = value.ok_or(format!("[ledger] {key} is not declared"))?;
+        galata_wire::Num::try_from(value).map_err(|e| format!("[ledger] {key}: {e}"))
+    };
+    let fold_tolerances = crate::ledger::fold::Tolerances {
+        position: tolerance(ledger.fold_position_tolerance, "fold_position_tolerance")?,
+        relative: tolerance(ledger.fold_relative_tolerance, "fold_relative_tolerance")?,
+    };
     // `Config::validate` already refused a ledger without it; said again here
     // so no default can stand in for it.
     let events_secs = ledger
@@ -507,6 +517,13 @@ pub fn boot_ledger(
         status: crate::capture::StatusFile::named(
             &config.paths.status,
             &format!("ledger-{venue_name}"),
+        ),
+        fold: (
+            crate::capture::StatusFile::named(
+                &config.paths.status,
+                &format!("ledger-fold-{venue_name}"),
+            ),
+            fold_tolerances,
         ),
     };
 

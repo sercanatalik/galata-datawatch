@@ -170,6 +170,8 @@ pub struct LedgerParts {
     pub bindings: crate::ledger::Bindings,
     /// Where the status surface is written.
     pub status: crate::capture::StatusFile,
+    /// Where the fold's report is written, and its tolerances.
+    pub fold: (crate::capture::StatusFile, crate::ledger::fold::Tolerances),
 }
 
 /// Run a venue's ledger until cancelled.
@@ -202,7 +204,8 @@ pub async fn run_ledger(
                 parts.masters,
                 parts.bindings,
             )
-            .with_status_file(parts.status);
+            .with_status_file(parts.status)
+            .with_fold(parts.fold.0, parts.fold.1);
             run.run(shutdown).await?;
             Ok(())
         }

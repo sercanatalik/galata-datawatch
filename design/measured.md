@@ -3883,3 +3883,25 @@ depending on the type.
 
 **No weight is reported in an answer's headers**; the documented weights
 (20, plus 1 per 20 items for fills and funding) are the only figures.
+
+## What a fold can check a fill against — 2026-09-25
+
+*Before `ledger-fold` (Tier 14). 2,000 real fills of one public account
+(`userFillsByTime`, one page) and 61 open positions across four public
+accounts (`clearinghouseState`). Counts and figures only.*
+
+- **`startPosition` chains.** Per coin, each fill's stated position before
+  it equalled the previous fill's position after it: **1,987 checks, no
+  break.** A fold can open a book at the first fill it holds, and a lost
+  fill shows as the first break after it.
+- **`closedPnl` is not what the documentation says.** The documentation
+  gives *"only the fee for an opening trade"* and a fee term on closing
+  ones. On all 1,221 opening fills `closedPnl` was **0**. On closing fills
+  it matched a weighted-average fold **excluding** fees: exactly on 321 of
+  779, and within rounding on the rest.
+- **The rounding is relative.** The venue keeps an entry price to about six
+  significant digits (4 to 8 on the 61 positions; 29 had exactly 6). The
+  largest difference from the exact fold was 0.027166 on a 19,883.68
+  notional, and every one was within **1.31×10⁻⁵ of notional**; an
+  absolute 0.01 would have called 13 of them skew. So the fold's realised
+  check takes a tolerance relative to notional, suggested 2×10⁻⁵.

@@ -682,6 +682,15 @@ between dexes, so a ledger update's effect is stated per dex.*
 
 ### Tier 14 — the fold
 
+*Built 2026-09-25 (`ledger-fold`), inside the ledger process rather than as a
+cereyan flow: reading transfers back needs the fingerprint key, and the lane
+holds no credential. Measured first: every Hyperliquid fill states its
+`startPosition` (1,987 checks on real fills, no break), so a book opens at
+the venue's own position and a lost fill is found at the fill after it; and
+`closedPnl` excludes the fee, contrary to the documentation, within a
+rounding relative to notional (≤ 1.31×10⁻⁵ on 779 fills). On those 2,000
+fills the fold ran in 0.4 ms with no break and no skew at 2×10⁻⁵.*
+
 - Positions, basis and realised P&L folded from events per account, from an
   anchor: the account's first transfer in, when the walk reaches it, or else
   the first snapshot this ledger took. **Which anchor was used is stated with

@@ -136,6 +136,14 @@ First release. Nothing is on crates.io yet, so everything is new.
   margin is stated per dex, a counterparty is named by alias or by
   fingerprint, and no row carries an address or a transaction hash.
   `[ledger] events_secs` is required once a `[ledger]` block is declared.
+- **The fold** (`ledger-fold`): books per account, dex and ticker from an
+  account's fills, by weighted average, opened at the venue's stated
+  `startPosition` with an unknown basis until flat; continuity breaks,
+  realised skews against `closedPnl` and snapshot differences reported
+  with both figures at declared tolerances (`[ledger]
+  fold_position_tolerance`, `fold_relative_tolerance`); funding and fees
+  per book, cash flows per dex, and no equity without a mark. The ledger
+  writes `ledger-fold-<venue>.json` after each events pass.
 - Binaries: `galata-datawatch <venue>`, `galata-ledger <venue>`,
   `galata-tape-rebuild`, `galata-retain`, `galata-watch`, `measure`.
 

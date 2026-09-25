@@ -208,6 +208,8 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
     loaded: BTreeSet<Account>,
     /// (account, kind) whose reach has been recorded.
     reached: BTreeSet<(Account, Kind)>,
+    /// Where the fold's report goes, and the tolerances it checks at.
+    fold: Option<(StatusFile, crate::ledger::fold::Tolerances)>,
 }
 
 /// What one pass over the accounts' histories did.
@@ -277,7 +279,55 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             earliest: BTreeMap::new(),
             loaded: BTreeSet::new(),
             reached: BTreeSet::new(),
+            fold: None,
         }
+    }
+
+    /// Fold every polled account after each events pass, writing the report
+    /// here.
+    pub fn with_fold(
+        mut self,
+        file: StatusFile,
+        tolerances: crate::ledger::fold::Tolerances,
+    ) -> LedgerRun<V, C> {
+        self.fold = Some((file, tolerances));
+        self
+    }
+
+    /// Fold every polled account from the record, and write the report.
+    ///
+    /// Best effort in the way the status file is: a report that cannot be
+    /// written must not stop the ledger recording, which is what it reports on.
+    pub fn fold_all(&mut self) -> Result<Option<crate::ledger::fold::FoldReport>, LedgerError> {
+        let Some((file, tolerances)) = self.fold.clone() else {
+            return Ok(None);
+        };
+        let ours = self.ours();
+        let mut report = crate::ledger::fold::FoldReport {
+            venue: self.venue.venue().to_string(),
+            at_micros: self.clock.now_micros(),
+            position_tolerance: tolerances.position,
+            relative_tolerance: tolerances.relative,
+            ..Default::default()
+        };
+        for account in self.polled() {
+            let rows = crate::ledger::events::read(
+                self.archive.root(),
+                account.venue.as_str(),
+                account.alias.as_str(),
+                &crate::ledger::fold::FOLD_KINDS,
+                self.venue.normaliser(),
+                &ours,
+            )?;
+            report.accounts.insert(
+                account.alias.to_string(),
+                crate::ledger::fold::fold(&rows, &tolerances),
+            );
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&report) {
+            let _ = file.write(&json);
+        }
+        Ok(Some(report))
     }
 
     /// Write the status surface here on every pass.
@@ -902,6 +952,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             let mut throttled = pass.throttled;
             if self.clock.now_micros() >= next_events {
                 throttled |= self.events_all().await?.throttled;
+                self.fold_all()?;
                 next_events = self.clock.now_micros() + self.cadences.events_micros;
             }
             if self.clock.now_micros() >= next_discovery {
@@ -1122,6 +1173,36 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn two_passes_over_one_record_write_one_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, root) = ledger(dir.path());
+        let file = StatusFile::named(&root.join("status"), "ledger-fold-hyperliquid");
+        let mut run = run.with_fold(
+            file.clone(),
+            crate::ledger::fold::Tolerances {
+                position: "0".parse().unwrap(),
+                relative: "0.00002".parse().unwrap(),
+            },
+        );
+        run.venue.pages(
+            MAIN,
+            Kind::Fills,
+            &[&page(&[fill(1, 1, 1000)]), &page(&[fill(1, 1, 1000)])],
+        );
+        run.events_all().await.unwrap();
+        let first = run.fold_all().unwrap().unwrap();
+        run.events_all().await.unwrap();
+        let second = run.fold_all().unwrap().unwrap();
+        assert_eq!(
+            first.accounts, second.accounts,
+            "the same record folds the same"
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap();
+        assert_eq!(written["accounts"]["main"]["books"][0]["position"], "1");
     }
 
     #[tokio::test]
@@ -1359,6 +1440,8 @@ mod tests {
             snapshot_secs: 10,
             discover_secs: 600,
             events_secs: Some(300),
+            fold_position_tolerance: Some(0.0),
+            fold_relative_tolerance: Some(0.00002),
             ledger_share: 0.25,
             fingerprint_key_var: "KEY".into(),
             account: [(

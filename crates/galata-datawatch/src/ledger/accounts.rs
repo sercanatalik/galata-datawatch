@@ -550,6 +550,8 @@ mod tests {
             snapshot_secs: 10,
             discover_secs: 600,
             events_secs: Some(300),
+            fold_position_tolerance: Some(0.0),
+            fold_relative_tolerance: Some(0.00002),
             ledger_share: 0.25,
             fingerprint_key_var: "KEY".into(),
             account: [(

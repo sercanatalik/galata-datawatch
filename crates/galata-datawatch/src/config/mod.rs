@@ -476,6 +476,18 @@ pub struct Ledger {
     /// a key it does not know, so no order of deploying the two would be safe.
     #[serde(default)]
     pub events_secs: Option<u64>,
+    /// The fold's position tolerance, an absolute size: positions within it
+    /// agree. **Undeclared is refused**, not zero by default: a reconciler
+    /// whose tolerance nobody chose is one nobody will believe. Optional in the
+    /// parse for the reason `events_secs` is (`keeps_ledgers`).
+    #[serde(default)]
+    pub fold_position_tolerance: Option<f64>,
+    /// The fold's relative tolerance: realised P&L within it times a fill's
+    /// closed notional agrees, and a basis within it times the price.
+    /// Measured 2026-09-25: the venue's rounding stayed within 1.31×10⁻⁵ of
+    /// notional on 779 closing fills; 2×10⁻⁵ is the suggested value.
+    #[serde(default)]
+    pub fold_relative_tolerance: Option<f64>,
     /// The share of the venue's stated budget the ledger may take, **beside**
     /// capture's `walk_share`: the venue counts both against one allowance.
     pub ledger_share: f64,
@@ -794,6 +806,39 @@ impl Config {
             }
             _ => {}
         }
+        for (field, value, bound) in [
+            (
+                "ledger.fold_position_tolerance",
+                ledger.fold_position_tolerance,
+                1_000_000.0,
+            ),
+            (
+                "ledger.fold_relative_tolerance",
+                ledger.fold_relative_tolerance,
+                0.01,
+            ),
+        ] {
+            match value {
+                Some(v) if !(0.0..=bound).contains(&v) => {
+                    return Err(ConfigError::OutOfBounds {
+                        origin: origin.clone(),
+                        field,
+                        value: v.to_string(),
+                        bound: "a non-negative tolerance; the relative one at most 0.01",
+                    });
+                }
+                None if adapters.keeps_ledgers() => {
+                    return Err(ConfigError::OutOfBounds {
+                        origin: origin.clone(),
+                        field,
+                        value: "absent".to_string(),
+                        bound: "declared: a tolerance nobody declared is zero, and zero is a \
+                                choice the operator makes, not the fold",
+                    });
+                }
+                _ => {}
+            }
+        }
         if !(1..=86_400).contains(&ledger.discover_secs) {
             return Err(ConfigError::OutOfBounds {
                 origin: origin.clone(),
@@ -1007,6 +1052,8 @@ root = "var/ledger"
 snapshot_secs = 10
 discover_secs = 600
 events_secs = 300
+fold_position_tolerance = 0.0
+fold_relative_tolerance = 0.00002
 ledger_share = 0.25
 fingerprint_key_var = "GALATA_LEDGER_FINGERPRINT_KEY"
 
@@ -1059,6 +1106,15 @@ dexes = ["", "xyz"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("events_secs"), "{err}");
+    }
+
+    #[test]
+    fn the_fold_refuses_an_undeclared_tolerance() {
+        let without = LEDGER.replace("fold_relative_tolerance = 0.00002\n", "");
+        let err = with_ledger(&without).unwrap_err().to_string();
+        assert!(err.contains("fold_relative_tolerance"), "{err}");
+        // And capture loads the same document.
+        assert!(Config::load_from_str(&format!("{GOOD}{without}"), origin(), &NoLedger).is_ok());
     }
 
     #[test]
