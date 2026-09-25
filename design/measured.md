@@ -3935,3 +3935,23 @@ exactly one bucket apart, and backfill is a share on the figure.
 Every figure: **n = 65, backfilled share 1.00**, the caption's warning as a
 number. The intervals say which figures carry meaning: BTC/GOLD's sign is
 not established over 65 returns, which a bare 0.11 did not show.
+
+## The ledger's history and fold, deployed on the real master — 2026-09-25
+
+*`ledger-events` and `ledger-fold` deployed at 19:08 UTC: release binaries
+first, then `events_secs = 300` and the two fold tolerances in the local
+configuration, then the ledger alone restarted. Capture read the same
+document before and after the keys were written and never restarted
+(`pid 28826` throughout), which is decision E8 held live.*
+
+- **The history walked**: no fills, no funding payments (reach *unknown*,
+  so not recorded: there is no evidence either way), and the one ledger
+  update the account holds — a `send` on 2026-08-23 — with reach
+  *consistent*. One page each, no miss, no stall, no unknown type.
+- **The fold**: no books; cash **+144.9 USDC into the main dex**, the
+  `send`'s effect; equity not held, for three stated reasons (no mark, and
+  collateral in spot on both dexes, a unified account).
+- **A restart resumes from the record**: the next pass asked from the
+  newest recorded update, inclusive, and archived that page again — two
+  rows in the archive, one distinct — and the fold's cash stayed 144.9,
+  not 289.8. The one-row-per-event read held on the real record.
