@@ -7,11 +7,13 @@
 #   run-service.sh capture <venue>
 #   run-service.sh tower
 #   run-service.sh flows
+#   run-service.sh vault
 #
-# **Each service gets only its own secrets.** var/broker.env (0600, never
-# tracked) holds every broker password; NATS gets all of them, capture its
-# own venue's, the tower the reader's, and the scheduling lane none — the lane
-# is built to hold no credential, and the tower to read and never publish.
+# **Each service gets only its own secrets**, read from the deployment's vault
+# (com.galata.vault) through a token minted for that service alone
+# (var/tokens/<service>.gvt, 0600; scripts/mint-service-tokens.sh): NATS all
+# three broker passwords, capture its own venue's, the tower the reader's, and
+# the scheduling lane none — it is built to hold no credential.
 # Secrets never go in a launchd plist, which is mode 0644 and readable by
 # every user on the machine.
 #
@@ -26,25 +28,29 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
-SECRETS="$ROOT/var/broker.env"
+VAULT_BIN="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}/target/release"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin"
 export NO_COLOR=1
 cd "$ROOT"
 
 refuse() { echo "run-service: REFUSED — $1" >&2; exit 2; }
 
-# The value of one variable in the secrets file, refusing a file others can
-# read — the rule gv applies to a token file, applied here.
-secret() {
-    [[ -f "$SECRETS" ]] || refuse "no $SECRETS — generate the broker passwords first"
+# Start a command with named secrets from the vault, read through THIS
+# SERVICE'S token — the vault refuses any name the token was not minted for.
+# galata-vault-exec, not `gv run`: gv reads through the owner key, which this
+# machine holds, so `gv run` would hand any service every secret.
+from_vault() {
+    local token="$ROOT/var/tokens/$1.gvt"; shift
+    [[ -f "$token" ]] || refuse "no token at $token — scripts/mint-service-tokens.sh"
     local mode
-    mode="$(stat -f %Lp "$SECRETS" 2>/dev/null || stat -c %a "$SECRETS")"
+    mode="$(stat -f %Lp "$token" 2>/dev/null || stat -c %a "$token")"
     [[ "$mode" == 600 || "$mode" == 400 ]] \
-        || refuse "$SECRETS is mode $mode; it holds passwords and must be 0600 or 0400"
-    local value
-    value="$(grep -E "^$1=" "$SECRETS" | head -n 1 | cut -d= -f2-)"
-    [[ -n "$value" ]] || refuse "$SECRETS has no $1"
-    printf '%s' "$value"
+        || refuse "$token is mode $mode; a token must be 0600 or 0400"
+    [[ -x "$ROOT/target/release/galata-vault-exec" ]] \
+        || refuse "no galata-vault-exec — cargo build --release -p galata-datawatch-vault"
+    export GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}"
+    export GV_TOKEN_FILE="$token"
+    exec "$ROOT/target/release/galata-vault-exec" "$@"
 }
 
 password_var() {
@@ -57,17 +63,16 @@ password_var() {
 service="${1:-}"
 case "$service" in
     nats)
+        only=()
         for id in datawatch-hyperliquid datawatch-rh-chain reader; do
-            var="$(password_var "$id")"
-            export "$var=$(secret "$var")"
+            only+=(--only "$(password_var "$id")")
         done
-        exec nats-server -c "$ROOT/config/nats-authorization.conf" -a 127.0.0.1 -p 4222
+        from_vault nats "${only[@]}" -- \
+            "$(command -v nats-server)" -c "$ROOT/config/nats-authorization.conf" -a 127.0.0.1 -p 4222
         ;;
     capture)
         venue="${2:-}"
         [[ -n "$venue" ]] || refuse "usage: run-service.sh capture <venue>"
-        var="$(password_var "datawatch-$venue")"
-        export "$var=$(secret "$var")"
         # This machine's broker block lives in the local configuration, which
         # is the committed one plus [broker]; without it, capture archives and
         # publishes nothing.
@@ -76,19 +81,26 @@ case "$service" in
         else
             export GALATA_CONFIG="$ROOT/config/datawatch.toml"
         fi
-        exec "$ROOT/target/release/galata-datawatch" "$venue"
+        from_vault "capture-$venue" --only "$(password_var "datawatch-$venue")" -- \
+            "$ROOT/target/release/galata-datawatch" "$venue"
         ;;
     tower)
         [[ -x "$TOWER/target/release/galata-tower" ]] \
             || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT"
-        var="$(password_var reader)"
-        export "$var=$(secret "$var")"
         export GALATA_ARCHIVE="$ROOT/var/archive"
         export GALATA_TAPE="$ROOT/var/tape"
         export GALATA_TOWER_LISTEN="${GALATA_TOWER_LISTEN:-127.0.0.1:8777}"
         export GALATA_BROKER="${GALATA_BROKER:-127.0.0.1:4222}"
         cd "$TOWER"
-        exec "$TOWER/target/release/galata-tower"
+        from_vault tower --only "$(password_var reader)" -- "$TOWER/target/release/galata-tower"
+        ;;
+    vault)
+        # The deployment's secret store: loopback only, data in
+        # ~/.local/share/galata-vault, no configuration. It stores ciphertext
+        # and cannot read any of it — the binary links no decryption code.
+        [[ -x "$VAULT_BIN/gv-server" ]] \
+            || refuse "no gv-server at $VAULT_BIN — cargo build --release -p gv -p gv-server in galata-vault"
+        exec "$VAULT_BIN/gv-server" local
         ;;
     flows)
         # No secret at all: the lane holds no credential, by design and by
@@ -104,6 +116,6 @@ case "$service" in
         exec uv run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
         ;;
     *)
-        refuse "usage: run-service.sh nats | capture <venue> | tower | flows"
+        refuse "usage: run-service.sh vault | nats | capture <venue> | tower | flows"
         ;;
 esac

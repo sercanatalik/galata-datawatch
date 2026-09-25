@@ -4,8 +4,8 @@
 #
 #   install-services.sh [--uninstall] [service ...]
 #
-#   services: nats  capture:<venue>  tower  flows     (default: all four,
-#             with capture:hyperliquid)
+#   services: vault  nats  capture:<venue>  tower  flows   (default: all
+#             five, vault first, with capture:hyperliquid)
 #
 # Legacy's shape (scripts/install-compact-job.sh), for long-running jobs:
 # render the tracked template into ~/Library/LaunchAgents (untracked — it is
@@ -32,7 +32,7 @@ refuse() { echo "install-services: REFUSED — $1" >&2; exit 1; }
 UNINSTALL=0
 if [[ "${1:-}" == --uninstall ]]; then UNINSTALL=1; shift; fi
 services=("$@")
-(( ${#services[@]} )) || services=(nats capture:hyperliquid tower flows)
+(( ${#services[@]} )) || services=(vault nats capture:hyperliquid tower flows)
 
 # What a hand-started instance of each looks like, to stop it first.
 pattern_of() {
@@ -40,16 +40,17 @@ pattern_of() {
         nats) echo "nats-server -c $ROOT/config/nats-authorization.conf|nats-server -c config/nats-authorization.conf" ;;
         capture:*) echo "galata-datawatch ${1#capture:}\$" ;;
         tower) echo "target/release/galata-tower\$" ;;
-        flows) echo "cereyan serve py|cereyan serve $ROOT/py" ;;
+        flows) echo "cereyan serve py|cereyan serve $ROOT/py|cereyan serve \\. " ;;
+        vault) echo "gv-server local" ;;
     esac
 }
 
 for spec in "${services[@]}"; do
     case "$spec" in
-        nats|tower|flows) service="$spec"; arg=""; label="com.galata.$spec" ;;
+        vault|nats|tower|flows) service="$spec"; arg=""; label="com.galata.$spec" ;;
         capture:*) service=capture; arg="${spec#capture:}"; label="com.galata.capture.$arg"
                    [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
-        *) refuse "unknown service '$spec' (nats, capture:<venue>, tower, flows)" ;;
+        *) refuse "unknown service '$spec' (vault, nats, capture:<venue>, tower, flows)" ;;
     esac
     plist="$AGENTS/$label.plist"
 
@@ -64,6 +65,13 @@ for spec in "${services[@]}"; do
         capture) [[ -x "$ROOT/target/release/galata-datawatch" ]] || refuse "no release binary — cargo build --release first" ;;
         flows) [[ -x "$ROOT/target/release/galata-compact" ]] || refuse "the flows run release binaries — cargo build --release first" ;;
     esac
+
+    # The three that hold a secret read it through their own vault token.
+    # (Not `;;&` in the case above: macOS's bash is 3.2.)
+    if [[ "$service" == capture || "$service" == nats || "$service" == tower ]]; then
+        [[ -x "$ROOT/target/release/galata-vault-exec" ]] \
+            || refuse "no galata-vault-exec — cargo build --release -p galata-datawatch-vault first"
+    fi
 
     mkdir -p "$AGENTS" "$ROOT/var/logs"
     log="$ROOT/var/logs/${label#com.galata.}.log"

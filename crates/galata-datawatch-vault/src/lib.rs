@@ -272,3 +272,31 @@ impl SecretSource for VaultSecrets<'_> {
         Ok(Secret::new(text))
     }
 }
+
+/// Named secrets, as `NAME=value` pairs for a child process's environment.
+///
+/// For `galata-vault-exec`, which starts a process that reads its secrets
+/// from the environment — NATS's `$VAR`s, the tower's reader password, the
+/// file binary's `EnvSecrets` — with each one read **through the vault's
+/// token**. The vault decides which names that token may read, so a process
+/// started with the tower's token cannot be handed capture's password
+/// whatever the command line asks for.
+///
+/// The values leave the `Secret` type here, the one module of this member
+/// permitted to (`check-endpoint-reach.sh`), because an environment variable
+/// is a string. Every name must resolve; the first that does not is the
+/// refusal, naming it.
+pub fn environment_for(
+    vault: &Vault,
+    names: &[String],
+) -> Result<Vec<(String, String)>, ConfigError> {
+    let source = VaultSecrets::new(vault);
+    names
+        .iter()
+        .map(|name| {
+            source
+                .secret(name)
+                .map(|secret| (name.clone(), secret.expose().to_owned()))
+        })
+        .collect()
+}

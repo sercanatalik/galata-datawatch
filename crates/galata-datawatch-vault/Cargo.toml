@@ -29,4 +29,8 @@ thiserror.workspace = true
 galata-wire = { version = "0.1.0", path = "../galata-wire" }
 
 [[bin]]
+name = "galata-vault-exec"
+path = "src/bin/galata-vault-exec.rs"
+
+[[bin]]
 name = "galata-datawatch-vault"

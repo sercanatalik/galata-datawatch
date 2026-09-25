@@ -232,11 +232,27 @@ scripts/install-services.sh capture:rh-chain      # one more venue
 scripts/install-services.sh --uninstall tower     # or remove one
 ```
 
-Every agent runs `scripts/run-service.sh <service>`, which reads the broker
-passwords from `var/broker.env` (mode `0600`, never tracked) and hands **each
-service only its own**: NATS all of them, capture its venue's, the tower the
-`reader`'s, the flows none. No secret goes in a plist — launchd's are
-readable by every user. Logs are `var/logs/<service>.log`.
+Every agent runs `scripts/run-service.sh <service>`. Five services, `vault`
+first: `gv-server local` (loopback, data in `~/.local/share/galata-vault`) is
+the deployment's secret store. **Each service reads only its own secrets,
+through a token minted for it alone** — NATS all three broker passwords,
+capture its venue's, the tower the `reader`'s, the flows none — via
+`galata-vault-exec --only NAME -- <command>`. Not `gv run`: `gv` reads through
+the owner key, which this machine holds, so it would hand any service every
+secret. No secret goes in a plist, which launchd leaves readable by every
+user. Logs are `var/logs/<service>.log`.
+
+Once, on a new machine, after `scripts/install-services.sh vault`:
+
+```sh
+scripts/provision-vault.sh        # project galata-datawatch, env .../prod, secrets imported
+scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, 0600, 365 days
+```
+
+**The recovery kit** lands in `var/galata-datawatch-recovery.gvkit`. It is
+the only way to recover the project — move it to offline storage and delete
+that copy. **The tokens expire** after 365 days, the server's maximum:
+re-run `mint-service-tokens.sh` before then and reinstall the services.
 
 A stop is SIGTERM, which capture treats as a clean shutdown — it flushes,
 marks, and the next start records the outage as `downtime` rather than a
