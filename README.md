@@ -9,12 +9,20 @@
 [![MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE-MIT)
 [![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-b7410e.svg)](rust-toolchain.toml)
 
-Market data capture and parquet archival, in Rust.
+Multi-venue market data capture and Parquet archival, in Rust.
 
-One process per venue. Bytes are made durable **before** anything tries to
-parse them, gaps are published as events rather than inferred from silence, and
-the store answers *how far am I durable* from a directory listing without
-opening a file.
+galata-datawatch is the data foundation of **Galata**, a low-latency
+algorithmic trading framework in Rust. Galata covers the path from market data
+capture to signal generation, deterministic portfolio risk controls, and
+agentic strategy execution. That execution layer is driven by a fine-tuned
+decision model that turns market signals into calibrated probabilities. Each
+later layer depends on the record this one keeps. That record has to be
+complete and replayable, and it has to say plainly where its gaps are.
+
+Datawatch runs one capture process per venue. Every payload is made durable
+**before** anything parses it. Gaps are published as explicit events rather
+than inferred from silence. The store reports its durable frontier from a
+directory listing, without opening a file.
 
 | | |
 |---|---|
@@ -24,10 +32,13 @@ opening a file.
 | **Venues are features** | a venue that is not compiled in cannot be reached, and a guard holds it |
 | **The tape is a cache** | delete it and `galata-tape-rebuild` writes it again from the archive |
 
-> **Pre-0.1.0.** Nothing is published yet. The roadmap is
-> [`design/roadmap.md`](./design/roadmap.md).
+> **Status: pre-0.1.0.** Capture, the archive, the tape, the broker, vault
+> integration and scheduled maintenance are built, and can be deployed as
+> launchd services. No crate is published to crates.io yet. See [Roadmap](#roadmap) for
+> what comes next, and [`design/roadmap.md`](./design/roadmap.md) for the full
+> tiered plan.
 >
-> The screen for this record is
+> The operator UI for this record is
 > [galata-tower](https://github.com/sercanatalik/galata-tower).
 
 ## The crates
@@ -320,6 +331,47 @@ Verification builds default features; combinations are
 
 Allow a moment between publishes: the registry index needs to carry a crate
 before the next one can resolve it.
+
+## Roadmap
+
+Datawatch is the first layer of Galata. The plan runs in two horizons. The
+first finishes and publishes this repository. The second builds the rest of
+the framework on top of it.
+
+### Near term: this repository
+
+| Item | Status | Summary |
+|---|---|---|
+| **Publish 0.1.0** | next | Release `galata-wire`, `galata-segments`, `galata-broker` and `galata-datawatch` to crates.io together, in dependency order. `cargo package --workspace` already verifies every tarball in the gate. |
+| **`bound-the-replay`** | planned | A view of the tape *as it stood at time T*, so that a replay host cannot see data that arrived after its simulated clock. It lands together with its first caller, `galata-research`. See [`planning/bound-the-replay.md`](./planning/bound-the-replay.md). |
+| **`rh-crypto` live endpoint** | open | The signed poll loop is built and tested against a local server. Pointing it at the live venue will settle two questions its published documentation disagrees on. |
+| **Retention policy** | operator's decision | `galata-retain` works but ships no default horizon. How long market data is kept is left to the operator. |
+
+### Longer term: the Galata framework
+
+Each layer below reads from the record kept here and never writes to it.
+Archive-first, gaps as events and deterministic rebuilds keep backtests and
+live runs working from the same data.
+
+1. **Research and replay.** `galata-research` replays captured history through
+   point-in-time views, so a strategy is tested only against data it could
+   have seen when it made its decision.
+2. **Signal generation.** Features and signals are computed from the tape and
+   published over the same broker. They are versioned and reproducible from
+   the archive.
+3. **Deterministic portfolio risk controls.** Exposure, limit and loss checks
+   are plain, deterministic code. They sit between every decision and every
+   order, and no model can override them.
+4. **Agentic strategy execution.** A fine-tuned decision model turns signals
+   into calibrated probabilities. Execution agents size and route orders from
+   those probabilities, inside the limits the risk layer sets.
+5. **Low-latency execution path.** Venue order entry is built on the same
+   adapter seam as capture, with latency budgets that are measured and held by
+   the gate.
+
+These layers are design intent, not shipped code. Each one moves through
+`planning/` → `design/` → `openspec/` before it is built. See
+[`planning/README.md`](./planning/README.md).
 
 ## Licence
 
