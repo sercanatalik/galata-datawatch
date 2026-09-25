@@ -14,7 +14,7 @@ use std::str::FromStr;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Series {
     /// Executions the venue printed.
@@ -42,11 +42,24 @@ pub enum Series {
     /// Declarable by the ledger only. A capture venue refuses it through its
     /// own declaration, since no market-data adapter serves it.
     Margin,
+    /// An account's fills, walked by the ledger. What a gap in them is about.
+    Fills,
+    /// An account's funding payments, walked by the ledger.
+    FundingPayments,
+    /// An account's ledger updates, walked by the ledger.
+    LedgerUpdates,
 }
 
 /// A dataset a store writes, and the last token of a market-data subject.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+///
+/// `snake_case` rather than `lowercase`: identical for every one-word kind,
+/// and the only spelling that agrees with [`Kind::as_str`] for
+/// `funding_payments` and `ledger_updates`. Two spellings of one dataset do
+/// not fail; they disagree (`serde_spelling_agrees_with_the_partition_name`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Kind {
     /// [`Series::Trades`].
@@ -86,6 +99,13 @@ pub enum Kind {
     /// An account the ledger bound: a discovered sub-account's ordinal, its
     /// address fingerprint and the name the venue gave it.
     Accounts,
+    /// An account's fills, as the venue recorded them.
+    Fills,
+    /// Funding the account paid or received, per position and hour.
+    FundingPayments,
+    /// Deposits, withdrawals, transfers, liquidations and vault moves: the
+    /// venue's non-funding ledger updates.
+    LedgerUpdates,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -118,7 +138,7 @@ impl Addressing {
 impl Series {
     /// Every series, for a loader that must refuse an unknown one by listing
     /// the known ones.
-    pub const ALL: [Series; 8] = [
+    pub const ALL: [Series; 11] = [
         Series::Trades,
         Series::Book,
         Series::Candles,
@@ -127,6 +147,9 @@ impl Series {
         Series::Transfers,
         Series::Mints,
         Series::Margin,
+        Series::Fills,
+        Series::FundingPayments,
+        Series::LedgerUpdates,
     ];
 
     /// The discriminator written to disk and to a subject.
@@ -140,6 +163,9 @@ impl Series {
             Series::Transfers => "transfers",
             Series::Mints => "mints",
             Series::Margin => "margin",
+            Series::Fills => "fills",
+            Series::FundingPayments => "funding_payments",
+            Series::LedgerUpdates => "ledger_updates",
         }
     }
 
@@ -154,6 +180,9 @@ impl Series {
             Series::Transfers => Kind::Transfers,
             Series::Mints => Kind::Mints,
             Series::Margin => Kind::Margin,
+            Series::Fills => Kind::Fills,
+            Series::FundingPayments => Kind::FundingPayments,
+            Series::LedgerUpdates => Kind::LedgerUpdates,
         }
     }
 }
@@ -189,7 +218,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 16] = [
+    pub const ALL: [Kind; 19] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -206,6 +235,9 @@ impl Kind {
         Kind::Margin,
         Kind::Positions,
         Kind::Accounts,
+        Kind::Fills,
+        Kind::FundingPayments,
+        Kind::LedgerUpdates,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -227,7 +259,12 @@ impl Kind {
             | Kind::Sessions
             | Kind::Instruments
             | Kind::Reorgs => Addressing::Venue,
-            Kind::Margin | Kind::Positions | Kind::Accounts => Addressing::Account,
+            Kind::Margin
+            | Kind::Positions
+            | Kind::Accounts
+            | Kind::Fills
+            | Kind::FundingPayments
+            | Kind::LedgerUpdates => Addressing::Account,
         }
     }
 
@@ -250,6 +287,9 @@ impl Kind {
             Kind::Margin => "margin",
             Kind::Positions => "positions",
             Kind::Accounts => "accounts",
+            Kind::Fills => "fills",
+            Kind::FundingPayments => "funding_payments",
+            Kind::LedgerUpdates => "ledger_updates",
         }
     }
 }
@@ -286,7 +326,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 16);
+        assert_eq!(Kind::ALL.len(), 19);
     }
 
     #[test]
@@ -355,6 +395,32 @@ mod tests {
             assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
         }
         assert!(matches!(Kind::Quotes.addressing(), Addressing::Venue));
+    }
+
+    #[test]
+    fn a_series_is_spelled_as_its_dataset_is() {
+        // What a configuration declares is parsed by serde, and a gap names
+        // its series by `as_str`; the two must agree for `funding_payments`.
+        for series in Series::ALL {
+            let json = serde_json::to_string(&series).unwrap();
+            assert_eq!(json, format!("\"{}\"", series.as_str()), "{series:?}");
+        }
+    }
+
+    #[test]
+    fn serde_spelling_agrees_with_the_partition_name() {
+        for kind in Kind::ALL {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{}\"", kind.as_str()), "{kind:?}");
+            assert_eq!(serde_json::from_str::<Kind>(&json).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn every_events_kind_sits_under_the_account() {
+        for kind in [Kind::Fills, Kind::FundingPayments, Kind::LedgerUpdates] {
+            assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
+        }
     }
 
     #[test]

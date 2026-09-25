@@ -144,6 +144,10 @@ pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
             snapshot: 2.0,
             discovery: 20.0,
             mode: 20.0,
+            // `userFillsByTime`, `userFunding`, `userNonFundingLedgerUpdates`:
+            // 20 each, as "all other documented info requests", plus 1 per
+            // 20 items for fills and funding (read 2026-09-25).
+            events: 20.0,
         }),
         _ => None,
     }
@@ -186,7 +190,8 @@ pub async fn run_ledger(
         hyperliquid::VENUE => {
             let accounts = hyperliquid::accounts::HyperliquidAccounts::new(
                 hyperliquid::Market::parse(market)?.rest_url(),
-            )?;
+            )?
+            .with_key(parts.key.clone());
             let mut run = crate::ledger::run::LedgerRun::new(
                 accounts,
                 crate::capture::SystemClock,

@@ -472,6 +472,21 @@ pub fn boot_ledger(
         "ledger starting"
     );
 
+    // `Config::validate` already refused a ledger without it; said again here
+    // so no default can stand in for it.
+    let events_secs = ledger
+        .events_secs
+        .ok_or("[ledger] events_secs is not declared; the ledger invents no default")?;
+    // A full page of fills or funding weighs its request plus one per 20
+    // rows: 20 + 2,000 / 20 = 120 at worst. Paused between pages so a
+    // catch-up walk spends no more than the ledger's share of the budget.
+    let page_pause = match adapters::ledger_cost(&venue_name) {
+        Some(cost) => {
+            let allowed = (ledger.ledger_share * cost.budget_per_minute).max(1.0);
+            ((cost.events + 100.0) / allowed * 60_000_000.0) as i64
+        }
+        None => 0,
+    };
     let parts = adapters::LedgerParts {
         // Seeded by the clock, as capture's is: sequences must not collide
         // with the ones a previous run left on disk.
@@ -484,6 +499,8 @@ pub fn boot_ledger(
         cadences: crate::ledger::run::Cadences {
             snapshot_micros: ledger.snapshot_secs as i64 * 1_000_000,
             discover_micros: ledger.discover_secs as i64 * 1_000_000,
+            events_micros: events_secs as i64 * 1_000_000,
+            page_pause_micros: page_pause,
         },
         masters,
         bindings,

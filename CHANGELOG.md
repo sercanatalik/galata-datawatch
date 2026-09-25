@@ -37,6 +37,11 @@ First release. Nothing is on crates.io yet, so everything is new.
   `margin`, `positions` and `accounts` kinds with their `Margin`, `Position`,
   `AccountSeen` and `AccountMode` events. **Additive**; `Address` gains a
   variant.
+- An account's history: `fills`, `funding_payments` and `ledger_updates`
+  kinds and series, the `Fill`, `FundingPayment`, `LedgerUpdate` and
+  `EventsReach` events, and `GapCause::BeyondReach`. `Kind` and `Series`
+  serialise `snake_case`, identical for every one-word name and the only
+  spelling that agrees with their partition names.
 
 **`galata-segments` — durable parquet segments, and the listing over them.**
 
@@ -123,6 +128,14 @@ First release. Nothing is on crates.io yet, so everything is new.
   alias whose address changed, a history it cannot verify, a sub-account
   declared as a master, a dex the venue does not know and a root others can
   read. Hyperliquid only; its shapes were measured on 2026-09-25.
+- **The ledger's history** (`ledger-events`): fills, funding payments and
+  ledger updates per account, asked forward from the newest recorded on a
+  declared `events_secs`, one row per event on read however often a page
+  was archived, and the reach judged by evidence. A hole the venue no
+  longer holds is a gap, cause `beyond_reach`. A transfer's effect on perp
+  margin is stated per dex, a counterparty is named by alias or by
+  fingerprint, and no row carries an address or a transaction hash.
+  `[ledger] events_secs` is required once a `[ledger]` block is declared.
 - Binaries: `galata-datawatch <venue>`, `galata-ledger <venue>`,
   `galata-tape-rebuild`, `galata-retain`, `galata-watch`, `measure`.
 

@@ -232,6 +232,14 @@ pub enum Event {
     Position(Position),
     /// An account the ledger bound to an alias.
     AccountSeen(AccountSeen),
+    /// One fill of the account's.
+    Fill(Fill),
+    /// Funding one position paid or received.
+    FundingPayment(FundingPayment),
+    /// A deposit, withdrawal, transfer, liquidation or vault move.
+    LedgerUpdate(LedgerUpdate),
+    /// How far the ledger holds one kind of the account's history.
+    EventsReach(EventsReach),
 }
 
 impl Event {
@@ -253,7 +261,10 @@ impl Event {
             Event::Reorg(_) => Kind::Reorgs,
             Event::Margin(_) => Kind::Margin,
             Event::Position(_) => Kind::Positions,
-            Event::AccountSeen(_) => Kind::Accounts,
+            Event::AccountSeen(_) | Event::EventsReach(_) => Kind::Accounts,
+            Event::Fill(_) => Kind::Fills,
+            Event::FundingPayment(_) => Kind::FundingPayments,
+            Event::LedgerUpdate(_) => Kind::LedgerUpdates,
         }
     }
 }
@@ -463,6 +474,10 @@ pub enum GapCause {
     /// The chain no longer holds rows previously written. The one absence that
     /// can be *proved* rather than inferred.
     Reorg,
+    /// The venue no longer holds history between the newest event recorded
+    /// and the earliest it now returns. Known, not inferred: a full page that
+    /// starts after our newest event is the venue saying so.
+    BeyondReach,
 }
 
 impl GapCause {
@@ -477,6 +492,7 @@ impl GapCause {
             GapCause::PollFailed => "poll_failed",
             GapCause::Throttled => "throttled",
             GapCause::Reorg => "reorg",
+            GapCause::BeyondReach => "beyond_reach",
         }
     }
 }
@@ -785,6 +801,142 @@ pub struct Position {
     pub funding_since_change: Option<Num>,
 }
 
+/// One fill, as the venue recorded it. **No transaction hash**: on any block
+/// explorer it resolves to the account's address. The hash stays in the
+/// archived bytes, under the owner-only root.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Fill {
+    /// The dex, where the venue has several. `None` is the main one.
+    pub dex: Option<String>,
+    /// The instrument, the dex prefix composed away.
+    pub ticker: Ticker,
+    /// `Bid` bought, `Ask` sold.
+    pub side: Side,
+    /// What it filled at.
+    pub price: Num,
+    /// How much.
+    pub size: Num,
+    /// The position before this fill, signed.
+    pub start_position: Option<Num>,
+    /// The venue's own description (`Open Long`, `Close Short`, …), verbatim.
+    pub direction: Option<String>,
+    /// Realised P&L the venue booked on this fill.
+    pub closed_pnl: Option<Num>,
+    /// The fee charged.
+    pub fee: Option<Num>,
+    /// The token the fee was charged in.
+    pub fee_token: Option<String>,
+    /// A builder's fee, where one was charged.
+    pub builder_fee: Option<Num>,
+    /// Whether the order crossed the spread: took liquidity.
+    pub crossed: Option<bool>,
+    /// The venue's order id.
+    pub order_id: u64,
+    /// The venue's trade id. **Not unique alone**: the two sides of one
+    /// trade share it, so identity is `(trade_id, order_id)`.
+    pub trade_id: u64,
+    /// The TWAP order this fill belonged to, where one did.
+    pub twap_id: Option<u64>,
+}
+
+/// Funding one position paid or received in one settlement.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FundingPayment {
+    /// The dex, where the venue has several. `None` is the main one.
+    pub dex: Option<String>,
+    /// The instrument.
+    pub ticker: Ticker,
+    /// **As the venue signs it**: negative when the position paid (measured
+    /// on mainnet, 2026-09-25).
+    pub usdc: Num,
+    /// The position it was paid on, signed.
+    pub size: Num,
+    /// The rate that settled.
+    pub rate: Num,
+    /// How many samples the venue averaged, where it says.
+    pub samples: Option<u32>,
+}
+
+/// One movement of perp margin on one dex.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DexEffect {
+    /// The dex. `None` is the main one.
+    pub dex: Option<String>,
+    /// Signed: positive into perp margin, negative out of it.
+    pub usdc: Num,
+}
+
+/// What a ledger update did to perp margin.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effect {
+    /// These movements, per dex. **Empty means none**: the update moved
+    /// nothing in perp margin.
+    Known(Vec<DexEffect>),
+    /// A type this build does not know. Recorded, reported, never guessed.
+    Unknown,
+}
+
+/// Who was on the other side of a ledger update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Counterparty {
+    /// One of this ledger's own accounts, by alias.
+    Account(Account),
+    /// Anyone else, by the keyed fingerprint of their address. Never the address.
+    Fingerprint(String),
+}
+
+/// A deposit, withdrawal, transfer, liquidation or vault move, as the venue
+/// recorded it: its type verbatim, and what it did to perp margin per dex.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LedgerUpdate {
+    /// The venue's type, verbatim (`send`, `deposit`, `accountClassTransfer`, …).
+    pub kind: String,
+    /// What it did to perp margin, per dex.
+    pub effect: Effect,
+    /// The other side, where there was one.
+    pub counterparty: Option<Counterparty>,
+    /// The token moved, where it was not USDC.
+    pub token: Option<String>,
+    /// The amount moved, in that token, as the venue stated it.
+    pub amount: Option<Num>,
+    /// The venue's fee on this update, **stated beside the effect and not
+    /// folded into it**: whether an amount is gross or net of its fee is the
+    /// venue's convention, and the fold's to reconcile.
+    pub fee: Option<Num>,
+}
+
+/// What the record says about how much of a kind's history it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Reach {
+    /// Proven missing: the account's own record shows events before the
+    /// earliest one the venue still holds.
+    Lost,
+    /// Nothing in the record contradicts the history. **Not proof of
+    /// completeness**; reconciling against snapshots is.
+    Consistent,
+    /// Nothing to judge against yet.
+    Unknown,
+}
+
+/// How far the ledger holds one kind of an account's history, by evidence.
+///
+/// Measured 2026-09-25: the venue's documented fill bound is not its reach,
+/// and it does drop history by a rule this ledger cannot apply. So the reach
+/// is judged from the account's own events, never from a count.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EventsReach {
+    /// Which kind of history.
+    pub kind: Kind,
+    /// What the record says about it.
+    pub reach: Reach,
+    /// The earliest event the venue returned, where it returned one.
+    pub earliest_micros: Option<i64>,
+}
+
 /// An account the ledger bound to an alias: addressed to that alias.
 ///
 /// The binding is **written to the record and read back** at every boot, so
@@ -919,6 +1071,93 @@ mod tests {
     }
 
     #[test]
+    fn an_event_row_carries_no_float_and_no_hash() {
+        // The type has no hash field; this holds the WIRE, so a field added
+        // later under that name, or a price that became a number, fails here.
+        let account = Account::new("main").unwrap();
+        let rows = [
+            Event::Fill(Fill {
+                dex: Some("xyz".into()),
+                ticker: Ticker::new("GOLD").unwrap(),
+                side: Side::Bid,
+                price: Decimal::from_str("4301.5").unwrap(),
+                size: Decimal::from_str("0.5").unwrap(),
+                start_position: num("-1.0"),
+                direction: Some("Close Short".into()),
+                closed_pnl: num("12.5"),
+                fee: num("0.9"),
+                fee_token: Some("USDC".into()),
+                builder_fee: None,
+                crossed: Some(true),
+                order_id: 1,
+                trade_id: 2,
+                twap_id: None,
+            }),
+            Event::FundingPayment(FundingPayment {
+                dex: None,
+                ticker: Ticker::new("BTC").unwrap(),
+                usdc: Decimal::from_str("-0.1239").unwrap(),
+                size: Decimal::from_str("0.01").unwrap(),
+                rate: Decimal::from_str("0.0000125").unwrap(),
+                samples: Some(60),
+            }),
+            Event::LedgerUpdate(LedgerUpdate {
+                kind: "send".into(),
+                effect: Effect::Known(vec![
+                    DexEffect {
+                        dex: None,
+                        usdc: Decimal::from_str("-25.77").unwrap(),
+                    },
+                    DexEffect {
+                        dex: Some("xyz".into()),
+                        usdc: Decimal::from_str("25.77").unwrap(),
+                    },
+                ]),
+                counterparty: Some(Counterparty::Fingerprint("0123456789abcdef".into())),
+                token: None,
+                amount: None,
+                fee: None,
+            }),
+        ];
+        let integers = [
+            "seq",
+            "at_micros",
+            "recv_micros",
+            "order_id",
+            "trade_id",
+            "twap_id",
+            "samples",
+        ];
+        fn walk(v: &serde_json::Value, key: &str, ints: &[&str], bad: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Number(_) if !ints.contains(&key) => {
+                    bad.push(format!("{key} = {v}"))
+                }
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        if k == "hash" {
+                            bad.push("a hash field".into());
+                        }
+                        walk(v, k, ints, bad);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter().for_each(|v| walk(v, key, ints, bad))
+                }
+                _ => {}
+            }
+        }
+        for event in rows {
+            let envelope = Envelope::for_account(venue(), account.clone(), Some(1), 2, event);
+            let json = serde_json::to_value(&envelope).unwrap();
+            let mut bad = Vec::new();
+            walk(&json, "", &integers, &mut bad);
+            assert!(bad.is_empty(), "{bad:?}");
+            assert_eq!(serde_json::from_value::<Envelope>(json).unwrap(), envelope);
+        }
+    }
+
+    #[test]
     fn an_account_envelope_names_no_instrument() {
         let envelope = Envelope::for_account(
             venue(),
@@ -1009,11 +1248,12 @@ mod tests {
             GapCause::PollFailed,
             GapCause::Throttled,
             GapCause::Reorg,
+            GapCause::BeyondReach,
         ]
         .iter()
         .map(|c| c.as_str())
         .collect();
-        assert_eq!(causes.len(), 8);
+        assert_eq!(causes.len(), 9);
         for cause in &causes {
             assert!(
                 !cause.contains("quiet") && !cause.contains("silent") && !cause.contains("idle"),

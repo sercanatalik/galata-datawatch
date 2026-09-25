@@ -465,6 +465,17 @@ pub struct Ledger {
     pub snapshot_secs: u64,
     /// Seconds between discovery runs.
     pub discover_secs: u64,
+    /// Seconds between asking each account for its new events: fills,
+    /// funding payments and ledger updates. **No default**, like the others:
+    /// it is the latency of the ledger's history and a claim on the budget.
+    ///
+    /// Optional in the *parse*, and refused by the ledger when absent
+    /// (`keeps_ledgers`). Capture and the maintenance tools read this document
+    /// too: a key they required would stop capture restarting on the new
+    /// binary before the operator had written it, and the old binary refuses
+    /// a key it does not know, so no order of deploying the two would be safe.
+    #[serde(default)]
+    pub events_secs: Option<u64>,
     /// The share of the venue's stated budget the ledger may take, **beside**
     /// capture's `walk_share`: the venue counts both against one allowance.
     pub ledger_share: f64,
@@ -506,6 +517,9 @@ pub struct LedgerCost {
     pub discovery: f64,
     /// One read of an account's mode.
     pub mode: f64,
+    /// One events request (fills, funding or ledger updates), before any
+    /// per-item weight the answer adds.
+    pub events: f64,
 }
 
 impl Ledger {
@@ -516,12 +530,20 @@ impl Ledger {
     pub fn declared_cost(&self, venue: &str, cost: &LedgerCost) -> f64 {
         let per_snapshot = 60.0 / self.snapshot_secs.max(1) as f64;
         let per_discovery = 60.0 / self.discover_secs.max(1) as f64;
+        let per_events = match self.events_secs {
+            Some(secs) => 60.0 / secs.max(1) as f64,
+            None => 0.0,
+        };
         self.account
             .values()
             .filter(|a| a.venue == venue)
             .map(|a| {
                 a.dexes.len().max(1) as f64 * cost.snapshot * per_snapshot
                     + (cost.discovery + cost.mode) * per_discovery
+                    // Three kinds a poll: fills, funding, ledger updates.
+                    // Their per-item weight is paid at run time and paced
+                    // within the share, as discovered accounts are.
+                    + 3.0 * cost.events * per_events
             })
             .sum()
     }
@@ -752,6 +774,26 @@ impl Config {
                 bound: "1..=3600 — also the width of the gap one failed snapshot leaves",
             });
         }
+        match ledger.events_secs {
+            Some(secs) if !(1..=86_400).contains(&secs) => {
+                return Err(ConfigError::OutOfBounds {
+                    origin: origin.clone(),
+                    field: "ledger.events_secs",
+                    value: secs.to_string(),
+                    bound: "1..=86400",
+                });
+            }
+            None if adapters.keeps_ledgers() => {
+                return Err(ConfigError::OutOfBounds {
+                    origin: origin.clone(),
+                    field: "ledger.events_secs",
+                    value: "absent".to_string(),
+                    bound: "1..=86400, declared: no default is invented for how often the \
+                            ledger asks for an account's history",
+                });
+            }
+            _ => {}
+        }
         if !(1..=86_400).contains(&ledger.discover_secs) {
             return Err(ConfigError::OutOfBounds {
                 origin: origin.clone(),
@@ -906,6 +948,7 @@ mod tests {
                 snapshot: 2.0,
                 discovery: 20.0,
                 mode: 20.0,
+                events: 20.0,
             })
         }
         fn keeps_ledgers(&self) -> bool {
@@ -963,6 +1006,7 @@ instruments = [
 root = "var/ledger"
 snapshot_secs = 10
 discover_secs = 600
+events_secs = 300
 ledger_share = 0.25
 fingerprint_key_var = "GALATA_LEDGER_FINGERPRINT_KEY"
 
@@ -1007,6 +1051,41 @@ dexes = ["", "xyz"]
             "dexes = [\"\"]\naddress = \"0x3f9aa0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7\"",
         );
         assert!(Config::load_from_str(&with_address, origin(), &NoLedger).is_err());
+    }
+
+    #[test]
+    fn a_missing_events_cadence_is_refused() {
+        let err = with_ledger(&LEDGER.replace("events_secs = 300\n", ""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("events_secs"), "{err}");
+    }
+
+    #[test]
+    fn capture_starts_whether_or_not_the_events_cadence_is_written_yet() {
+        // One document, many readers: the key the ledger needs must not stop
+        // capture on either side of the operator writing it.
+        let without = format!("{GOOD}{}", LEDGER.replace("events_secs = 300\n", ""));
+        assert!(Config::load_from_str(&without, origin(), &NoLedger).is_ok());
+        assert!(Config::load_from_str(&format!("{GOOD}{LEDGER}"), origin(), &NoLedger).is_ok());
+    }
+
+    #[test]
+    fn events_polling_counts_against_the_share() {
+        // Snapshots every 300 s and discovery every 600 s are cheap; asking
+        // for events every second is 3 x 20 x 60 = 3,600 a minute alone.
+        let err = with_ledger(
+            &LEDGER
+                .replace("snapshot_secs = 10", "snapshot_secs = 300")
+                .replace("events_secs = 300", "events_secs = 1"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("events") || err.contains("weight a minute"),
+            "{err}"
+        );
+        assert!(with_ledger(&LEDGER.replace("snapshot_secs = 10", "snapshot_secs = 300")).is_ok());
     }
 
     #[test]
@@ -1066,8 +1145,8 @@ dexes = ["", "xyz"]
     #[test]
     fn a_cadence_the_share_cannot_afford_is_refused_with_both_figures() {
         // Two dexes every second at weight 2 is 240 a minute for snapshots;
-        // one master's discovery and mode every 600 s is 4. 244 against the
-        // 1% share's 12.
+        // one master's discovery and mode every 600 s is 4; three events
+        // requests every 300 s is 12. 256 against the 1% share's 12.
         let err = with_ledger(
             &LEDGER
                 .replace("snapshot_secs = 10", "snapshot_secs = 1")
@@ -1075,7 +1154,7 @@ dexes = ["", "xyz"]
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("244.0"), "the cost: {err}");
+        assert!(err.contains("256.0"), "the cost: {err}");
         assert!(err.contains("12.0"), "the allowance: {err}");
     }
 

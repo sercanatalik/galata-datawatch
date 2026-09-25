@@ -319,14 +319,24 @@ mod tests {
 
     #[test]
     fn an_accounts_datasets_are_not_projected_into_the_market_tape() {
-        for kind in [Kind::Margin, Kind::Positions, Kind::Accounts] {
+        let accounts = [
+            Kind::Margin,
+            Kind::Positions,
+            Kind::Accounts,
+            Kind::Fills,
+            Kind::FundingPayments,
+            Kind::LedgerUpdates,
+        ];
+        for kind in accounts {
             assert!(!projected(kind), "{kind}");
             assert!(
                 schema_for(kind).is_none(),
                 "{kind} has a market-tape schema"
             );
         }
-        assert_eq!(projected_kinds().count(), Kind::ALL.len() - 3);
+        // Every account-addressed kind is excluded, and nothing else is.
+        let excluded = Kind::ALL.into_iter().filter(|k| !projected(*k)).count();
+        assert_eq!(excluded, accounts.len());
     }
 
     #[test]

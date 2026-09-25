@@ -21,6 +21,7 @@
 //! on disk. Polling the venue is the capture half's, behind `capture`.
 
 pub mod accounts;
+pub mod events;
 /// The loop: asking the venue, on a cadence. Needs a runtime.
 #[cfg(feature = "capture")]
 pub mod run;

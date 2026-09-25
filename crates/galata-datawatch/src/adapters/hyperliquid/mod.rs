@@ -23,6 +23,9 @@
 pub mod accounts;
 #[cfg(feature = "capture")]
 pub mod client;
+/// An account's history: fills, funding payments, ledger updates. Pure.
+#[cfg(feature = "ledger")]
+pub mod events;
 /// Account answers, for the ledger. Pure, like `normalise`.
 #[cfg(feature = "ledger")]
 pub mod ledger;

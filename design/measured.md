@@ -3830,3 +3830,56 @@ restart onto the build that names a gap's dex (15:05:10).*
   started: the refusal `2154fbd` fixed would have kept it down.
 - No gap was recorded, so the dex a gap names is proven by the outage test
   above rather than here.
+
+## What Hyperliquid holds of an account's history — 2026-09-25
+
+*Before `ledger-events` (Tier 13). Mainnet `info`, unauthenticated, on the
+public addresses sampled earlier the same day and the operator's master
+(read through the ledger's own vault token, printed nowhere). Figures are
+shapes, counts and dates; no address is recorded.*
+
+**Fills (`userFillsByTime`)** page 2,000 at a time, oldest first, forward
+by `startTime`, and one call carries **every dex** (`xyz:` coins prefixed).
+A fill is `closedPnl, coin, crossed, dir, fee, feeToken, builderFee, hash,
+oid, px, side, startPosition, sz, tid, time`, plus **`twapId`**, which the
+documentation does not list.
+
+- **`tid` alone is not a fill's identity.** In one account's 25,655 fills,
+  220 trade ids sat on more than one order id. `(tid, oid)` is.
+- **The documented reach is not the reach.** The documentation says *"only
+  the 10000 most recent fills are available"*. One account returned 25,655
+  distinct fills back to 2023-08-16, ending on a short page; another
+  returned 17,720 in the four hours since 12:19 today. **But a reach
+  exists**: that second account's first deposit and first funding payment
+  are from 2024-09-27, and it holds no fill before 12:19 today — a day
+  asked for five days back returned none. So fills can be lost to the
+  venue, by a rule that is not a count this ledger can apply.
+- **The loss is detectable, not predictable.** A funding payment on an open
+  position at T proves a fill at or before T. Fills that begin after the
+  account's first funding payment are fills the venue no longer holds.
+
+**Funding (`userFunding`)** is `{time, hash, delta: {type, coin, usdc, szi,
+fundingRate, nSamples}}`, 500 a page, oldest first, forward by
+`startTime`, every dex in one call. Asking again from a page's last time
+repeated 10 rows — several coins settle in one hour — so the overlap is
+inclusive and `(time, coin)` is the identity. **Sign, on mainnet**: `usdc`
+is negative exactly when the position pays (long with a positive rate,
+short with a negative one), as legacy read on testnet. Funding reached
+each sampled account's first day.
+
+**Ledger updates (`userNonFundingLedgerUpdates`)** are `{time, hash,
+delta: {type, …}}`, at most 2,000 an answer. Seventeen types over thirteen
+addresses: `send` (with `sourceDex` / `destinationDex`, so it can move
+margin **between dexes**), `deposit`, `spotTransfer`,
+`accountClassTransfer` (`toPerp`), `withdraw`, `spotGenesis`,
+`internalTransfer`, `rewardsClaim`, `vaultDeposit`, `cStakingTransfer`,
+`subAccountTransfer`, `vaultWithdraw`, `borrowLend`, `liquidation`,
+`vaultCreate`, `vaultDistribution`, `activateDexAbstraction`. The
+counterparty sits in fields named `user`, `destination` or `vault`,
+depending on the type.
+
+**The operator's master**: no fills, no funding payments, one ledger update
+(a `send`, 2026-08-23). Its history is whole.
+
+**No weight is reported in an answer's headers**; the documented weights
+(20, plus 1 per 20 items for fills and funding) are the only figures.

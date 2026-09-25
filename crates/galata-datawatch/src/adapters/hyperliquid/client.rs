@@ -221,6 +221,26 @@ impl Client {
             .await
     }
 
+    /// One page of an account's events, raw: the oldest at or after
+    /// `start_ms`, as the venue pages each kind (2,000 fills, 500 funding
+    /// payments, 2,000 ledger updates; measured 2026-09-25). `kind` is the
+    /// venue's request type: `userFillsByTime`, `userFunding` or
+    /// `userNonFundingLedgerUpdates`.
+    #[cfg(feature = "ledger")]
+    pub async fn events_page(
+        &self,
+        kind: &'static str,
+        address: &crate::config::Secret,
+        start_ms: i64,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({
+            "type": kind,
+            "user": address.expose(),
+            "startTime": start_ms,
+        }))
+        .await
+    }
+
     /// Whether the venue knows a dex: `Some(true)` it listed one, `Some(false)`
     /// **it said there is none**, `None` it did not answer the question.
     ///

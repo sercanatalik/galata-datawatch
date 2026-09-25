@@ -660,6 +660,14 @@ test that never touched capture.*
 
 ### Tier 13 — events
 
+*Built 2026-09-25 (`ledger-events`). Measured first: the documented
+*"10000 most recent fills"* is not the venue's reach — one account held
+25,655 fills back to 2023, another had lost every fill before that morning
+while its funding ran from 2024. So the reach is judged by evidence (a
+funding payment on a position proves a fill before it), recorded as `lost`,
+`consistent` or not at all, and never from a count. A `send` can move margin
+between dexes, so a ledger update's effect is stated per dex.*
+
 - Fills, funding paid, liquidations and non-funding ledger updates, walked
   back at boot as candles are. Identity comes from content (the fill's id),
   so an overlapping re-fetch is free. The venue's reach is reported, never

@@ -549,6 +549,7 @@ mod tests {
             root: root.to_path_buf(),
             snapshot_secs: 10,
             discover_secs: 600,
+            events_secs: Some(300),
             ledger_share: 0.25,
             fingerprint_key_var: "KEY".into(),
             account: [(

@@ -288,14 +288,26 @@ pub fn snapshot_rows(
 #[derive(Debug, Clone)]
 pub struct LedgerNormaliser {
     venue: Venue,
+    /// The fingerprint key, which decides which side of a transfer an account
+    /// was on and names its counterparty. Configuration, like a symbol table:
+    /// the normaliser is still a function of the bytes.
+    key: Option<crate::ledger::FingerprintKey>,
 }
 
 impl LedgerNormaliser {
-    /// For Hyperliquid.
+    /// For Hyperliquid, reading snapshots only.
     pub fn new() -> Result<LedgerNormaliser, galata_wire::TokenError> {
         Ok(LedgerNormaliser {
             venue: Venue::new(super::VENUE)?,
+            key: None,
         })
+    }
+
+    /// Able to read ledger updates too, with the key their parties are
+    /// fingerprinted under.
+    pub fn with_key(mut self, key: crate::ledger::FingerprintKey) -> LedgerNormaliser {
+        self.key = Some(key);
+        self
     }
 }
 
@@ -313,6 +325,42 @@ impl Normalise for LedgerNormaliser {
                 snapshot_rows(&self.venue, &account, payload.recv_micros, &payload.payload)
             }
             LISTING_CHANNEL | ROLE_CHANNEL | MODE_CHANNEL => Ok(Vec::new()),
+            super::events::FILLS_CHANNEL
+            | super::events::FUNDING_CHANNEL
+            | super::events::UPDATES_CHANNEL => {
+                let PayloadAddress::Account(address) = &payload.address else {
+                    return Err(NormaliseError::Shape {
+                        kind: "events",
+                        detail: "an events page not addressed to an account".into(),
+                    });
+                };
+                let account = Account::new(address.account.as_str())?;
+                let (venue, recv, bytes) = (&self.venue, payload.recv_micros, &payload.payload);
+                match payload.channel.as_str() {
+                    super::events::FILLS_CHANNEL => {
+                        super::events::fill_rows(venue, &account, recv, bytes)
+                    }
+                    super::events::FUNDING_CHANNEL => {
+                        super::events::funding_rows(venue, &account, recv, bytes)
+                    }
+                    _ => {
+                        let key = self.key.as_ref().ok_or_else(|| NormaliseError::Shape {
+                            kind: "userNonFundingLedgerUpdates",
+                            detail: "no fingerprint key: this normaliser cannot tell the \
+                                     parties of a transfer apart"
+                                .into(),
+                        })?;
+                        super::events::update_rows(
+                            venue,
+                            &account,
+                            key,
+                            &address.fingerprint,
+                            recv,
+                            bytes,
+                        )
+                    }
+                }
+            }
             other => Err(NormaliseError::UnknownChannel(other.to_string())),
         }
     }
