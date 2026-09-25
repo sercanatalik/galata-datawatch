@@ -3799,3 +3799,34 @@ gap. A staged outage was never written into the real `var/ledger`.*
   day**: `Gap` carries an optional `dex`, spelled as the margin rows spell
   it (`None` is the main dex), and a market-data gap and every older row
   read as before (`a_gap_names_its_dex`).
+
+## The ledger's first hour on the real master — 2026-09-25
+
+*Task 7.1. `com.galata.ledger.hyperliquid`, installed from the main checkout,
+on the operator's master account (alias `main`, main dex and `xyz`,
+`snapshot_secs = 300`, `discover_secs = 600`), 14:39:38–15:39:38 UTC. The
+hour spanned three starts: the install, a SIGTERM through launchd, and a
+restart onto the build that names a gap's dex (15:05:10).*
+
+| | the hour |
+|---|---|
+| accounts | `main`; a master (`userRole`), no sub-accounts |
+| mode | `unifiedAccount`, flat: `0.0` on both dexes, so every margin row says equity not held |
+| snapshots | 13 on the main dex, 13 on `xyz`: twelve on the cadence, and one more at each start |
+| answers archived | 26 `clearinghouseState`, 8 `subAccounts`, 8 `userAbstraction`, 3 `userRole` |
+| segments, bytes | 45 segments, 69,442 bytes |
+| weight spent | 552, 9.2 a minute, against the declared 300 (`ledger_share = 0.25`) |
+| misses, gaps | 0, 0 |
+
+- **The restarts cost more than the cadence does.** The steady state is 576
+  snapshots and 288 discovery answers a day, **864 segments** and 4.8 weight
+  a minute. This hour ran above it: each start asks the role (60), runs
+  discovery and snapshots at once, and three starts in one hour are not a
+  steady state.
+- **Every start passed the fingerprint check** against the history the one
+  before had written, and every stop was clean.
+- **Capture restarted on its own during the hour** (14:50, a deploy of the
+  candle-width change) with the `[ledger]` block in its configuration, and
+  started: the refusal `2154fbd` fixed would have kept it down.
+- No gap was recorded, so the dex a gap names is proven by the outage test
+  above rather than here.

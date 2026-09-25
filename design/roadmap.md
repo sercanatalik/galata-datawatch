@@ -612,6 +612,11 @@ reach. So snapshots come first, before the event walk.
 
 ### Tier 11 — accounts
 
+*Done 2026-09-25 (`ledger-accounts-and-snapshots`), with Tier 12: running on
+the operator's master since 14:39 UTC, and measured over its first hour
+(`design/measured.md`). The shapes it relies on were measured on mainnet
+before any code.*
+
 - `[ledger.account.<alias>]` in the vault document: `venue`, `address_var`
   and, on Hyperliquid, `dexes`. **The record knows an account by alias; only
   the vault knows its address.** The address never appears in a path, a
@@ -635,6 +640,11 @@ reach. So snapshots come first, before the event walk.
 
 ### Tier 12 — snapshots
 
+*Done 2026-09-25, as above. Snapshots every 300 s on the main dex and `xyz`:
+864 segments a day, 4.8 weight a minute in the steady state. A gap names its
+dex, and consecutive misses nest (the poll lane's rule), found by an outage
+test that never touched capture.*
+
 - Perp positions and margin per (account, dex), polled through the existing
   poll lane: a failed poll is a gap one cadence wide, and throttling is its
   own cause.
@@ -643,7 +653,10 @@ reach. So snapshots come first, before the event walk.
   same machine (legacy `design/datawatch/venues.md`). So the ledger takes a
   declared share of the venue's budget, as `walk_share` does, rather than a
   budget of its own.
-- Open: a unified account's equity (*What is still open*), and per-dex margin.
+- ~~Open: a unified account's equity, and per-dex margin.~~ Both settled
+  2026-09-25: equity is recorded as not held where the collateral is spot
+  (`unifiedAccount`, `portfolioMargin`), and each HIP-3 dex keeps its own
+  margin, measured.
 
 ### Tier 13 — events
 
