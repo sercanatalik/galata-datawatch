@@ -35,6 +35,13 @@ pub enum Series {
     /// Primary issuance and redemption — a transfer from or to the zero
     /// address. A supply event, which no centralised venue has.
     Mints,
+    /// An account's perp margin, one snapshot per dex, **polled by the
+    /// ledger**. Its open positions ride along, as marks ride an asset
+    /// context: one answer, and a gap in it is a gap in both.
+    ///
+    /// Declarable by the ledger only. A capture venue refuses it through its
+    /// own declaration, since no market-data adapter serves it.
+    Margin,
 }
 
 /// A dataset a store writes, and the last token of a market-data subject.
@@ -72,6 +79,13 @@ pub enum Kind {
     /// longer holds. The one absence that can be *proved* rather than
     /// inferred.
     Reorgs,
+    /// [`Series::Margin`]: an account's margin, per dex, as the venue stated it.
+    Margin,
+    /// One open position per row, riding a margin snapshot.
+    Positions,
+    /// An account the ledger bound: a discovered sub-account's ordinal, its
+    /// address fingerprint and the name the venue gave it.
+    Accounts,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -84,6 +98,10 @@ pub enum Addressing {
     /// Numbers this system computed about a market, which may span venues and
     /// therefore names none of them.
     Market,
+    /// What a venue said about **one account**: under its venue, then its
+    /// alias — `venue=<v>/account=<alias>/` — so one account's history is a
+    /// subtree that can be retained or dropped whole.
+    Account,
 }
 
 impl Addressing {
@@ -92,6 +110,7 @@ impl Addressing {
         match self {
             Addressing::Venue => "venue",
             Addressing::Market => "market",
+            Addressing::Account => "account",
         }
     }
 }
@@ -99,7 +118,7 @@ impl Addressing {
 impl Series {
     /// Every series, for a loader that must refuse an unknown one by listing
     /// the known ones.
-    pub const ALL: [Series; 7] = [
+    pub const ALL: [Series; 8] = [
         Series::Trades,
         Series::Book,
         Series::Candles,
@@ -107,6 +126,7 @@ impl Series {
         Series::Quotes,
         Series::Transfers,
         Series::Mints,
+        Series::Margin,
     ];
 
     /// The discriminator written to disk and to a subject.
@@ -119,6 +139,7 @@ impl Series {
             Series::Quotes => "quotes",
             Series::Transfers => "transfers",
             Series::Mints => "mints",
+            Series::Margin => "margin",
         }
     }
 
@@ -132,6 +153,7 @@ impl Series {
             Series::Quotes => Kind::Quotes,
             Series::Transfers => Kind::Transfers,
             Series::Mints => Kind::Mints,
+            Series::Margin => Kind::Margin,
         }
     }
 }
@@ -167,7 +189,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 13] = [
+    pub const ALL: [Kind; 16] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -181,6 +203,9 @@ impl Kind {
         Kind::Sessions,
         Kind::Instruments,
         Kind::Reorgs,
+        Kind::Margin,
+        Kind::Positions,
+        Kind::Accounts,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -202,6 +227,7 @@ impl Kind {
             | Kind::Sessions
             | Kind::Instruments
             | Kind::Reorgs => Addressing::Venue,
+            Kind::Margin | Kind::Positions | Kind::Accounts => Addressing::Account,
         }
     }
 
@@ -221,6 +247,9 @@ impl Kind {
             Kind::Sessions => "sessions",
             Kind::Instruments => "instruments",
             Kind::Reorgs => "reorgs",
+            Kind::Margin => "margin",
+            Kind::Positions => "positions",
+            Kind::Accounts => "accounts",
         }
     }
 }
@@ -257,7 +286,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 13);
+        assert_eq!(Kind::ALL.len(), 16);
     }
 
     #[test]
@@ -275,7 +304,14 @@ mod tests {
         // not a thing a consumer reasons about.
         assert!(Series::ALL.len() < Kind::ALL.len());
         let declarable: Vec<Kind> = Series::ALL.iter().map(|s| s.kind()).collect();
-        for kind in [Kind::Marks, Kind::Gaps, Kind::Unparsed, Kind::Reorgs] {
+        for kind in [
+            Kind::Marks,
+            Kind::Gaps,
+            Kind::Unparsed,
+            Kind::Reorgs,
+            Kind::Positions,
+            Kind::Accounts,
+        ] {
             assert!(!declarable.contains(&kind), "{kind} must not be declarable");
         }
     }
@@ -309,6 +345,16 @@ mod tests {
         assert!(Series::ALL.contains(&Series::Transfers));
         assert!(Series::ALL.contains(&Series::Mints));
         assert!(Kind::ALL.contains(&Kind::Reorgs));
+    }
+
+    #[test]
+    fn an_accounts_datasets_sit_under_the_account() {
+        // An account's history must be one subtree, so that it can be retained
+        // or dropped without touching another account's.
+        for kind in [Kind::Margin, Kind::Positions, Kind::Accounts] {
+            assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
+        }
+        assert!(matches!(Kind::Quotes.addressing(), Addressing::Venue));
     }
 
     #[test]

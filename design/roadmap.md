@@ -27,6 +27,9 @@ Tier 2 and the broker at Tier 4.
 | tape schema | a **public API** under semver — safe because it is rebuildable |
 | scheduling | cereyan, by subprocess, with an exit-code taxonomy |
 | UI | galata-tower: axum server and React in one repo |
+| ledger | account state, in this workspace: perp positions and margin, fills, funding, liquidations and every transfer that touches perp margin. Hyperliquid first. Many venues, many accounts |
+| accounts | declared by alias in the vault document; the address is a vault variable; Hyperliquid sub-accounts are **discovered** under a declared master |
+| ledger scope | spot balances and vault equity are **out**. A transfer into either is still recorded, as an event that leaves perp margin |
 
 ## What is still open
 
@@ -46,6 +49,19 @@ Tier 2 and the broker at Tier 4.
   worth keeping; it is the operator's, which is why no horizon has a default,
   `galata-retain` exits 3 with no block, and `--delete` is explicit. The only
   thing that changes it is a storage bill.
+- **A unified account's collateral is spot USDC** (Tier 12). Legacy measured it
+  on 2026-09-03 (`legacy/galata-legacy/design/measured.md`, *the account skew,
+  decomposed*): on a unified account, perps `accountValue` is margin held plus
+  unrealised, **0 while flat**, and the realised cash sits in the spot USDC
+  balance. Spot is out of scope, so a snapshot of a unified account shows its
+  perp margin and not its equity. **Decided 2026-09-25:** a unified account's
+  equity is recorded as *not held*, with the reason, and the fold's transfers
+  (Tier 13) account for the cash. No spot figure is read.
+- **Whether each HIP-3 dex keeps its own margin** (Tier 12). If
+  `clearinghouseState` answers per `dex`, a snapshot is per (account, dex) and
+  a move between dexes is a transfer. One live call on the `xyz` dex settles
+  it; the design assumes per-dex until then, because the other assumption
+  would sum two margins into one.
 
 ---
 
@@ -560,6 +576,121 @@ each flow against a copy of the real record before it was called done.
 
 ---
 
+## Tiers 11 to 15 — the ledger, and what is derived from it
+
+*Written 2026-09-25, from the tower's Portfolio design (positions, risk share,
+VaR, a correlation matrix), which has no positions feed to draw from.*
+
+The ledger is account state: what an account holds and what happened to it.
+It widens this workspace past market data. Two kinds of fact are involved,
+and they call for opposite treatment:
+
+```
+  EVENTS  happened once, never change        STATES  true at one moment
+  fills, funding paid, liquidations,         perp positions, margin
+  transfers in and out of perp margin
+  the venue keeps their history              the venue answers only "now"
+  → walked back, like candles                → history exists only if taken
+```
+
+So **positions over time are a fold of events**, as legacy's `galata-fold`
+already argued (*"never a mutable ledger that components write in turn"*), and
+a snapshot is the venue's statement to check the fold against, as
+`galata-reconcile` did. Legacy built both inside the trading half. Here they
+sit under the record, where research, the tower and a later risk layer read
+the same fold.
+
+**The ordering follows the rule at the top of this file.** A snapshot not taken
+today can never be taken. Fills can be walked back later, up to the venue's
+reach. So snapshots come first, before the event walk.
+
+### Tier 11 — accounts
+
+- `[ledger.account.<alias>]` in the vault document: `venue`, `address_var`
+  and, on Hyperliquid, `dexes`. **The record knows an account by alias; only
+  the vault knows its address.** The address never appears in a path, a
+  subject, a log line, a status field or a tape column.
+- **An address fingerprint in every segment's footer**, beside the venue
+  label. Repointing an alias at another address in the vault would otherwise
+  merge two accounts' histories without a trace. A changed fingerprint under
+  an alias is refused by name.
+- **Hyperliquid sub-accounts are discovered** under each declared master, at
+  boot and on a timer. Each is given a stable ordinal (`main.s1`) on first
+  sight, bound to its fingerprint and rebuilt from the record at every boot,
+  with no cursor file (the rule `capture/walk.rs` already keeps). The venue's
+  sub-account name is a label, because the owner can rename it. A sub-account
+  that stops appearing keeps its history and is reported as not seen since.
+- **Its own root, `var/ledger`**, with its own permissions and its own
+  retention. The raw answers are archived as received (invariant 2), and a
+  sub-account listing carries addresses. The root is the boundary.
+- **One `galata-ledger` process per venue**, serving every account on it, with
+  a token that reads only that venue's variables. Market data is the P0, and
+  a ledger defect must not be able to stop capture.
+
+### Tier 12 — snapshots
+
+- Perp positions and margin per (account, dex), polled through the existing
+  poll lane: a failed poll is a gap one cadence wide, and throttling is its
+  own cause.
+- **The cadence is declared and its cost stated.** `clearinghouseState` weighs
+  2 against 1,200 per minute **per IP**, shared with capture's walk on the
+  same machine (legacy `design/datawatch/venues.md`). So the ledger takes a
+  declared share of the venue's budget, as `walk_share` does, rather than a
+  budget of its own.
+- Open: a unified account's equity (*What is still open*), and per-dex margin.
+
+### Tier 13 — events
+
+- Fills, funding paid, liquidations and non-funding ledger updates, walked
+  back at boot as candles are. Identity comes from content (the fill's id),
+  so an overlapping re-fetch is free. The venue's reach is reported, never
+  covered over in silence.
+- **Every transfer that touches perp margin is recorded**, including those to
+  spot, to a vault and between master and sub-account. What happens on the
+  other side is out of scope.
+- Legacy's reconciler counted 2,944 fill rows where the venue held 1,691
+  fills (`measured.md`, 2026-09-03). The fold was idempotent, so no money was
+  double-counted, but the dataset recorded rows twice. This tier's dataset
+  holds one row per fill, and a test says so.
+
+### Tier 14 — the fold
+
+- Positions, basis and realised P&L folded from events per account, from an
+  anchor: the account's first transfer in, when the walk reaches it, or else
+  the first snapshot this ledger took. **Which anchor was used is stated with
+  every figure.**
+- Checked against each snapshot. Agreement within a declared tolerance is a
+  result, and so is skew; both figures are carried. Legacy's
+  `galata-reconcile` is the reference: 1,300 lines, and its rules carry over
+  unchanged.
+- cereyan: **`fold-the-ledger`**, scheduled after the projection, over a
+  fixed trailing window with `--replace`. The projection runs hourly since
+  2026-09-25; the fold's own cadence is Tier 14's to decide. The lane passes
+  no credential, and needs none: the fold reads the record, not the venue.
+
+### Tier 15 — derived statistics
+
+- A grid of returns aligned across instruments: a return spanning a `gaps`
+  row is dropped, never interpolated, and candles the venue backfilled are
+  flagged. Every ρ, σ and β carries its n, its window, its backfilled share
+  and the tape bound it was computed at. Legacy's `galata-statistics` (1,887
+  lines, polars) is the reference, including its rule that a horizon admits
+  only bars whose interval divides its bucket.
+- The screen computes on request from the tape first, the way the tower folds
+  candles. **`derive-the-closed-days`** becomes a cereyan flow only when
+  something other than the screen needs stored statistics: the fold's own
+  history, or research.
+- The xyz instruments were measured continuous on 2026-09-20, so no session
+  mask is needed for today's universe. The grid still takes one, for the first
+  instrument that closes.
+
+The tower's Portfolio view reads Tiers 11–15 as they land. Until Tier 12 its
+positions are the viewer's own inputs. The risk arithmetic (risk share, VaR,
+shocks) stays in the screen: it is a model over the fold and the statistics,
+not a record.
+
+---
+
 ## Rough scale
 
 Grounded in legacy's own line counts, `src` only, tests excluded.
@@ -584,6 +715,11 @@ Legacy's equivalent slice is about 27,000 lines of `src` and 8,400 of tests, so
 this is the same system minus the parts that belong to a trading stack, plus
 three things it never had: the transport split, sessions, and two non-WebSocket
 venues.
+
+The ledger tiers take back three of those trading-stack parts, the read-only
+ones. Legacy's references are `fold` 837, `reconcile` 1,300 and `statistics`
+1,887 lines. Tiers 11–13 have no legacy equivalent to count, so no line
+estimate is given for them.
 
 ---
 

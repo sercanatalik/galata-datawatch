@@ -181,6 +181,85 @@ impl Client {
             .collect())
     }
 
+    /// One account's perp state on one dex, raw. `dex` is empty for the main one.
+    ///
+    /// **The address is exposed here and nowhere else**: into the request
+    /// body, which goes to the venue and into no error and no log.
+    #[cfg(feature = "ledger")]
+    pub async fn clearinghouse_state(
+        &self,
+        address: &crate::config::Secret,
+        dex: &str,
+    ) -> Result<Vec<u8>, FetchError> {
+        let mut body = serde_json::json!({
+            "type": "clearinghouseState",
+            "user": address.expose(),
+        });
+        // The main dex is asked without the key, as measured; an explicit
+        // empty string is not a spelling the venue documents.
+        if !dex.is_empty() {
+            body["dex"] = serde_json::Value::String(dex.to_string());
+        }
+        self.post(&body).await
+    }
+
+    /// A master's sub-accounts, raw. `null` where it has none.
+    #[cfg(feature = "ledger")]
+    pub async fn sub_accounts(
+        &self,
+        address: &crate::config::Secret,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({ "type": "subAccounts", "user": address.expose() }))
+            .await
+    }
+
+    /// What the venue says an address is, raw. Weighs 60: asked once, at boot.
+    #[cfg(feature = "ledger")]
+    pub async fn user_role(&self, address: &crate::config::Secret) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({ "type": "userRole", "user": address.expose() }))
+            .await
+    }
+
+    /// How the venue holds an account's collateral, raw. **Undocumented**
+    /// (`design/measured.md`, 2026-09-25), so its answer is read as a mode
+    /// only when it is one of the four measured strings.
+    #[cfg(feature = "ledger")]
+    pub async fn user_abstraction(
+        &self,
+        address: &crate::config::Secret,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({ "type": "userAbstraction", "user": address.expose() }))
+            .await
+    }
+
+    /// Whether the venue knows a dex: `Some(true)` it listed one, `Some(false)`
+    /// **it said there is none**, `None` it did not answer the question.
+    ///
+    /// Measured 2026-09-25: `meta` (and `clearinghouseState`) for a dex that
+    /// does not exist answer **HTTP 500 with the body `null`**. A bare 500 is
+    /// also what an outage looks like, so only that exact pair is read as *no
+    /// such dex*; any other failure is not an answer.
+    #[cfg(feature = "ledger")]
+    pub async fn dex_known(&self, dex: &str) -> Result<Option<bool>, FetchError> {
+        let response = self
+            .http
+            .post(&self.info_url)
+            .json(&serde_json::json!({ "type": "meta", "dex": dex }))
+            .send()
+            .await
+            .map_err(|source| FetchError::http(VENUE, source))?;
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|source| FetchError::http(VENUE, source))?;
+        Ok(match status {
+            200 => Some(true),
+            500 if body.as_ref().trim_ascii() == b"null" => Some(false),
+            _ => None,
+        })
+    }
+
     async fn post(&self, body: &serde_json::Value) -> Result<Vec<u8>, FetchError> {
         let response = self
             .http
@@ -204,6 +283,18 @@ impl Client {
             .await
             .map(|b| b.to_vec())
             .map_err(|source| FetchError::http(VENUE, source))
+    }
+}
+
+impl FetchError {
+    /// The poll lane's reading of this failure: **a 429 is ours to fix by
+    /// asking less often**, and anything else is the venue not answering.
+    #[cfg(feature = "ledger")]
+    pub fn refusal(&self) -> crate::capture::poll::Refusal {
+        match self {
+            FetchError::Status { status: 429, .. } => crate::capture::poll::Refusal::Throttled,
+            _ => crate::capture::poll::Refusal::Unreachable,
+        }
     }
 }
 

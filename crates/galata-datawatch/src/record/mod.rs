@@ -25,7 +25,9 @@ pub use schema::{
 
 use std::path::{Path, PathBuf};
 
-use galata_segments::{Codec, Cursor, SegmentError, last_durable, write_segment};
+use galata_segments::{
+    Codec, Cursor, PRUNE_COLUMN, SegmentError, last_durable, write_segment_labelled,
+};
 use galata_wire::{GapCause, Origin};
 
 use crate::calendar::date_of;
@@ -64,28 +66,70 @@ pub enum PayloadAddress {
     Venue(String),
     /// Numbers this system computed about a market.
     Market(String),
+    /// What a venue said about one account: the ledger's.
+    Account(AccountAddress),
 }
 
+/// One account's place in the record: `venue=<v>/account=<alias>/`.
+///
+/// **The fingerprint travels with the address and never reaches the path.** It
+/// is written into each segment's footer, where the ledger reads it back at
+/// boot to refuse an alias whose address changed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AccountAddress {
+    /// The venue holding the account.
+    pub venue: String,
+    /// Its alias. Never its address.
+    pub account: String,
+    /// The keyed fingerprint of its address.
+    pub fingerprint: String,
+}
+
+/// The footer label naming a ledger segment's account alias.
+pub const ACCOUNT_LABEL: &str = "galata.account";
+/// The footer label carrying the keyed fingerprint of that account's address.
+pub const ACCOUNT_FP_LABEL: &str = "galata.account_fp";
+
 impl PayloadAddress {
-    /// The partition level's key, without its value.
+    /// The name of the record's first column: what the row is addressed by.
+    ///
+    /// An account's rows carry its **venue** there: the alias is in the path
+    /// and the footer, and a column of aliases would be one more place a
+    /// consumer could mistake one for an address-shaped identity.
     pub fn key(&self) -> &'static str {
         match self {
-            PayloadAddress::Venue(_) => "venue",
+            PayloadAddress::Venue(_) | PayloadAddress::Account(_) => "venue",
             PayloadAddress::Market(_) => "market",
         }
     }
 
-    /// The partition level's value.
+    /// That column's value.
     pub fn value(&self) -> &str {
         match self {
             PayloadAddress::Venue(v) | PayloadAddress::Market(v) => v,
+            PayloadAddress::Account(a) => &a.venue,
+        }
+    }
+
+    /// What a segment of this address carries in its footer.
+    pub fn labels(&self) -> Vec<(&'static str, &str)> {
+        match self {
+            PayloadAddress::Account(a) => vec![
+                (ACCOUNT_LABEL, a.account.as_str()),
+                (ACCOUNT_FP_LABEL, a.fingerprint.as_str()),
+            ],
+            PayloadAddress::Venue(_) | PayloadAddress::Market(_) => Vec::new(),
         }
     }
 }
 
+/// The partition levels above `kind=`.
 impl std::fmt::Display for PayloadAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}={}", self.key(), self.value())
+        match self {
+            PayloadAddress::Account(a) => write!(f, "venue={}/account={}", a.venue, a.account),
+            _ => write!(f, "{}={}", self.key(), self.value()),
+        }
     }
 }
 
@@ -134,6 +178,9 @@ pub struct Failure {
     pub venue: String,
     /// The channel they came on.
     pub channel: String,
+    /// The account the payload was about, where it was about one — so the
+    /// failure row lands in the same account's subtree as its bytes.
+    pub account: Option<AccountAddress>,
     /// The partition level the payload landed under.
     ///
     /// Carried separately from `channel` because **they are not the same
@@ -330,7 +377,17 @@ impl Archive {
             let dir = self.root.join(partition);
             let batch = payload_batch(&group).map_err(|e| RecordError::Arrow(e.to_string()))?;
             let cursor = self.cursor_for(group.iter().map(|p| p.recv_micros));
-            written.push(write_segment(&dir, cursor, &batch, self.codec)?);
+            // One partition is one address, so the first payload's labels are
+            // every payload's.
+            let labels = group[0].address.labels();
+            written.push(write_segment_labelled(
+                &dir,
+                cursor,
+                &batch,
+                self.codec,
+                &[PRUNE_COLUMN],
+                &labels,
+            )?);
         }
         Ok(written)
     }
@@ -343,7 +400,19 @@ impl Archive {
             let dir = self.root.join(partition).join("failures");
             let batch = failure_batch(&group).map_err(|e| RecordError::Arrow(e.to_string()))?;
             let cursor = self.cursor_for(group.iter().map(|f| f.recv_micros));
-            written.push(write_segment(&dir, cursor, &batch, self.codec)?);
+            let address = group[0].account.clone().map(PayloadAddress::Account);
+            let labels = address
+                .as_ref()
+                .map(PayloadAddress::labels)
+                .unwrap_or_default();
+            written.push(write_segment_labelled(
+                &dir,
+                cursor,
+                &batch,
+                self.codec,
+                &[PRUNE_COLUMN],
+                &labels,
+            )?);
         }
         Ok(written)
     }
@@ -461,8 +530,16 @@ fn group_failures_by_partition(failures: Vec<Failure>) -> Vec<(PathBuf, Vec<Fail
     let mut out: Vec<(PathBuf, Vec<Failure>)> = Vec::new();
     for failure in failures {
         // Beside the payload it refers to: the SAME partition, by kind. Not by
-        // channel — see `Failure::kind`.
-        let partition = venue_partition_of(&failure.venue, &failure.kind, failure.recv_micros);
+        // channel — see `Failure::kind`. And under the same account, where the
+        // payload was about one.
+        let partition = match &failure.account {
+            Some(account) => partition_of(
+                &PayloadAddress::Account(account.clone()),
+                &failure.kind,
+                failure.recv_micros,
+            ),
+            None => venue_partition_of(&failure.venue, &failure.kind, failure.recv_micros),
+        };
         match out.iter_mut().find(|(p, _)| *p == partition) {
             Some((_, group)) => group.push(failure),
             None => out.push((partition, vec![failure])),
@@ -494,5 +571,89 @@ mod tests {
             PathBuf::from("market=btc_basis/kind=signals/date=1970-01-01")
         );
         assert_eq!(address.key(), "market");
+    }
+
+    fn main_account() -> AccountAddress {
+        AccountAddress {
+            venue: "hyperliquid".into(),
+            account: "main".into(),
+            fingerprint: "0123456789abcdef".into(),
+        }
+    }
+
+    #[test]
+    fn an_account_sits_under_its_venue_and_its_fingerprint_stays_out_of_the_path() {
+        let address = PayloadAddress::Account(main_account());
+        let p = partition_of(&address, "margin", 1_758_326_400_000_000);
+        assert_eq!(
+            p,
+            PathBuf::from("venue=hyperliquid/account=main/kind=margin/date=2025-09-20")
+        );
+        assert!(!p.to_string_lossy().contains("0123456789abcdef"));
+        assert_eq!(
+            address.value(),
+            "hyperliquid",
+            "the row's column is the venue"
+        );
+    }
+
+    #[test]
+    fn an_account_segment_carries_its_alias_and_fingerprint_in_the_footer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut archive = Archive::open(dir.path());
+        archive
+            .append(Payload {
+                seq: 1,
+                recv_micros: 1_758_326_400_000_000,
+                address: PayloadAddress::Account(main_account()),
+                channel: "clearinghouseState".into(),
+                kind: "margin".into(),
+                symbol: None,
+                origin: Origin::Fetched,
+                payload: b"{}".to_vec(),
+            })
+            .unwrap();
+        let dir = dir
+            .path()
+            .join("venue=hyperliquid/account=main/kind=margin/date=2025-09-20");
+        let segment = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            galata_segments::label(&segment, ACCOUNT_LABEL)
+                .unwrap()
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            galata_segments::label(&segment, ACCOUNT_FP_LABEL)
+                .unwrap()
+                .as_deref(),
+            Some("0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn an_accounts_failure_lands_beside_its_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut archive = Archive::open(dir.path());
+        archive.append_failure(Failure {
+            seq: 1,
+            recv_micros: 1_758_326_400_000_000,
+            venue: "hyperliquid".into(),
+            account: Some(main_account()),
+            channel: "clearinghouseState".into(),
+            kind: "margin".into(),
+            error: "nope".into(),
+        });
+        archive.flush().unwrap();
+        assert!(
+            dir.path()
+                .join("venue=hyperliquid/account=main/kind=margin/date=2025-09-20/failures")
+                .is_dir()
+        );
     }
 }

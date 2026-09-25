@@ -37,6 +37,8 @@ pub mod boot;
 pub mod capture;
 pub mod config;
 pub mod ingest;
+#[cfg(feature = "ledger")]
+pub mod ledger;
 pub mod normalise;
 pub mod record;
 pub mod reorg;
@@ -56,6 +58,6 @@ mod tests;
 pub use calendar::{date_of, midnight_of};
 pub use ingest::{Ingested, ingest};
 pub use normalise::{Normalise, NormaliseError};
-pub use record::{Archive, Failure, Payload, PayloadAddress, RecordError};
+pub use record::{AccountAddress, Archive, Failure, Payload, PayloadAddress, RecordError};
 pub use sink::{NullSink, Sink, SinkError};
 pub use venue::{Adapter, Construct, Declaration, Keepalive, Subscription, Symbols};

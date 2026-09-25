@@ -122,6 +122,89 @@ pub fn supplies(venue: &str, series: galata_wire::Series) -> bool {
     }
 }
 
+/// What a venue's ledger costs, in the venue's own request weight — **where
+/// this build keeps a ledger for it**. `None` is *no ledger here*, which the
+/// configuration refuses by name.
+///
+/// Hyperliquid's figures were read from its documentation on 2026-09-25
+/// (`design/measured.md`, *what Hyperliquid says about an account*): 1,200
+/// weight a minute **per IP**, shared with capture's walk; `clearinghouseState`
+/// 2; `subAccounts` and `userAbstraction` 20, as *"all other documented info
+/// requests"* — the second is not documented at all, so 20 is the documented
+/// default assumed, not a figure stated for it.
+#[cfg_attr(
+    not(all(feature = "hyperliquid", feature = "ledger")),
+    allow(unused_variables)
+)]
+pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
+    match venue {
+        #[cfg(all(feature = "hyperliquid", feature = "ledger"))]
+        hyperliquid::VENUE => Some(crate::config::LedgerCost {
+            budget_per_minute: 1_200.0,
+            snapshot: 2.0,
+            discovery: 20.0,
+            mode: 20.0,
+        }),
+        _ => None,
+    }
+}
+
+/// What a ledger run is handed, whichever venue it is for.
+#[cfg(all(feature = "capture", feature = "ledger"))]
+pub struct LedgerParts {
+    /// The ledger root's archive.
+    pub archive: crate::record::Archive,
+    /// Where events go.
+    pub sink: Box<dyn crate::sink::Sink>,
+    /// The fingerprint key.
+    pub key: crate::ledger::FingerprintKey,
+    /// How often.
+    pub cadences: crate::ledger::run::Cadences,
+    /// The declared masters on this venue, resolved and checked.
+    pub masters: Vec<crate::ledger::ResolvedAccount>,
+    /// The bindings, read back from the ledger root.
+    pub bindings: crate::ledger::Bindings,
+    /// Where the status surface is written.
+    pub status: crate::capture::StatusFile,
+}
+
+/// Run a venue's ledger until cancelled.
+///
+/// **Here because it names the venue**: the loop is generic over the venue's
+/// [`AccountVenue`](crate::ledger::run::AccountVenue), and choosing which one
+/// is the one decision `check-venue-boundary.sh` keeps in this module.
+#[cfg(all(feature = "capture", feature = "ledger"))]
+#[cfg_attr(not(feature = "hyperliquid"), allow(unused_variables))]
+pub async fn run_ledger(
+    venue: &str,
+    market: &str,
+    parts: LedgerParts,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match venue {
+        #[cfg(feature = "hyperliquid")]
+        hyperliquid::VENUE => {
+            let accounts = hyperliquid::accounts::HyperliquidAccounts::new(
+                hyperliquid::Market::parse(market)?.rest_url(),
+            )?;
+            let mut run = crate::ledger::run::LedgerRun::new(
+                accounts,
+                crate::capture::SystemClock,
+                parts.archive,
+                parts.sink,
+                parts.key,
+                parts.cadences,
+                parts.masters,
+                parts.bindings,
+            )
+            .with_status_file(parts.status);
+            run.run(shutdown).await?;
+            Ok(())
+        }
+        other => Err(format!("{other} keeps no ledger in this build").into()),
+    }
+}
+
 #[cfg(feature = "hyperliquid")]
 fn declaration_of_hyperliquid() -> Option<crate::venue::Declaration> {
     use crate::venue::{Adapter, Construct};

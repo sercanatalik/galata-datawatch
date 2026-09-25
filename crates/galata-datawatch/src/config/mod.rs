@@ -164,6 +164,74 @@ pub enum ConfigError {
         /// Which series.
         series: String,
     },
+    /// A ledger account names a venue this build keeps no ledger for.
+    #[error(
+        "{origin}: [ledger.account.{alias}] names venue `{venue}`, which this build keeps no \
+         ledger for. Ledgers compiled in: {known}"
+    )]
+    UnknownLedgerVenue {
+        /// Where it came from.
+        origin: Origin,
+        /// Which account.
+        alias: String,
+        /// Which venue.
+        venue: String,
+        /// What is available.
+        known: String,
+    },
+    /// An account's address was written into the configuration.
+    #[error(
+        "{origin}: [ledger.account.{alias}] {field} holds an address. An address is never written \
+         in configuration: it identifies its owner on a public chain, and this document is read \
+         by every service. Put it in the vault and name the variable with `address_var`"
+    )]
+    AddressInConfiguration {
+        /// Where it came from.
+        origin: Origin,
+        /// Which account.
+        alias: String,
+        /// Which key held it. **Never the value.**
+        field: &'static str,
+    },
+    /// An alias that cannot name an account.
+    #[error("{origin}: [ledger.account.{alias}] is not a usable alias: {why}")]
+    BadAlias {
+        /// Where it came from.
+        origin: Origin,
+        /// The alias as written.
+        alias: String,
+        /// Why.
+        why: String,
+    },
+    /// The ledger and the walk together claim more than the venue's budget.
+    #[error(
+        "{origin}: capture.walk_share {walk} and ledger.ledger_share {ledger} sum to more than \
+         the whole budget. The venue counts both against one allowance per IP"
+    )]
+    SharesExceedBudget {
+        /// Where it came from.
+        origin: Origin,
+        /// The walk's share.
+        walk: f64,
+        /// The ledger's share.
+        ledger: f64,
+    },
+    /// The declared accounts, dexes and cadences cost more than the share allows.
+    #[error(
+        "{origin}: the ledger's declared polling for `{venue}` costs {cost:.1} weight a minute, \
+         and ledger_share allows {allowed:.1}. Poll less often, declare fewer dexes, or raise \
+         the share"
+    )]
+    LedgerOverBudget {
+        /// Where it came from.
+        origin: Origin,
+        /// Which venue.
+        venue: String,
+        /// What the declared set costs, per minute.
+        cost: f64,
+        /// What the share allows, per minute.
+        allowed: f64,
+    },
     /// No adapter answers to this venue's name.
     #[error(
         "{origin}: [venue.{venue}] names a venue this build does not implement. Compiled in: {known}"
@@ -369,6 +437,97 @@ pub struct VenueConfig {
     pub private_key_var: Option<String>,
 }
 
+/// The ledger: account state, polled per venue. **Optional**; capture ignores it.
+///
+/// Its cadences and its share have **no defaults**, for the reason capture's
+/// flush window has none: a snapshot cadence is also the width of the gap one
+/// failed poll leaves, and a share is a claim on a budget the walk spends from
+/// too.
+// Not `Eq`: `ledger_share` is a float, as `walk_share` is.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Ledger {
+    /// Its own root, beside the archive and the tape, **readable by its owner
+    /// only**: its raw answers carry sub-account addresses.
+    pub root: PathBuf,
+    /// Seconds between snapshots of each account and dex.
+    pub snapshot_secs: u64,
+    /// Seconds between discovery runs.
+    pub discover_secs: u64,
+    /// The share of the venue's stated budget the ledger may take, **beside**
+    /// capture's `walk_share`: the venue counts both against one allowance.
+    pub ledger_share: f64,
+    /// The variable naming the per-deployment key that fingerprints addresses.
+    /// A name, never the key.
+    pub fingerprint_key_var: String,
+    /// The accounts, by alias.
+    #[serde(default)]
+    pub account: BTreeMap<String, LedgerAccount>,
+}
+
+/// One declared account: a master, on a venue.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerAccount {
+    /// The venue holding it.
+    pub venue: String,
+    /// The variable naming its address. **A name, never the address.**
+    pub address_var: String,
+    /// The dexes to snapshot, where the venue has several. `""` is the main
+    /// one. Each keeps its own margin (`design/measured.md`, 2026-09-25).
+    pub dexes: Vec<String>,
+    /// **Present only to be refused by name.** Without it, `address = "0x…"`
+    /// would be an unknown key, refused with a parser's sentence that does not
+    /// say where the address should go instead.
+    #[serde(default)]
+    pub address: Option<String>,
+}
+
+/// What one venue's ledger costs, **as the venue states it**, in request
+/// weight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LedgerCost {
+    /// The venue's allowance, weight per minute.
+    pub budget_per_minute: f64,
+    /// One snapshot of one account on one dex.
+    pub snapshot: f64,
+    /// One listing of a master's sub-accounts.
+    pub discovery: f64,
+    /// One read of an account's mode.
+    pub mode: f64,
+}
+
+impl Ledger {
+    /// The weight a minute the **declared** set costs on one venue.
+    ///
+    /// Declared only: a sub-account is discovered at run time, and its cost is
+    /// paced within the share by the ledger rather than guessed at load.
+    pub fn declared_cost(&self, venue: &str, cost: &LedgerCost) -> f64 {
+        let per_snapshot = 60.0 / self.snapshot_secs.max(1) as f64;
+        let per_discovery = 60.0 / self.discover_secs.max(1) as f64;
+        self.account
+            .values()
+            .filter(|a| a.venue == venue)
+            .map(|a| {
+                a.dexes.len().max(1) as f64 * cost.snapshot * per_snapshot
+                    + (cost.discovery + cost.mode) * per_discovery
+            })
+            .sum()
+    }
+}
+
+/// The longest a declared alias may be: a token's 64, less the room a
+/// discovered sub-account's `_s<n>` needs for any `u32` ordinal (12).
+pub const MAX_DECLARED_ALIAS: usize = galata_wire::MAX_TOKEN - 12;
+
+/// Whether a string is an EVM address: `0x` and forty hex digits.
+fn looks_like_an_address(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 42
+        && (value.starts_with("0x") || value.starts_with("0X"))
+        && value[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Everything the process was told.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -387,6 +546,9 @@ pub struct Config {
     pub watch: Watch,
     /// What to capture, per venue.
     pub venue: BTreeMap<String, VenueConfig>,
+    /// The ledger, if one runs. Absent means no account is kept.
+    #[serde(default)]
+    pub ledger: Option<Ledger>,
 }
 
 /// What a caller must answer about an adapter, so this module can refuse a
@@ -401,6 +563,14 @@ pub trait Adapters {
     fn known(&self, venue: &str) -> bool;
     /// What it does implement, for a refusal that says what to do next.
     fn known_names(&self) -> Vec<&'static str>;
+    /// What a venue's ledger costs, **where this build keeps a ledger for it**.
+    ///
+    /// Defaulted to none, so a resolver written before the ledger existed
+    /// declares no ledger rather than failing to compile.
+    fn ledger_cost(&self, venue: &str) -> Option<LedgerCost> {
+        let _ = venue;
+        None
+    }
 }
 
 impl Config {
@@ -541,6 +711,136 @@ impl Config {
                 }
             }
         }
+        if let Some(ledger) = &self.ledger {
+            self.validate_ledger(ledger, origin, adapters)?;
+        }
+        Ok(())
+    }
+
+    fn validate_ledger(
+        &self,
+        ledger: &Ledger,
+        origin: &Origin,
+        adapters: &dyn Adapters,
+    ) -> Result<(), ConfigError> {
+        if !(1..=3_600).contains(&ledger.snapshot_secs) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "ledger.snapshot_secs",
+                value: ledger.snapshot_secs.to_string(),
+                bound: "1..=3600 — also the width of the gap one failed snapshot leaves",
+            });
+        }
+        if !(1..=86_400).contains(&ledger.discover_secs) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "ledger.discover_secs",
+                value: ledger.discover_secs.to_string(),
+                bound: "1..=86400",
+            });
+        }
+        if !(0.001..=1.0).contains(&ledger.ledger_share) {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "ledger.ledger_share",
+                value: ledger.ledger_share.to_string(),
+                bound: "0.001..=1.0 — a share of the venue's stated budget, never a rate",
+            });
+        }
+        if self.capture.walk_share + ledger.ledger_share > 1.0 {
+            return Err(ConfigError::SharesExceedBudget {
+                origin: origin.clone(),
+                walk: self.capture.walk_share,
+                ledger: ledger.ledger_share,
+            });
+        }
+        let mut venues = std::collections::BTreeSet::new();
+        for (alias, account) in &ledger.account {
+            // The alias is a partition level and a subject token, and `_` is
+            // reserved: a discovered sub-account is `<master>_s<n>`, and a
+            // declared `main_s1` would be indistinguishable from one.
+            if let Err(e) = galata_wire::Account::new(alias.as_str()) {
+                return Err(ConfigError::BadAlias {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    why: e.to_string(),
+                });
+            }
+            if alias.len() > MAX_DECLARED_ALIAS {
+                return Err(ConfigError::BadAlias {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    why: format!(
+                        "longer than {MAX_DECLARED_ALIAS} characters, which leaves a discovered \
+                         sub-account's `_s<n>` no room inside a token"
+                    ),
+                });
+            }
+            if alias.contains('_') {
+                return Err(ConfigError::BadAlias {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    why: "`_` is reserved for discovered sub-accounts, named `<master>_s<n>`"
+                        .to_string(),
+                });
+            }
+            if account.address.is_some() {
+                return Err(ConfigError::AddressInConfiguration {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    field: "address",
+                });
+            }
+            if looks_like_an_address(&account.address_var) {
+                return Err(ConfigError::AddressInConfiguration {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    field: "address_var",
+                });
+            }
+            if adapters.ledger_cost(&account.venue).is_none() {
+                let known: Vec<&str> = adapters
+                    .known_names()
+                    .into_iter()
+                    .filter(|v| adapters.ledger_cost(v).is_some())
+                    .collect();
+                return Err(ConfigError::UnknownLedgerVenue {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    venue: account.venue.clone(),
+                    known: if known.is_empty() {
+                        "none".to_string()
+                    } else {
+                        known.join(", ")
+                    },
+                });
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            if account.dexes.is_empty() || !account.dexes.iter().all(|d| seen.insert(d)) {
+                return Err(ConfigError::OutOfBounds {
+                    origin: origin.clone(),
+                    field: "ledger.account.dexes",
+                    value: format!("{:?} for {alias}", account.dexes),
+                    bound: "one or more distinct dexes; \"\" is the main one",
+                });
+            }
+            venues.insert(account.venue.as_str());
+        }
+        for venue in venues {
+            let Some(cost) = adapters.ledger_cost(venue) else {
+                continue;
+            };
+            let spent = ledger.declared_cost(venue, &cost);
+            let allowed = ledger.ledger_share * cost.budget_per_minute;
+            if spent > allowed {
+                return Err(ConfigError::LedgerOverBudget {
+                    origin: origin.clone(),
+                    venue: venue.to_string(),
+                    cost: spent,
+                    allowed,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -579,6 +879,14 @@ mod tests {
         fn known_names(&self) -> Vec<&'static str> {
             vec!["hyperliquid"]
         }
+        fn ledger_cost(&self, venue: &str) -> Option<LedgerCost> {
+            (venue == "hyperliquid").then_some(LedgerCost {
+                budget_per_minute: 1_200.0,
+                snapshot: 2.0,
+                discovery: 20.0,
+                mode: 20.0,
+            })
+        }
     }
 
     const GOOD: &str = r#"
@@ -610,6 +918,156 @@ instruments = [
 
     fn load(text: &str) -> Result<Config, ConfigError> {
         Config::load_from_str(text, origin(), &Fake)
+    }
+
+    const LEDGER: &str = r#"
+[ledger]
+root = "var/ledger"
+snapshot_secs = 10
+discover_secs = 600
+ledger_share = 0.25
+fingerprint_key_var = "GALATA_LEDGER_FINGERPRINT_KEY"
+
+[ledger.account.main]
+venue = "hyperliquid"
+address_var = "GALATA_LEDGER_HL_MAIN"
+dexes = ["", "xyz"]
+"#;
+
+    fn with_ledger(ledger: &str) -> Result<Config, ConfigError> {
+        load(&format!("{GOOD}{ledger}"))
+    }
+
+    #[test]
+    fn a_declared_ledger_loads_and_capture_is_unchanged_without_one() {
+        let config = with_ledger(LEDGER).unwrap();
+        let ledger = config.ledger.unwrap();
+        assert_eq!(ledger.account["main"].dexes, vec!["", "xyz"]);
+        assert!(
+            load(GOOD).unwrap().ledger.is_none(),
+            "absent means no account is kept"
+        );
+    }
+
+    #[test]
+    fn a_literal_address_is_refused_by_name() {
+        let err = with_ledger(&LEDGER.replace(
+            "dexes = [\"\", \"xyz\"]",
+            "dexes = [\"\"]\naddress = \"0x3f9aa0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7\"",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("[ledger.account.main]"), "{err}");
+        assert!(
+            err.contains("address_var"),
+            "says where it goes instead: {err}"
+        );
+        assert!(
+            !err.contains("0x3f9a"),
+            "the refusal must not repeat the address: {err}"
+        );
+    }
+
+    #[test]
+    fn an_address_written_where_its_variable_belongs_is_refused() {
+        let err = with_ledger(&LEDGER.replace(
+            "\"GALATA_LEDGER_HL_MAIN\"",
+            "\"0x3f9aa0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7\"",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("address_var holds an address"), "{err}");
+        assert!(!err.contains("0x3f9a"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_snapshot_cadence_is_refused() {
+        let err = with_ledger(&LEDGER.replace("snapshot_secs = 10\n", ""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("snapshot_secs"), "{err}");
+    }
+
+    #[test]
+    fn two_shares_over_the_whole_are_refused() {
+        let err = load(
+            &format!("{GOOD}{LEDGER}")
+                .replace("walk_share = 0.25", "walk_share = 0.8")
+                .replace("ledger_share = 0.25", "ledger_share = 0.3"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("0.8") && err.contains("0.3"),
+            "names both: {err}"
+        );
+    }
+
+    #[test]
+    fn a_cadence_the_share_cannot_afford_is_refused_with_both_figures() {
+        // Two dexes every second at weight 2 is 240 a minute for snapshots;
+        // one master's discovery and mode every 600 s is 4. 244 against the
+        // 1% share's 12.
+        let err = with_ledger(
+            &LEDGER
+                .replace("snapshot_secs = 10", "snapshot_secs = 1")
+                .replace("ledger_share = 0.25", "ledger_share = 0.01"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("244.0"), "the cost: {err}");
+        assert!(err.contains("12.0"), "the allowance: {err}");
+    }
+
+    #[test]
+    fn an_account_on_an_unimplemented_venue_is_refused() {
+        let err = with_ledger(&LEDGER.replace("venue = \"hyperliquid\"", "venue = \"rh-crypto\""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rh-crypto"), "{err}");
+        assert!(err.contains("Ledgers compiled in: hyperliquid"), "{err}");
+    }
+
+    #[test]
+    fn an_alias_too_long_for_its_sub_accounts_is_refused() {
+        let long = "a".repeat(MAX_DECLARED_ALIAS + 1);
+        let err = with_ledger(
+            &LEDGER.replace("[ledger.account.main]", &format!("[ledger.account.{long}]")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`_s<n>` no room"), "{err}");
+        let fits = "a".repeat(MAX_DECLARED_ALIAS);
+        assert!(
+            with_ledger(
+                &LEDGER.replace("[ledger.account.main]", &format!("[ledger.account.{fits}]"))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_alias_holding_the_reserved_separator_is_refused() {
+        let err = with_ledger(&LEDGER.replace("[ledger.account.main]", "[ledger.account.main_s1]"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reserved for discovered sub-accounts"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_ledger_cannot_be_declared_as_a_capture_series() {
+        // `margin` is the ledger's series. A capture venue declaring it would
+        // subscribe to a channel no market-data adapter serves.
+        let err = load(&GOOD.replace(
+            "series = [\"trades\", \"quotes\", \"candles\"]",
+            "series = [\"trades\", \"margin\"]",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("margin"), "{err}");
     }
 
     #[test]

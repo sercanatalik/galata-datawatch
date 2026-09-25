@@ -206,6 +206,14 @@ impl StatusFile {
         }
     }
 
+    /// A file named for a process that is not a venue's capture: the ledger's
+    /// is `ledger-<venue>.json`, beside capture's own.
+    pub fn named(dir: &Path, name: &str) -> StatusFile {
+        StatusFile {
+            path: dir.join(format!("{name}.json")),
+        }
+    }
+
     /// Where it lands.
     pub fn path(&self) -> &Path {
         &self.path

@@ -20,6 +20,12 @@
 #      fail nightly, and the fix on offer would be a key in the scheduler's
 #      environment. They build adapters with `AdapterConfig::for_replay`.
 #
+#   4. THE LEDGER'S LOOP HOLDS NO SECRET SOURCE. The ledger resolves its
+#      addresses and its fingerprint key once, at boot (`ledger::resolve`),
+#      and hands the loop resolved accounts. A loop that could reach a source
+#      would read the vault on the polling path, which the vault entry's design
+#      rules out: *fetch at boot, never on the loop*.
+#
 # Each file is read only as far as its first `#[cfg(test)]`: a test may name
 # whatever it needs to assert about, and a violation appended after the tests
 # is not a violation of the shipped code.
@@ -133,6 +139,24 @@ for relative in NON_CONNECTING:
             problems.append(
                 f"{relative}: names {name}, and this tool does not connect. Build its adapter "
                 f"with AdapterConfig::for_replay, which withholds what connecting needs."
+            )
+
+# 4. The ledger's loop, and the venue half it drives, name no secret source.
+LEDGER_LOOP = [
+    "crates/galata-datawatch/src/ledger/run.rs",
+    "crates/galata-datawatch/src/adapters/hyperliquid/accounts.rs",
+]
+for relative in LEDGER_LOOP:
+    path = root / relative
+    if not path.exists():
+        problems.append(f"{relative}: listed as the ledger's loop, and not there — the LIST is wrong")
+        continue
+    shipped = shipped_only(path.read_text())
+    for name in ("EnvSecrets", "VaultSecrets", "SecretSource"):
+        if name in shipped:
+            problems.append(
+                f"{relative}: names {name}. The ledger resolves its secrets once, at boot, "
+                f"and its loop holds resolved accounts, never a source to read more from."
             )
 
 if problems:

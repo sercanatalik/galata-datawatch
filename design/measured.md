@@ -3652,6 +3652,67 @@ and from a full one, ends byte-identical to a single full rebuild.
   ~20 µs a label measured in `examples/cost-of-labels.rs` that is about 1 ms
   over this tape, inside a 4.43 s run.
 
+## What Hyperliquid says about an account, read before the ledger — 2026-09-25
+
+*Mainnet `info` endpoint, unauthenticated. Addresses taken from the public
+`recentTrades` feed of `xyz:GOLD` (9 addresses), plus 4 sub-accounts one of
+them listed. None of these accounts is ours, and no address is recorded here:
+the figures are the shapes and modes, which is what the ledger's design needs
+(`openspec/changes/ledger-accounts-and-snapshots`).*
+
+**Each HIP-3 dex keeps its own margin.** `clearinghouseState` with
+`"dex": "xyz"` answers with its own `marginSummary`, `crossMarginSummary`,
+`withdrawable` and `crossMaintenanceMarginUsed`, and the main-dex answer
+(`dex` absent) holds none of the `xyz:` positions. On 4 of 4 accounts the two
+answers had different `accountValue`s. For example, one account held `0.0` on
+the main dex and `238.85` on `xyz` with six `xyz:` positions. The ledger
+snapshots per (account, dex) (D6), and a coin on `xyz` comes back as
+`xyz:GOLD`, prefixed, as the market-data wire already handles.
+
+A position carries `coin`, `szi` (signed size), `entryPx`, `positionValue`,
+`unrealizedPnl`, `returnOnEquity`, `liquidationPx`, `leverage`, `maxLeverage`,
+`marginUsed` and `cumFunding`. **No mark price**, as legacy read on 2026-08-24.
+
+**`subAccounts` answers `null`, not `[]`, when there are none** (4 of 9). A
+master with sub-accounts gets a list (1, 5, 1, 1 and 4 entries), each
+`{master, name, subAccountUser, clearinghouseState, spotState}`. The
+sub-account's address is `subAccountUser`. The embedded `clearinghouseState`
+is the main dex's. **Discovery's archived bytes therefore include spot
+balances**, although the ledger reads none of them.
+
+**`userRole` says whether an address is a sub-account**: `{"role": "user"}`
+for 7 of 9, and `{"role": "subAccount", "data": …}` for 2. A sub-account's
+address declared as a master is detectable. The call weighs 60.
+
+**`userAbstraction` states the account's mode as a bare string, and there are
+four**, over the 13 addresses:
+
+| mode | accounts | main `accountValue` while flat | spot USDC beside it |
+|---|---:|---|---|
+| `unifiedAccount` | 6 | `0.0` on all 4 flat ones | 581.78, 317.11, 1,440.37, 0 |
+| `portfolioMargin` | 3 | `0.0` on the flat one | open: 1,884.75 perp beside **693,340.01** spot |
+| `disabled` | 3 | `0.0` | 0 to 4,698.53 |
+| `default` | 1 | `0.0` | none |
+
+Legacy's testnet finding reproduces on mainnet: a flat unified account reads
+`accountValue 0.0` beside real cash in spot. **Portfolio margin has the same
+shape**: its collateral is spot too. So *equity not held* (D9) covers
+`unifiedAccount` and `portfolioMargin`. For `disabled` and `default` the
+perp figures are the account's own. A mode the ledger does not recognise is
+recorded as unknown. `userAbstraction` is not in the documentation, so it is
+treated as undocumented and read once per account at boot and with each
+discovery run.
+
+**The budget, read from the documentation today**
+([rate limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)):
+*"The following rate limits apply per IP address: REST requests share an
+aggregated weight limit of 1200 per minute."* `clearinghouseState` and
+`spotClearinghouseState` weigh **2**, `userRole` **60**, and *"all other
+documented `info` requests"* **20**, which covers `subAccounts`. `userFills`,
+`userFillsByTime` and `userFunding` add weight per 20 items returned, which
+matters for Tier 13's walk. These are the figures D8 uses, replacing legacy's
+2026-09-06 readings (unchanged except `userRole`, which legacy did not list).
+
 ## Projecting hourly, today included — 2026-09-25
 
 *Behind `project-every-hour`.* Once `replace-by-source` made a replacing run
@@ -3674,3 +3735,30 @@ stated as one, and re-measured from the flow's own run times once it has run
 past 23:00. That puts an hour's run at seconds, under 7 minutes of CPU a
 day, and the rows of the replaced days absent from the tape for about as long
 each run.
+
+## The ledger's first live run, against the zero address — 2026-09-25
+
+*The release `galata-ledger hyperliquid`, mainnet, for 35 s at
+`snapshot_secs = 10`, into a scratch root. The master was
+`0x000…000`: an address nobody holds, which the venue answers for all the
+same (557.14 on the main dex, 1,002.5 on `xyz`). A test of the mechanics on
+real bytes, not of an account; task 7.1, an hour on a real master, is still
+to run.*
+
+- **Eleven segments, each one accounted for**: the role answer, the
+  sub-account listing (`null`, recorded as a run that answered and found
+  none), the mode answer (`"default"`), and four passes of two snapshots —
+  one per dex. No miss, no gap.
+- **Every segment carried the alias and the same fingerprint** in its footer,
+  and every snapshot payload held its dex and the mode answer it was
+  stamped with beside the venue's state, byte for byte. Read back with
+  pyarrow, not with this crate.
+- **No address reached a name**: the paths were `venue=hyperliquid/
+  account=main/kind=…`, and the status file (`ledger-hyperliquid.json`)
+  carried aliases, times and counts.
+- **The root was created 0700**, and a root made 0755 was refused before
+  anything was asked.
+- **SIGTERM stopped it cleanly**, as capture's does.
+- **Repointing the alias was refused live**: the same root, the same key, a
+  different address — refused naming both fingerprints and the newest
+  segment, and nothing was written (11 segments before, 11 after).

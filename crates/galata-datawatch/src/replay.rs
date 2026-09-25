@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use arrow::array::{Array, BinaryArray, Int64Array, StringArray, UInt64Array};
 use galata_wire::Origin;
 
-use crate::record::{Payload, PayloadAddress};
+use crate::record::{ACCOUNT_FP_LABEL, AccountAddress, Payload, PayloadAddress};
 
 /// A payload that came **out of** the record.
 ///
@@ -119,6 +119,8 @@ pub fn read_range(
         let kind = kind_of(&partition);
         let level = address_level(&partition);
 
+        let account = account_of(&partition);
+
         for (cursor, path) in galata_segments::list_segments(&partition) {
             // The name carries the range, so a segment that cannot hold the
             // window is skipped without being opened.
@@ -131,15 +133,33 @@ pub fn read_range(
             {
                 continue;
             }
+            // An account's payloads come back addressed to the account, with
+            // the fingerprint its segment's footer carries — not flattened to
+            // the venue, which would lose whose they were.
+            let address = match &account {
+                Some((venue, alias)) => Some(PayloadAddress::Account(AccountAddress {
+                    venue: venue.clone(),
+                    account: alias.clone(),
+                    fingerprint: galata_segments::label(&path, ACCOUNT_FP_LABEL)?
+                        .unwrap_or_default(),
+                })),
+                None => None,
+            };
             for batch in galata_segments::read_segment_range(&path, from_micros, to_micros)? {
-                out.extend(payloads_of(
+                let mut payloads = payloads_of(
                     &batch,
                     &path,
                     level,
                     kind.as_deref(),
                     from_micros,
                     to_micros,
-                )?);
+                )?;
+                if let Some(address) = &address {
+                    for replayed in &mut payloads {
+                        replayed.0.address = address.clone();
+                    }
+                }
+                out.extend(payloads);
             }
         }
     }
@@ -333,6 +353,19 @@ fn address_level(partition: &Path) -> &'static str {
         .unwrap_or("venue")
 }
 
+/// `(venue, alias)` where a partition sits under `venue=<v>/account=<alias>/`.
+fn account_of(partition: &Path) -> Option<(String, String)> {
+    let parts: Vec<&str> = partition
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    parts.windows(2).find_map(|pair| {
+        let venue = pair[0].strip_prefix("venue=")?;
+        let alias = pair[1].strip_prefix("account=")?;
+        Some((venue.to_string(), alias.to_string()))
+    })
+}
+
 fn kind_of(partition: &Path) -> Option<String> {
     partition
         .components()
@@ -416,6 +449,31 @@ mod tests {
     }
 
     #[test]
+    fn an_accounts_payload_comes_back_addressed_to_the_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut archive = Archive::open(dir.path());
+        let address = PayloadAddress::Account(AccountAddress {
+            venue: "hyperliquid".into(),
+            account: "main".into(),
+            fingerprint: "0123456789abcdef".into(),
+        });
+        archive
+            .append(Payload {
+                address: address.clone(),
+                origin: Origin::Fetched,
+                ..payload(1, DAY, "margin", "BTC")
+            })
+            .unwrap();
+        let back = read_all(dir.path()).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            back[0].payload().address,
+            address,
+            "the account and its fingerprint"
+        );
+    }
+
+    #[test]
     fn a_failure_row_is_not_replayed_as_a_payload() {
         // Those rows NAME payloads; they are not payloads. Replaying one would
         // ingest an error message as though it were a venue frame.
@@ -426,6 +484,7 @@ mod tests {
             seq: 1,
             recv_micros: DAY,
             venue: "hyperliquid".into(),
+            account: None,
             channel: "bbo".into(),
             kind: "quotes".into(),
             error: "nope".into(),

@@ -352,6 +352,97 @@ pub fn boot(
     Ok(())
 }
 
+/// Load, check, run the **ledger** for one venue — from whatever source the
+/// caller hands it, as [`boot`] does for capture.
+///
+/// One process per venue, named by `argv[1]`. Every refusal — no `[ledger]`
+/// block, a root others can read, an alias whose address changed, a history
+/// that cannot be verified — happens before anything is asked of the venue.
+///
+/// **A separate process from capture on purpose** (D5): a ledger that fails
+/// cannot stop the capture it runs beside, and capture is the P0.
+#[cfg(feature = "ledger")]
+pub fn boot_ledger(
+    source: &dyn ConfigSource,
+    secrets: &dyn SecretSource,
+    adapters: &dyn Adapters,
+) -> Result<(), Box<dyn std::error::Error>> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("no other crypto provider may already be installed");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let venue_name = std::env::args()
+        .nth(1)
+        .ok_or("usage: galata-ledger <venue>. One process per venue.")?;
+    let config = Config::load(source, adapters)?;
+    let ledger = config
+        .ledger
+        .as_ref()
+        .ok_or("the configuration declares no [ledger] block")?;
+    // The network comes from the venue's own declaration, so the ledger and
+    // capture cannot disagree about which one the accounts are on.
+    let market = config
+        .venue
+        .get(&venue_name)
+        .map(|v| v.market.clone())
+        .ok_or_else(|| {
+            format!(
+                "[venue.{venue_name}] is not declared, and it names the network the ledger reads"
+            )
+        })?;
+
+    crate::ledger::check_root(&ledger.root)?;
+    let (key, masters) = crate::ledger::resolve(ledger, &venue_name, secrets)?;
+    if masters.is_empty() {
+        return Err(format!("no [ledger.account.*] names venue {venue_name}").into());
+    }
+    crate::ledger::check_fingerprints(&ledger.root, &masters)?;
+    let bindings = crate::ledger::Bindings::read(&ledger.root, &venue_name)?;
+    tracing::info!(
+        venue = %venue_name,
+        accounts = masters.len(),
+        config = %config.hash(),
+        "ledger starting"
+    );
+
+    let parts = adapters::LedgerParts {
+        // Seeded by the clock, as capture's is: sequences must not collide
+        // with the ones a previous run left on disk.
+        archive: crate::record::Archive::open(&ledger.root)
+            .from_seq(SystemClock.now_micros().max(0) as u64),
+        // The ledger publishes nothing in this change; its record and its
+        // status file are the surface.
+        sink: Box::new(NullSink),
+        key,
+        cadences: crate::ledger::run::Cadences {
+            snapshot_micros: ledger.snapshot_secs as i64 * 1_000_000,
+            discover_micros: ledger.discover_secs as i64 * 1_000_000,
+        },
+        masters,
+        bindings,
+        status: crate::capture::StatusFile::named(
+            &config.paths.status,
+            &format!("ledger-{venue_name}"),
+        ),
+    };
+
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let signal = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            signal.cancel();
+        });
+        adapters::run_ledger(&venue_name, &market, parts, shutdown).await
+    })
+}
+
 /// Wait for a request to stop: an interrupt, **or a termination**.
 ///
 /// SIGTERM is how a service manager stops a job — launchd (then SIGKILL after

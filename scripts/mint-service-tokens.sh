@@ -40,4 +40,19 @@ mint nats GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID GALATA_BROKER_PASSWORD_DA
 mint capture-hyperliquid GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
 mint tower GALATA_BROKER_PASSWORD_READER
 
+# The ledger, per venue: that venue's account addresses and the fingerprint
+# key, named by the deployment's own [ledger] tables (scripts/lib/ledger_vars.py)
+# so this token and run-service.sh cannot disagree. None minted where no ledger
+# is declared for the venue.
+CONFIG="$ROOT/var/datawatch.local.toml"
+[[ -f "$CONFIG" ]] || CONFIG="$ROOT/config/datawatch.toml"
+for venue in hyperliquid; do
+    if names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" "$venue")"; then
+        # shellcheck disable=SC2086  # one name per line, none with spaces
+        mint "ledger-$venue" $names
+    else
+        echo "no ledger declared for $venue in $CONFIG — no ledger-$venue token"
+    fi
+done
+
 echo "expire on $(date -v+365d +%Y-%m-%d 2>/dev/null || date -d '+365 days' +%Y-%m-%d) — re-run this before then"

@@ -1,0 +1,973 @@
+//! The ledger's loop: **ask, record, and say what happened**.
+//!
+//! ```text
+//!   boot        each declared master's role, once   ──▶ refuse a sub-account
+//!               discovery                            ──▶ bindings, modes
+//!   every snapshot_secs   each (account, dex)        ──▶ the one path
+//!                         a failure                  ──▶ a gap, one cadence wide
+//!   every discover_secs   discovery again            ──▶ a report, always
+//! ```
+//!
+//! **Venue-free.** What to ask and how to read the answers is an
+//! [`AccountVenue`](crate::ledger::run::AccountVenue)'s; this module holds the order and the rules, which are
+//! the poll lane's: a failed poll is a gap bounded by the cadence
+//! ([`Cadence`](crate::venue::Cadence)), throttling backs off and unreachability does not
+//! ([`Backoff`](crate::source::Backoff)), and every answer is archived before anything reads it.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::time::Duration;
+
+use galata_wire::{Account, Envelope, Event, Gap, GapCause, Origin, Series, Venue};
+
+use crate::capture::{Clock, Refusal, StatusFile};
+use crate::config::Secret;
+use crate::ingest::{ingest, record_generated_at};
+use crate::ledger::Listed;
+use crate::ledger::accounts::{Bindings, FingerprintKey, LedgerError, ResolvedAccount, Seen};
+use crate::normalise::{Normalise, NormaliseError};
+use crate::record::{Archive, Payload, PayloadAddress, RecordError};
+use crate::sink::Sink;
+use crate::source::Backoff;
+use crate::venue::{Cadence, Polled};
+
+/// Which question an answer was to, for the channel it is recorded under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Ask {
+    /// One account's perp state on one dex.
+    Snapshot,
+    /// A master's sub-accounts.
+    Listing,
+    /// What an address is.
+    Role,
+    /// How an account's collateral is held.
+    Mode,
+}
+
+/// What a venue must answer for its ledger to run. Its adapter implements it.
+pub trait AccountVenue: Send + Sync {
+    /// Which venue.
+    fn venue(&self) -> &Venue;
+    /// Its ledger normaliser: recorded answers to rows.
+    fn normaliser(&self) -> &dyn Normalise;
+    /// The channel an answer to `ask` is recorded under.
+    fn channel(&self, ask: Ask) -> &'static str;
+    /// One account's perp state on one dex, raw.
+    fn snapshot(
+        &self,
+        address: &Secret,
+        dex: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
+    /// A master's sub-accounts, raw.
+    fn listing(&self, address: &Secret) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
+    /// What the venue says an address is, raw.
+    fn role(&self, address: &Secret) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
+    /// How an account's collateral is held, raw.
+    fn mode(&self, address: &Secret) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
+    /// Whether the venue knows a dex: `Ok(false)` **only** where it said so.
+    fn dex_known(&self, dex: &str) -> impl Future<Output = Result<bool, Refusal>> + Send;
+    /// A snapshot payload from the dex, the mode last heard and the state.
+    fn compose(&self, dex: &str, mode: Option<(&[u8], i64)>, state: &[u8]) -> Vec<u8>;
+    /// The sub-accounts a listing names.
+    fn listed(&self, answer: &[u8]) -> Result<Vec<Listed>, NormaliseError>;
+    /// Whether a role answer says the address is a sub-account.
+    fn is_sub_account(&self, answer: &[u8]) -> Result<bool, NormaliseError>;
+}
+
+/// How often, in microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cadences {
+    /// Between snapshots of each account and dex. Also a failed one's gap width.
+    pub snapshot_micros: i64,
+    /// Between discovery runs.
+    pub discover_micros: i64,
+}
+
+/// One discovery run under one master, as reported.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Discovery {
+    /// The master.
+    pub master: String,
+    /// When it ran.
+    pub at_micros: i64,
+    /// Whether the listing answered. A run that could not ask is reported too.
+    pub answered: bool,
+    /// Sub-accounts the listing named.
+    pub seen: usize,
+    /// Of those, bound for the first time.
+    pub new: Vec<String>,
+    /// Bound earlier and absent from this listing. Kept, and no longer polled.
+    pub missing: Vec<String>,
+}
+
+/// One account as the status surface shows it: **states and counts, never a
+/// verdict**, and never an address.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AccountStatus {
+    /// Declared, or the master it was discovered under.
+    pub master: Option<String>,
+    /// Whether it is polled now.
+    pub polled: bool,
+    /// When each dex last answered, by dex (`""` is the main one).
+    pub answered_micros: BTreeMap<String, i64>,
+    /// Snapshots that did not answer, since start.
+    pub missed: u64,
+    /// When a discovery run last did not list it, where one did not.
+    pub not_seen_since_micros: Option<i64>,
+}
+
+/// What the ledger says about itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LedgerStatus {
+    /// Which venue.
+    pub venue: String,
+    /// When this was written.
+    pub at_micros: i64,
+    /// By alias.
+    pub accounts: BTreeMap<String, AccountStatus>,
+    /// The most recent discovery run per master.
+    pub discovery: BTreeMap<String, Discovery>,
+    /// Masters whose role could not yet be asked; asked again each discovery
+    /// run until answered.
+    pub role_unverified: Vec<String>,
+    /// Declared dexes the venue could not be asked about at boot.
+    pub dex_unverified: BTreeSet<String>,
+}
+
+/// The ledger for one venue.
+pub struct LedgerRun<V: AccountVenue, C: Clock> {
+    venue: V,
+    clock: C,
+    archive: Archive,
+    sink: Box<dyn Sink>,
+    key: FingerprintKey,
+    cadences: Cadences,
+    status_file: Option<StatusFile>,
+    masters: Vec<ResolvedAccount>,
+    /// alias → (master alias, the sub-account).
+    subs: BTreeMap<Account, (Account, ResolvedAccount)>,
+    polled_subs: BTreeSet<Account>,
+    bindings: Bindings,
+    /// The most recent mode answer per account, raw, and when it arrived.
+    modes: BTreeMap<Account, (Vec<u8>, i64)>,
+    /// (account, dex) → its cadence.
+    polls: BTreeMap<(Account, String), Cadence>,
+    role_unverified: BTreeSet<Account>,
+    backoff: Backoff,
+    status: LedgerStatus,
+}
+
+/// What one pass of snapshots did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pass {
+    /// Snapshots that answered, all archived.
+    pub answered: u32,
+    /// Snapshots that did not.
+    pub missed: u32,
+    /// Gaps recorded.
+    pub gaps: u32,
+    /// Whether any refusal was a throttle, which backs the loop off.
+    pub throttled: bool,
+}
+
+impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
+    /// A ledger over resolved masters, writing into an archive rooted at the
+    /// ledger root. The bindings come from that root, read back by the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        venue: V,
+        clock: C,
+        archive: Archive,
+        sink: Box<dyn Sink>,
+        key: FingerprintKey,
+        cadences: Cadences,
+        masters: Vec<ResolvedAccount>,
+        bindings: Bindings,
+    ) -> LedgerRun<V, C> {
+        let status = LedgerStatus {
+            venue: venue.venue().to_string(),
+            ..LedgerStatus::default()
+        };
+        LedgerRun {
+            venue,
+            clock,
+            archive,
+            sink,
+            key,
+            cadences,
+            status_file: None,
+            masters,
+            subs: BTreeMap::new(),
+            polled_subs: BTreeSet::new(),
+            bindings,
+            modes: BTreeMap::new(),
+            polls: BTreeMap::new(),
+            role_unverified: BTreeSet::new(),
+            backoff: Backoff::default(),
+            status,
+        }
+    }
+
+    /// Write the status surface here on every pass.
+    pub fn with_status_file(mut self, file: StatusFile) -> LedgerRun<V, C> {
+        self.status_file = Some(file);
+        self
+    }
+
+    /// The status as it stands.
+    pub fn status(&self) -> &LedgerStatus {
+        &self.status
+    }
+
+    fn record(
+        &mut self,
+        address: &ResolvedAccount,
+        ask: Ask,
+        bytes: Vec<u8>,
+    ) -> Result<(), RecordError> {
+        let kind = match ask {
+            Ask::Snapshot | Ask::Mode => Series::Margin.kind(),
+            Ask::Listing | Ask::Role => galata_wire::Kind::Accounts,
+        };
+        let payload = Payload {
+            seq: 0,
+            recv_micros: self.clock.now_micros(),
+            address: PayloadAddress::Account(address.record_address()),
+            channel: self.venue.channel(ask).to_string(),
+            kind: kind.as_str().to_string(),
+            symbol: None,
+            // An answer to a question about now: nothing will fetch it again,
+            // so it is durable before the loop moves on — as the polled venue's
+            // answers are.
+            origin: Origin::Fetched,
+            payload: bytes,
+        };
+        ingest(
+            &mut self.archive,
+            self.venue.normaliser(),
+            self.sink.as_ref(),
+            payload,
+        )?;
+        Ok(())
+    }
+
+    /// **Boot**: ask each declared master's role once, refusing one the venue
+    /// calls a sub-account, then run discovery.
+    ///
+    /// A master whose role could not be asked is not refused — the venue did
+    /// not say — and is asked again at each discovery run until it answers.
+    pub async fn boot(&mut self) -> Result<(), LedgerError> {
+        // A dex the venue does not know answers every snapshot with a failure,
+        // which would read as an outage forever. Refused here, by name.
+        for master in &self.masters {
+            for dex in master.dexes.iter().filter(|d| !d.is_empty()) {
+                match self.venue.dex_known(dex).await {
+                    Ok(false) => {
+                        return Err(LedgerError::UnknownDex {
+                            alias: master.alias.to_string(),
+                            dex: dex.clone(),
+                        });
+                    }
+                    Ok(true) => {}
+                    Err(_) => {
+                        self.status.dex_unverified.insert(dex.clone());
+                    }
+                }
+            }
+        }
+        for master in self.masters.clone() {
+            self.check_role(&master).await?;
+        }
+        self.discover().await?;
+        Ok(())
+    }
+
+    async fn check_role(&mut self, master: &ResolvedAccount) -> Result<(), LedgerError> {
+        match self.venue.role(master.address()).await {
+            Ok(answer) => {
+                let is_sub = self.venue.is_sub_account(&answer);
+                self.record(master, Ask::Role, answer)
+                    .map_err(record_error)?;
+                self.role_unverified.remove(&master.alias);
+                if is_sub.unwrap_or(false) {
+                    return Err(LedgerError::NotAMaster {
+                        alias: master.alias.to_string(),
+                    });
+                }
+            }
+            Err(_) => {
+                self.role_unverified.insert(master.alias.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// One discovery run over every master: bind what is new, record a name
+    /// that changed, stop polling what vanished, read every account's mode —
+    /// and report the run whatever it found.
+    pub async fn discover(&mut self) -> Result<Vec<Discovery>, LedgerError> {
+        for master in self.masters.clone() {
+            if self.role_unverified.contains(&master.alias) {
+                self.check_role(&master).await?;
+            }
+        }
+        let mut runs = Vec::new();
+        for master in self.masters.clone() {
+            let at = self.clock.now_micros();
+            let mut run = Discovery {
+                master: master.alias.to_string(),
+                at_micros: at,
+                answered: false,
+                seen: 0,
+                new: Vec::new(),
+                missing: Vec::new(),
+            };
+            if let Ok(answer) = self.venue.listing(master.address()).await {
+                let listed = self.venue.listed(&answer);
+                self.record(&master, Ask::Listing, answer)
+                    .map_err(record_error)?;
+                if let Ok(listed) = listed {
+                    run.answered = true;
+                    run.seen = listed.len();
+                    let mut present = BTreeSet::new();
+                    for entry in listed {
+                        let sub = ResolvedAccount::discovered(
+                            master.alias.clone(),
+                            master.venue.clone(),
+                            master.dexes.clone(),
+                            &self.key,
+                            entry.address,
+                        );
+                        present.insert(sub.fingerprint.clone());
+                        let seen = self.bindings.observe(
+                            &master.alias,
+                            &sub.fingerprint,
+                            entry.name.as_deref(),
+                        )?;
+                        let alias = match seen {
+                            Seen::New { alias, seen } => {
+                                run.new.push(alias.to_string());
+                                self.record_binding(&alias, &sub, seen)?;
+                                alias
+                            }
+                            Seen::Renamed { alias, seen } => {
+                                self.record_binding(&alias, &sub, seen)?;
+                                alias
+                            }
+                            Seen::Known { alias } => alias,
+                        };
+                        let sub = sub.with_alias(alias.clone());
+                        self.polled_subs.insert(alias.clone());
+                        let entry = self.status.accounts.entry(alias.to_string()).or_default();
+                        entry.master = Some(master.alias.to_string());
+                        entry.polled = true;
+                        entry.not_seen_since_micros = None;
+                        self.subs.insert(alias, (master.alias.clone(), sub));
+                    }
+                    for gone in self.bindings.missing(&master.alias, &present) {
+                        run.missing.push(gone.to_string());
+                        self.polled_subs.remove(&gone);
+                        let entry = self.status.accounts.entry(gone.to_string()).or_default();
+                        entry.master = Some(master.alias.to_string());
+                        entry.polled = false;
+                        entry.not_seen_since_micros.get_or_insert(at);
+                    }
+                }
+            }
+            self.status
+                .discovery
+                .insert(master.alias.to_string(), run.clone());
+            runs.push(run);
+        }
+        for account in self.polled() {
+            if let Ok(answer) = self.venue.mode(account.address()).await {
+                let at = self.clock.now_micros();
+                self.modes
+                    .insert(account.alias.clone(), (answer.clone(), at));
+                self.record(&account, Ask::Mode, answer)
+                    .map_err(record_error)?;
+            }
+        }
+        self.write_status();
+        Ok(runs)
+    }
+
+    fn record_binding(
+        &mut self,
+        alias: &Account,
+        sub: &ResolvedAccount,
+        seen: galata_wire::AccountSeen,
+    ) -> Result<(), LedgerError> {
+        let mut address = sub.record_address();
+        address.account = alias.to_string();
+        let envelope = Envelope::for_account(
+            sub.venue.clone(),
+            alias.clone(),
+            None,
+            self.clock.now_micros(),
+            Event::AccountSeen(seen),
+        );
+        record_generated_at(
+            &mut self.archive,
+            self.sink.as_ref(),
+            PayloadAddress::Account(address),
+            envelope,
+        )
+        .map_err(record_error)?;
+        Ok(())
+    }
+
+    /// Every account polled now: the declared masters and the sub-accounts the
+    /// latest discovery listed.
+    fn polled(&self) -> Vec<ResolvedAccount> {
+        let mut out = self.masters.clone();
+        out.extend(
+            self.subs
+                .iter()
+                .filter(|(alias, _)| self.polled_subs.contains(*alias))
+                .map(|(_, (_, sub))| sub.clone()),
+        );
+        out
+    }
+
+    /// Snapshot every polled account on every dex once.
+    pub async fn snapshot_all(&mut self) -> Result<Pass, LedgerError> {
+        let mut pass = Pass::default();
+        for account in self.polled() {
+            for dex in account.dexes.clone() {
+                let asked = self.clock.now_micros();
+                let key = (account.alias.clone(), dex.clone());
+                let interval = self.cadences.snapshot_micros;
+                match self.venue.snapshot(account.address(), &dex).await {
+                    Ok(state) => {
+                        let mode = self.modes.get(&account.alias);
+                        let bytes = self.venue.compose(
+                            &dex,
+                            mode.map(|(answer, at)| (answer.as_slice(), *at)),
+                            &state,
+                        );
+                        self.record(&account, Ask::Snapshot, bytes)
+                            .map_err(record_error)?;
+                        self.polls
+                            .entry(key)
+                            .or_insert_with(|| Cadence::new(interval))
+                            .answered(asked);
+                        let entry = self
+                            .status
+                            .accounts
+                            .entry(account.alias.to_string())
+                            .or_default();
+                        entry.polled = true;
+                        entry.answered_micros.insert(dex.clone(), asked);
+                        pass.answered += 1;
+                    }
+                    Err(refusal) => {
+                        pass.missed += 1;
+                        pass.throttled |= refusal == Refusal::Throttled;
+                        self.status
+                            .accounts
+                            .entry(account.alias.to_string())
+                            .or_default()
+                            .missed += 1;
+                        let missed = self
+                            .polls
+                            .entry(key)
+                            .or_insert_with(|| Cadence::new(interval))
+                            .missed(asked, refusal.cause());
+                        if let Polled::Missed {
+                            from_micros,
+                            to_micros,
+                            cause,
+                        } = missed
+                        {
+                            self.record_gap(&account, from_micros, to_micros, cause)?;
+                            pass.gaps += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // A throttle backs the loop off (`run`); anything else resets it.
+        if !pass.throttled {
+            self.backoff.reset();
+        }
+        self.write_status();
+        Ok(pass)
+    }
+
+    fn record_gap(
+        &mut self,
+        account: &ResolvedAccount,
+        from_micros: i64,
+        to_micros: i64,
+        cause: GapCause,
+    ) -> Result<(), LedgerError> {
+        let envelope = Envelope::for_account(
+            account.venue.clone(),
+            account.alias.clone(),
+            None,
+            self.clock.now_micros(),
+            Event::Gap(Gap {
+                series: Series::Margin,
+                from_micros,
+                to_micros,
+                cause,
+                // Account state has no session calendar: the venue answers at
+                // any hour, so nothing is clipped and the bound is exact.
+                clipped: galata_wire::Clipped::Continuous,
+            }),
+        );
+        record_generated_at(
+            &mut self.archive,
+            self.sink.as_ref(),
+            PayloadAddress::Account(account.record_address()),
+            envelope,
+        )
+        .map_err(record_error)?;
+        Ok(())
+    }
+
+    fn write_status(&mut self) {
+        self.status.at_micros = self.clock.now_micros();
+        self.status.role_unverified = self.role_unverified.iter().map(|a| a.to_string()).collect();
+        if let Some(file) = &self.status_file
+            && let Ok(json) = serde_json::to_string_pretty(&self.status)
+        {
+            // Best effort: a status file that cannot be written must not stop
+            // the ledger recording, which is the thing the status describes.
+            let _ = file.write(&json);
+        }
+    }
+
+    /// Run until cancelled: boot, then a snapshot pass every cadence and a
+    /// discovery run every discovery cadence.
+    pub async fn run(
+        &mut self,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Result<(), LedgerError> {
+        self.boot().await?;
+        let mut next_discovery = self.clock.now_micros() + self.cadences.discover_micros;
+        while !shutdown.is_cancelled() {
+            let pass = self.snapshot_all().await?;
+            if self.clock.now_micros() >= next_discovery {
+                self.discover().await?;
+                next_discovery = self.clock.now_micros() + self.cadences.discover_micros;
+            }
+            let wait = if pass.throttled {
+                self.backoff.next_wait()
+            } else {
+                Duration::from_micros(self.cadences.snapshot_micros.max(1) as u64)
+            };
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(wait) => {}
+            }
+        }
+        self.write_status();
+        Ok(())
+    }
+}
+
+fn record_error(e: RecordError) -> LedgerError {
+    LedgerError::Record(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::hyperliquid::ledger as hl;
+    use crate::capture::TestClock;
+    use crate::config::SecretSource;
+    use crate::sink::NullSink;
+    use std::sync::Mutex;
+
+    const MAIN: &str = "0x3f9aa0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7";
+    const SUB_A: &str = "0x00000000000000000000000000000000000000aa";
+    const SUB_B: &str = "0x00000000000000000000000000000000000000bb";
+    const FLAT: &[u8] = br#"{"marginSummary":{"accountValue":"0.0","totalNtlPos":"0.0","totalRawUsd":"0.0","totalMarginUsed":"0.0"},"crossMaintenanceMarginUsed":"0.0","withdrawable":"0.0","assetPositions":[],"time":1790332213000}"#;
+
+    /// A venue whose answers the test decides.
+    struct Scripted {
+        venue: Venue,
+        normaliser: hl::LedgerNormaliser,
+        snapshot: Mutex<Result<Vec<u8>, Refusal>>,
+        listing: Mutex<Result<Vec<u8>, Refusal>>,
+        role: Mutex<Result<Vec<u8>, Refusal>>,
+    }
+
+    impl Scripted {
+        fn new() -> Scripted {
+            Scripted {
+                venue: Venue::new("hyperliquid").unwrap(),
+                normaliser: hl::LedgerNormaliser::new().unwrap(),
+                snapshot: Mutex::new(Ok(FLAT.to_vec())),
+                listing: Mutex::new(Ok(b"null".to_vec())),
+                role: Mutex::new(Ok(br#"{"role":"user"}"#.to_vec())),
+            }
+        }
+        fn listing_of(addresses: &[(&str, &str)]) -> Vec<u8> {
+            let entries: Vec<String> = addresses
+                .iter()
+                .map(|(a, n)| {
+                    format!(
+                        r#"{{"name":"{n}","master":"{MAIN}","subAccountUser":"{a}","clearinghouseState":{{}},"spotState":{{}}}}"#
+                    )
+                })
+                .collect();
+            format!("[{}]", entries.join(",")).into_bytes()
+        }
+    }
+
+    impl AccountVenue for Scripted {
+        fn venue(&self) -> &Venue {
+            &self.venue
+        }
+        fn normaliser(&self) -> &dyn Normalise {
+            &self.normaliser
+        }
+        fn channel(&self, ask: Ask) -> &'static str {
+            match ask {
+                Ask::Snapshot => hl::SNAPSHOT_CHANNEL,
+                Ask::Listing => hl::LISTING_CHANNEL,
+                Ask::Role => hl::ROLE_CHANNEL,
+                Ask::Mode => hl::MODE_CHANNEL,
+            }
+        }
+        async fn snapshot(&self, _: &Secret, _: &str) -> Result<Vec<u8>, Refusal> {
+            self.snapshot.lock().unwrap().clone()
+        }
+        async fn listing(&self, _: &Secret) -> Result<Vec<u8>, Refusal> {
+            self.listing.lock().unwrap().clone()
+        }
+        async fn role(&self, _: &Secret) -> Result<Vec<u8>, Refusal> {
+            self.role.lock().unwrap().clone()
+        }
+        async fn mode(&self, _: &Secret) -> Result<Vec<u8>, Refusal> {
+            Ok(br#""disabled""#.to_vec())
+        }
+        async fn dex_known(&self, dex: &str) -> Result<bool, Refusal> {
+            Ok(dex != "nosuchdex")
+        }
+        fn compose(&self, dex: &str, mode: Option<(&[u8], i64)>, state: &[u8]) -> Vec<u8> {
+            hl::snapshot_bytes(dex, mode, state)
+        }
+        fn listed(&self, answer: &[u8]) -> Result<Vec<Listed>, NormaliseError> {
+            hl::listing_of(answer)
+        }
+        fn is_sub_account(&self, answer: &[u8]) -> Result<bool, NormaliseError> {
+            Ok(hl::role_of(answer)? == hl::Role::SubAccount)
+        }
+    }
+
+    struct Env;
+    impl SecretSource for Env {
+        fn secret(&self, name: &str) -> Result<Secret, crate::config::ConfigError> {
+            Ok(Secret::new(match name {
+                "KEY" => "deployment-key",
+                _ => MAIN,
+            }))
+        }
+    }
+
+    const SECOND: i64 = 1_000_000;
+    const T0: i64 = 1_790_332_213 * SECOND;
+
+    fn ledger(root: &std::path::Path) -> (LedgerRun<Scripted, TestClock>, std::path::PathBuf) {
+        let config = crate::config::Ledger {
+            root: root.to_path_buf(),
+            snapshot_secs: 10,
+            discover_secs: 600,
+            ledger_share: 0.25,
+            fingerprint_key_var: "KEY".into(),
+            account: [(
+                "main".to_string(),
+                crate::config::LedgerAccount {
+                    venue: "hyperliquid".into(),
+                    address_var: "MAIN".into(),
+                    dexes: vec![String::new(), "xyz".into()],
+                    address: None,
+                },
+            )]
+            .into(),
+        };
+        let (key, masters) = crate::ledger::resolve(&config, "hyperliquid", &Env).unwrap();
+        let bindings = Bindings::read(root, "hyperliquid").unwrap();
+        let run = LedgerRun::new(
+            Scripted::new(),
+            TestClock::at(T0),
+            Archive::open(root),
+            Box::new(NullSink),
+            key,
+            Cadences {
+                snapshot_micros: 10 * SECOND,
+                discover_micros: 600 * SECOND,
+            },
+            masters,
+            bindings,
+        );
+        (run, root.to_path_buf())
+    }
+
+    fn payloads(root: &std::path::Path, kind: &str) -> Vec<Payload> {
+        crate::replay::read_all(root)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.payload().clone())
+            .filter(|p| p.kind == kind)
+            .collect()
+    }
+
+    fn gaps(root: &std::path::Path) -> Vec<Gap> {
+        payloads(root, "gaps")
+            .iter()
+            .filter_map(|p| crate::ingest::generated_envelope(&p.payload).ok())
+            .filter_map(|e| match e.event {
+                Event::Gap(g) => Some(g),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_declared_dexes_give_two_margin_rows_per_cadence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(pass.answered, 2);
+        let snapshots: Vec<Payload> = payloads(&root, "margin")
+            .into_iter()
+            .filter(|p| p.channel == hl::SNAPSHOT_CHANNEL)
+            .collect();
+        assert_eq!(snapshots.len(), 2);
+        let dexes: BTreeSet<String> = snapshots
+            .iter()
+            .flat_map(|p| {
+                hl::snapshot_rows(
+                    &run.venue.venue,
+                    &Account::new("main").unwrap(),
+                    0,
+                    &p.payload,
+                )
+                .unwrap()
+            })
+            .filter_map(|e| match e.event {
+                Event::Margin(m) => Some(m.dex.unwrap_or_default()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dexes, ["".to_string(), "xyz".to_string()].into());
+    }
+
+    #[tokio::test]
+    async fn ten_identical_answers_are_ten_archived_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        for _ in 0..10 {
+            run.snapshot_all().await.unwrap();
+            run.clock.advance_secs(10);
+        }
+        let snapshots = payloads(&root, "margin")
+            .into_iter()
+            .filter(|p| p.channel == hl::SNAPSHOT_CHANNEL)
+            .count();
+        assert_eq!(
+            snapshots, 20,
+            "ten passes over two dexes, every one archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_venue_gaps_every_polled_account_one_cadence_wide() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.clock.advance_secs(10);
+        *run.venue.snapshot.lock().unwrap() = Err(Refusal::Unreachable);
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(pass.gaps, 2, "one per (account, dex)");
+        let gaps = gaps(&root);
+        assert_eq!(gaps.len(), 2);
+        for gap in gaps {
+            assert_eq!(gap.series, Series::Margin);
+            assert_eq!(gap.cause, GapCause::PollFailed);
+            assert_eq!(
+                gap.to_micros - gap.from_micros,
+                10 * SECOND,
+                "one cadence wide"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_throttled_snapshot_gaps_with_its_own_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.clock.advance_secs(10);
+        *run.venue.snapshot.lock().unwrap() = Err(Refusal::Throttled);
+        let pass = run.snapshot_all().await.unwrap();
+        assert!(pass.throttled);
+        assert!(gaps(&root).iter().all(|g| g.cause == GapCause::Throttled));
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_dex_is_refused_at_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.masters[0].dexes = vec![String::new(), "nosuchdex".into()];
+        let err = run.boot().await.unwrap_err();
+        assert!(matches!(err, LedgerError::UnknownDex { .. }), "{err}");
+        assert!(err.to_string().contains("nosuchdex"), "{err}");
+        assert!(
+            payloads(&root, "margin").is_empty(),
+            "refused before anything was asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sub_account_declared_as_a_master_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        *run.venue.role.lock().unwrap() =
+            Ok(br#"{"role":"subAccount","data":{"master":"0x01"}}"#.to_vec());
+        let err = run.boot().await.unwrap_err();
+        assert!(matches!(err, LedgerError::NotAMaster { .. }), "{err}");
+        assert!(err.to_string().contains("`main`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_role_is_asked_again_and_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        *run.venue.role.lock().unwrap() = Err(Refusal::Unreachable);
+        run.boot()
+            .await
+            .expect("the venue did not say, so nothing is refused");
+        assert_eq!(run.status().role_unverified, vec!["main".to_string()]);
+        *run.venue.role.lock().unwrap() = Ok(br#"{"role":"user"}"#.to_vec());
+        run.discover().await.unwrap();
+        assert!(run.status().role_unverified.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_null_listing_is_a_run_that_found_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        run.boot().await.unwrap();
+        let report = &run.status().discovery["main"];
+        assert!(report.answered, "null is an answer");
+        assert_eq!(
+            (report.seen, report.new.len(), report.missing.len()),
+            (0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_discovery_that_finds_nothing_is_still_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        *run.venue.listing.lock().unwrap() = Ok(Scripted::listing_of(&[(SUB_A, "arb")]));
+        run.boot().await.unwrap();
+        run.clock.advance_secs(600);
+        let runs = run.discover().await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].seen, 1);
+        assert!(runs[0].new.is_empty() && runs[0].missing.is_empty());
+        assert_eq!(run.status().discovery["main"].at_micros, T0 + 600 * SECOND);
+    }
+
+    #[tokio::test]
+    async fn a_discovered_sub_account_is_snapshotted_under_its_ordinal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        *run.venue.listing.lock().unwrap() =
+            Ok(Scripted::listing_of(&[(SUB_A, "arb"), (SUB_B, "hedge")]));
+        run.boot().await.unwrap();
+        assert_eq!(
+            run.status().discovery["main"].new,
+            vec!["main_s1", "main_s2"]
+        );
+        run.snapshot_all().await.unwrap();
+        assert!(root.join("venue=hyperliquid/account=main_s1").is_dir());
+        assert!(root.join("venue=hyperliquid/account=main_s2").is_dir());
+        // No address reached a path.
+        for entry in walk(&root) {
+            let path = entry.to_string_lossy().to_lowercase();
+            for address in [MAIN, SUB_A, SUB_B] {
+                assert!(!path.contains(&address[2..]), "{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vanished_sub_account_keeps_its_history_and_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        *run.venue.listing.lock().unwrap() =
+            Ok(Scripted::listing_of(&[(SUB_A, "arb"), (SUB_B, "hedge")]));
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+
+        run.clock.advance_secs(600);
+        *run.venue.listing.lock().unwrap() = Ok(Scripted::listing_of(&[(SUB_B, "hedge")]));
+        let runs = run.discover().await.unwrap();
+        assert_eq!(runs[0].missing, vec!["main_s1"]);
+        let status = &run.status().accounts["main_s1"];
+        assert!(!status.polled);
+        assert_eq!(status.not_seen_since_micros, Some(T0 + 600 * SECOND));
+        assert!(
+            root.join("venue=hyperliquid/account=main_s1").is_dir(),
+            "history kept"
+        );
+
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(
+            pass.answered, 4,
+            "main and main_s2, two dexes each: s1 is not polled"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinals_survive_a_restart_of_the_whole_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mut run, _) = ledger(dir.path());
+            *run.venue.listing.lock().unwrap() =
+                Ok(Scripted::listing_of(&[(SUB_A, "arb"), (SUB_B, "hedge")]));
+            run.boot().await.unwrap();
+        }
+        let (mut run, _) = ledger(dir.path());
+        // The listing now comes back in the other order.
+        *run.venue.listing.lock().unwrap() =
+            Ok(Scripted::listing_of(&[(SUB_B, "hedge"), (SUB_A, "arb")]));
+        run.boot().await.unwrap();
+        assert!(
+            run.status().discovery["main"].new.is_empty(),
+            "nothing is new after a restart"
+        );
+        assert_eq!(
+            run.status().accounts["main_s1"].master.as_deref(),
+            Some("main")
+        );
+    }
+
+    fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.push(path);
+            }
+        }
+        out
+    }
+}

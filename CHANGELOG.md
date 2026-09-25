@@ -32,6 +32,11 @@ First release. Nothing is on crates.io yet, so everything is new.
 - No float may cross the wire: no float field in the vocabulary, no
   `serde-float` on `rust_decimal`, no float arrow column — three rules, each
   watched failing on its own plant.
+- An account's words: the `Account` token (an alias, never an address),
+  `Address::Account` and `Envelope::for_account`, `Series::Margin`, and the
+  `margin`, `positions` and `accounts` kinds with their `Margin`, `Position`,
+  `AccountSeen` and `AccountMode` events. **Additive**; `Address` gains a
+  variant.
 
 **`galata-segments` — durable parquet segments, and the listing over them.**
 
@@ -100,8 +105,17 @@ First release. Nothing is on crates.io yet, so everything is new.
 - `galata-watch` judges record age per declared venue, and reports a declared
   venue that has captured nothing — one venue stopping no longer hides behind
   another still writing.
-- Binaries: `galata-datawatch <venue>`, `galata-tape-rebuild`, `galata-retain`,
-  `galata-watch`, `measure`.
+- **The ledger** (`ledger` feature, on by default): perp margin and
+  positions per account and dex, snapshotted on a declared cadence into its
+  own owner-only root. Accounts are declared by alias under
+  `[ledger.account.*]`, their addresses held as secrets and fingerprinted
+  with a keyed HMAC in each segment's footer; Hyperliquid sub-accounts are
+  discovered and bound by ordinal. It refuses an address in configuration, an
+  alias whose address changed, a history it cannot verify, a sub-account
+  declared as a master, a dex the venue does not know and a root others can
+  read. Hyperliquid only; its shapes were measured on 2026-09-25.
+- Binaries: `galata-datawatch <venue>`, `galata-ledger <venue>`,
+  `galata-tape-rebuild`, `galata-retain`, `galata-watch`, `measure`.
 
 ### The two clocks, which every user meets
 

@@ -30,6 +30,17 @@ pub struct Ticker(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub struct Market(String);
 
+/// An account, by the alias the configuration gave it: **never its address**.
+///
+/// The address identifies its owner on a public chain, and a partition path,
+/// a subject or a status field is somewhere it would be read by anyone who can
+/// list a directory. So the record knows `main`, and only the vault knows what
+/// `main` resolves to. A discovered sub-account is `<master>_s<n>`, which is
+/// why a declared alias may not hold a `_` — a rule of the configuration, not
+/// of this token.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+pub struct Account(String);
+
 /// Why a token was refused. Every variant names the value and, where it
 /// applies, the exact character that caused it.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -140,6 +151,7 @@ macro_rules! token_type {
 token_type!(Venue, "venue");
 token_type!(Ticker, "ticker");
 token_type!(Market, "market");
+token_type!(Account, "account");
 
 #[cfg(test)]
 mod tests {
@@ -212,6 +224,24 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("market")
+        );
+    }
+
+    #[test]
+    fn an_address_cannot_become_an_account() {
+        // An alias is legal; an address is not a token at all only if it holds
+        // something a token refuses. `0x…` is alphanumeric, so the token cannot
+        // be the guard — the configuration refuses a literal address, and this
+        // test records that the token alone would not.
+        assert!(Account::new("main").is_ok());
+        assert!(Account::new("main_s1").is_ok());
+        assert!(
+            Account::new("0x3f9aa0c1").is_ok(),
+            "the token is not the guard"
+        );
+        assert!(
+            Account::new("main/s1").is_err(),
+            "a slash would nest a directory"
         );
     }
 

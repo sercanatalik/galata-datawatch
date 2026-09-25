@@ -78,7 +78,7 @@ pub fn market_schema() -> SchemaRef {
 /// The record's columns for the addressing in play.
 pub fn schema_for(address: &PayloadAddress) -> SchemaRef {
     match address {
-        PayloadAddress::Venue(_) => payload_schema(),
+        PayloadAddress::Venue(_) | PayloadAddress::Account(_) => payload_schema(),
         PayloadAddress::Market(_) => market_schema(),
     }
 }

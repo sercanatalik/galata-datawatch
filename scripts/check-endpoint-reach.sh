@@ -104,6 +104,13 @@ EXPOSE_ALLOWED = {
     # `config/source.rs` does for the environment. Added 2026-09-23 with
     # `VaultSecrets`.
     "crates/galata-datawatch-vault/src/lib.rs",
+    # An account's address into an info request's body, to the venue
+    # (`Secret::expose`). Added 2026-09-25 with `ledger-accounts-and-snapshots`.
+    "crates/galata-datawatch/src/adapters/hyperliquid/client.rs",
+    # An address and the fingerprint key into the HMAC, never out of it
+    # (`Secret::expose`). Added with the same change;
+    # `check-no-address-in-names.sh` holds where an address may go.
+    "crates/galata-datawatch/src/ledger/accounts.rs",
 }
 # **This list holds three different `expose`s, and the check cannot tell them
 # apart.** `Endpoint::expose` is the one rule 3 is about; `Secret::expose` and

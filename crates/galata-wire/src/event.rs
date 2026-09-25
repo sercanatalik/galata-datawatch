@@ -5,7 +5,7 @@
 //! one thing the adapter boundary exists to prevent.
 
 use crate::dataset::{Kind, Series};
-use crate::identity::{Market, Ticker, Venue};
+use crate::identity::{Account, Market, Ticker, Venue};
 use crate::token::Num;
 
 /// **How the bytes came to exist**, and therefore how durable they must be
@@ -86,6 +86,17 @@ pub enum Address {
         /// The market.
         market: Market,
     },
+    /// What a venue said about one account, named by its alias.
+    ///
+    /// A third shape rather than a ticker standing in for the alias: an
+    /// account's margin is about no instrument, and an envelope that claimed
+    /// one would be a `ticker = main` sentinel.
+    Account {
+        /// The venue holding the account.
+        venue: Venue,
+        /// The account's alias. Never its address.
+        account: Account,
+    },
 }
 
 /// One normalised observation.
@@ -129,6 +140,23 @@ impl Envelope {
         }
     }
 
+    /// A ledger envelope: addressed by venue and account alias.
+    pub fn for_account(
+        venue: Venue,
+        account: Account,
+        at_micros: Option<i64>,
+        recv_micros: i64,
+        event: Event,
+    ) -> Envelope {
+        Envelope {
+            address: Address::Account { venue, account },
+            seq: 0,
+            at_micros,
+            recv_micros,
+            event,
+        }
+    }
+
     /// Stamp the stream position onto an envelope.
     ///
     /// Consuming, so the unstamped value cannot be used by accident
@@ -141,7 +169,7 @@ impl Envelope {
     /// The venue, where this came from one.
     pub fn venue(&self) -> Option<&Venue> {
         match &self.address {
-            Address::Venue { venue, .. } => Some(venue),
+            Address::Venue { venue, .. } | Address::Account { venue, .. } => Some(venue),
             Address::Market { .. } => None,
         }
     }
@@ -150,7 +178,15 @@ impl Envelope {
     pub fn ticker(&self) -> Option<&Ticker> {
         match &self.address {
             Address::Venue { ticker, .. } => Some(ticker),
-            Address::Market { .. } => None,
+            Address::Market { .. } | Address::Account { .. } => None,
+        }
+    }
+
+    /// The account, where this is about one.
+    pub fn account(&self) -> Option<&Account> {
+        match &self.address {
+            Address::Account { account, .. } => Some(account),
+            Address::Venue { .. } | Address::Market { .. } => None,
         }
     }
 
@@ -190,6 +226,12 @@ pub enum Event {
     Instrument(Instrument),
     /// A chain reorganisation.
     Reorg(Reorg),
+    /// An account's margin on one dex.
+    Margin(Margin),
+    /// One open position on one dex.
+    Position(Position),
+    /// An account the ledger bound to an alias.
+    AccountSeen(AccountSeen),
 }
 
 impl Event {
@@ -209,6 +251,9 @@ impl Event {
             Event::Session(_) => Kind::Sessions,
             Event::Instrument(_) => Kind::Instruments,
             Event::Reorg(_) => Kind::Reorgs,
+            Event::Margin(_) => Kind::Margin,
+            Event::Position(_) => Kind::Positions,
+            Event::AccountSeen(_) => Kind::Accounts,
         }
     }
 }
@@ -616,6 +661,140 @@ pub struct Reorg {
     pub new_hash: String,
 }
 
+/// How a venue says an account's collateral is held.
+///
+/// Hyperliquid states it with `userAbstraction`, as one of four strings
+/// (`design/measured.md`, 2026-09-25). **The mode decides whether the perp
+/// account value is the account's equity**: in the first two the collateral is
+/// spot, and a flat account reads `0.0` beside real cash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AccountMode {
+    /// `unifiedAccount`: perp and spot share collateral, held in spot.
+    Unified,
+    /// `portfolioMargin`: collateral held in spot, margined as a portfolio.
+    PortfolioMargin,
+    /// `disabled`: perp and spot kept apart.
+    Disabled,
+    /// `default`: the venue's default, perp and spot kept apart.
+    Default,
+    /// The venue did not say, or said something this build does not know.
+    /// **Never assumed to be one of the others.**
+    Unknown,
+}
+
+impl AccountMode {
+    /// The mode for the venue's own string. An unrecognised one is
+    /// [`AccountMode::Unknown`], because the read is undocumented and a guess
+    /// would be a wrong equity.
+    pub fn from_venue(value: &str) -> AccountMode {
+        match value {
+            "unifiedAccount" => AccountMode::Unified,
+            "portfolioMargin" => AccountMode::PortfolioMargin,
+            "disabled" => AccountMode::Disabled,
+            "default" => AccountMode::Default,
+            _ => AccountMode::Unknown,
+        }
+    }
+
+    /// Why the perp account value is **not** this account's equity, or `None`
+    /// where it is.
+    pub fn equity_not_held(&self) -> Option<&'static str> {
+        match self {
+            AccountMode::Unified => Some("collateral is spot (unifiedAccount), out of scope"),
+            AccountMode::PortfolioMargin => {
+                Some("collateral is spot (portfolioMargin), out of scope")
+            }
+            AccountMode::Unknown => Some("account mode unknown"),
+            AccountMode::Disabled | AccountMode::Default => None,
+        }
+    }
+}
+
+/// An account's margin on one dex, as the venue stated it.
+///
+/// Every figure optional: **absent is not zero**. A flat account is a margin
+/// row with no positions beside it, which is different from a failed poll.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Margin {
+    /// The dex, where the venue has several. `None` is the main one.
+    pub dex: Option<String>,
+    /// How the venue holds this account's collateral.
+    pub mode: AccountMode,
+    /// Why [`Margin::account_value`] is not the account's equity, where it is
+    /// not. **The one field a consumer must read before summing equity.**
+    pub equity_not_held: Option<String>,
+    /// The perp account value: margin held plus unrealised.
+    pub account_value: Option<Num>,
+    /// Total notional of open positions.
+    pub total_notional: Option<Num>,
+    /// The venue's raw USD balance on this dex.
+    pub total_raw_usd: Option<Num>,
+    /// Margin in use.
+    pub margin_used: Option<Num>,
+    /// Maintenance margin in use, cross.
+    pub maintenance_margin_used: Option<Num>,
+    /// What could be withdrawn now.
+    pub withdrawable: Option<Num>,
+}
+
+/// One open position, as the venue stated it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Position {
+    /// The dex, where the venue has several. `None` is the main one.
+    pub dex: Option<String>,
+    /// The instrument, resolved as market data resolves it: the dex prefix
+    /// composed away.
+    pub ticker: Ticker,
+    /// Signed: positive is long.
+    pub size: Num,
+    /// Average entry.
+    pub entry_price: Option<Num>,
+    /// The venue's mark, **where the answer carried one**. Hyperliquid's does
+    /// not, so it is absent — never computed from the other fields.
+    pub mark: Option<Num>,
+    /// Notional at the venue's valuation.
+    pub position_value: Option<Num>,
+    /// Unrealised, as the venue computed it.
+    pub unrealised_pnl: Option<Num>,
+    /// Return on equity, as the venue computed it.
+    pub return_on_equity: Option<Num>,
+    /// Where the venue would liquidate. Absent where it states none.
+    pub liquidation_price: Option<Num>,
+    /// Leverage in force.
+    pub leverage: Option<Num>,
+    /// `cross` or `isolated`, as the venue spelled it.
+    pub leverage_type: Option<String>,
+    /// The most leverage the instrument allows.
+    pub max_leverage: Option<u32>,
+    /// Margin this position holds.
+    pub margin_used: Option<Num>,
+    /// Funding paid over the position's whole history. Positive is paid.
+    pub funding_all_time: Option<Num>,
+    /// Funding paid since this position opened.
+    pub funding_since_open: Option<Num>,
+    /// Funding paid since its size last changed.
+    pub funding_since_change: Option<Num>,
+}
+
+/// An account the ledger bound to an alias: addressed to that alias.
+///
+/// The binding is **written to the record and read back** at every boot, so
+/// no side file can disagree with it. A name change is a new row with the same
+/// ordinal and fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccountSeen {
+    /// The declared master it was discovered under.
+    pub master: Account,
+    /// Its ordinal under that master, assigned once.
+    pub ordinal: u32,
+    /// The keyed fingerprint of its address. Never the address.
+    pub fingerprint: String,
+    /// The name the venue gave it, which its owner may change.
+    pub name: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +816,129 @@ mod tests {
             ask_px: Some(Decimal::from_str("100.6").unwrap()),
             ..Quote::default()
         })
+    }
+
+    fn num(s: &str) -> Option<Num> {
+        Some(Decimal::from_str(s).unwrap())
+    }
+
+    #[test]
+    fn a_snapshot_row_carries_no_float() {
+        // `check-no-float-money.sh` holds the TYPES; this holds the WIRE. A
+        // margin and a position rendered the way the bus renders them must
+        // carry every price and size as text, because a consumer's JSON parser
+        // reads a bare number back as a double.
+        let account = Account::new("main").unwrap();
+        let margin = Envelope::for_account(
+            venue(),
+            account.clone(),
+            None,
+            20,
+            Event::Margin(Margin {
+                dex: Some("xyz".into()),
+                mode: AccountMode::Disabled,
+                equity_not_held: None,
+                account_value: num("15322.02"),
+                total_notional: num("172112.0"),
+                total_raw_usd: num("-156789.98"),
+                margin_used: num("6884.48"),
+                maintenance_margin_used: num("0.1"),
+                withdrawable: num("8437.54"),
+            }),
+        );
+        let position = Envelope::for_account(
+            venue(),
+            account,
+            None,
+            20,
+            Event::Position(Position {
+                dex: Some("xyz".into()),
+                ticker: Ticker::new("GOLD").unwrap(),
+                size: Decimal::from_str("-40.0").unwrap(),
+                entry_price: num("4301.5"),
+                mark: None,
+                position_value: num("172112.0"),
+                unrealised_pnl: num("-58.0"),
+                return_on_equity: num("-0.0067"),
+                liquidation_price: None,
+                leverage: num("25"),
+                leverage_type: Some("cross".into()),
+                max_leverage: Some(25),
+                margin_used: num("6884.48"),
+                funding_all_time: num("1023.081078"),
+                funding_since_open: num("1.062131"),
+                funding_since_change: num("0.0"),
+            }),
+        );
+        // Integers are counts and clocks, never money.
+        let integers = ["seq", "at_micros", "recv_micros", "max_leverage"];
+        fn walk(value: &serde_json::Value, key: &str, integers: &[&str], bad: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Number(_) if !integers.contains(&key) => {
+                    bad.push(format!("{key} = {value}"))
+                }
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        walk(v, k, integers, bad);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, key, integers, bad);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for envelope in [margin, position] {
+            let json = serde_json::to_value(&envelope).unwrap();
+            let mut bad = Vec::new();
+            walk(&json, "", &integers, &mut bad);
+            assert!(bad.is_empty(), "numbers on the wire: {bad:?}");
+            let back: Envelope = serde_json::from_value(json).unwrap();
+            assert_eq!(back, envelope, "the row round-trips exactly");
+        }
+    }
+
+    #[test]
+    fn an_account_envelope_names_no_instrument() {
+        let envelope = Envelope::for_account(
+            venue(),
+            Account::new("main").unwrap(),
+            None,
+            1,
+            Event::AccountSeen(AccountSeen {
+                master: Account::new("main").unwrap(),
+                ordinal: 1,
+                fingerprint: "0123456789abcdef".into(),
+                name: Some("arb".into()),
+            }),
+        );
+        assert_eq!(envelope.venue().unwrap().as_str(), "hyperliquid");
+        assert_eq!(envelope.account().unwrap().as_str(), "main");
+        assert!(envelope.ticker().is_none(), "no `ticker = main` sentinel");
+        assert_eq!(envelope.kind(), Kind::Accounts);
+    }
+
+    #[test]
+    fn an_unrecognised_mode_is_unknown_and_holds_no_equity() {
+        assert_eq!(
+            AccountMode::from_venue("unifiedAccount"),
+            AccountMode::Unified
+        );
+        assert_eq!(
+            AccountMode::from_venue("portfolioMargin"),
+            AccountMode::PortfolioMargin
+        );
+        assert_eq!(
+            AccountMode::from_venue("somethingNew"),
+            AccountMode::Unknown
+        );
+        assert!(AccountMode::Unified.equity_not_held().is_some());
+        assert!(AccountMode::PortfolioMargin.equity_not_held().is_some());
+        assert!(AccountMode::Unknown.equity_not_held().is_some());
+        assert!(AccountMode::Disabled.equity_not_held().is_none());
+        assert!(AccountMode::Default.equity_not_held().is_none());
     }
 
     #[test]

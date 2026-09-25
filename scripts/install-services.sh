@@ -5,8 +5,10 @@
 #   install-services.sh [--uninstall] [service ...]
 #   install-services.sh --status
 #
-#   services: vault  nats  capture:<venue>  tower  flows   (default: all
-#             five, vault first, with capture:hyperliquid)
+#   services: vault  nats  capture:<venue>  ledger:<venue>  tower  flows
+#             (default: all five below, vault first, with capture:hyperliquid;
+#             a ledger is installed only when named, since it needs accounts
+#             in the vault first)
 #
 # Legacy's shape (scripts/install-compact-job.sh), for long-running jobs:
 # render the tracked template into ~/Library/LaunchAgents (untracked — it is
@@ -38,7 +40,7 @@ if [[ "${1:-}" == --status ]]; then
     printf '%-34s %-10s %s\n' LABEL "PID/EXIT" MANAGED
     launchctl list | awk '$3 ~ /^com\.galata\./ {print $1, $2, $3}' | sort -k3 | while read -r pid status label; do
         case "$label" in
-            com.galata.vault|com.galata.nats|com.galata.tower|com.galata.flows|com.galata.capture.*) managed=yes ;;
+            com.galata.vault|com.galata.nats|com.galata.tower|com.galata.flows|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
             *) managed="NO — not rendered by this installer" ;;
         esac
         if [[ "$pid" == "-" ]]; then state="exit $status"; else state="pid $pid"; fi
@@ -57,6 +59,7 @@ pattern_of() {
     case "$1" in
         nats) echo "nats-server -c $ROOT/config/nats-authorization.conf|nats-server -c config/nats-authorization.conf" ;;
         capture:*) echo "galata-datawatch ${1#capture:}\$" ;;
+        ledger:*) echo "galata-ledger ${1#ledger:}\$" ;;
         tower) echo "target/release/galata-tower\$" ;;
         flows) echo "cereyan serve py|cereyan serve $ROOT/py|cereyan serve \\. " ;;
         vault) echo "gv-server local" ;;
@@ -68,7 +71,9 @@ for spec in "${services[@]}"; do
         vault|nats|tower|flows) service="$spec"; arg=""; label="com.galata.$spec" ;;
         capture:*) service=capture; arg="${spec#capture:}"; label="com.galata.capture.$arg"
                    [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
-        *) refuse "unknown service '$spec' (vault, nats, capture:<venue>, tower, flows)" ;;
+        ledger:*) service=ledger; arg="${spec#ledger:}"; label="com.galata.ledger.$arg"
+                  [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
+        *) refuse "unknown service '$spec' (vault, nats, capture:<venue>, ledger:<venue>, tower, flows)" ;;
     esac
     plist="$AGENTS/$label.plist"
 
@@ -81,12 +86,13 @@ for spec in "${services[@]}"; do
     [[ -f "$TEMPLATE" ]] || refuse "no template at $TEMPLATE"
     case "$service" in
         capture) [[ -x "$ROOT/target/release/galata-datawatch" ]] || refuse "no release binary — cargo build --release first" ;;
+        ledger) [[ -x "$ROOT/target/release/galata-ledger" ]] || refuse "no galata-ledger — cargo build --release first" ;;
         flows) [[ -x "$ROOT/target/release/galata-compact" ]] || refuse "the flows run release binaries — cargo build --release first" ;;
     esac
 
-    # The three that hold a secret read it through their own vault token.
+    # The four that hold a secret read it through their own vault token.
     # (Not `;;&` in the case above: macOS's bash is 3.2.)
-    if [[ "$service" == capture || "$service" == nats || "$service" == tower ]]; then
+    if [[ "$service" == capture || "$service" == ledger || "$service" == nats || "$service" == tower ]]; then
         [[ -x "$ROOT/target/release/galata-vault-exec" ]] \
             || refuse "no galata-vault-exec — cargo build --release -p galata-datawatch-vault first"
     fi

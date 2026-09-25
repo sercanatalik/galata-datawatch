@@ -130,6 +130,10 @@ fn one_path(
                     seq,
                     recv_micros: payload.recv_micros,
                     venue: payload.address.value().to_string(),
+                    account: match &payload.address {
+                        crate::record::PayloadAddress::Account(a) => Some(a.clone()),
+                        _ => None,
+                    },
                     channel: payload.channel.clone(),
                     kind: payload.kind.clone(),
                     error: error.clone(),
@@ -183,6 +187,22 @@ pub fn record_generated(
     venue: &str,
     envelope: Envelope,
 ) -> Result<Ingested, RecordError> {
+    record_generated_at(
+        archive,
+        sink,
+        crate::record::PayloadAddress::Venue(venue.to_string()),
+        envelope,
+    )
+}
+
+/// The same rule, for an event whose place in the record is not a venue's own
+/// subtree: the ledger's gaps and bindings, which belong under their account.
+pub fn record_generated_at(
+    archive: &mut Archive,
+    sink: &dyn Sink,
+    address: crate::record::PayloadAddress,
+    envelope: Envelope,
+) -> Result<Ingested, RecordError> {
     let seq = archive.next_seq();
     let kind = envelope.kind();
     let envelope = envelope.stamped(seq);
@@ -194,7 +214,7 @@ pub fn record_generated(
     archive.append(Payload {
         seq,
         recv_micros: envelope.recv_micros,
-        address: crate::record::PayloadAddress::Venue(venue.to_string()),
+        address,
         channel: kind.as_str().to_string(),
         kind: kind.as_str().to_string(),
         symbol: envelope.ticker().map(|t| t.as_str().to_string()),
@@ -252,6 +272,18 @@ fn interpret(normaliser: &dyn Normalise, payload: &Payload) -> Result<Vec<Envelo
     }
 }
 
+/// The event a **generated** payload holds, for a reader that needs the event
+/// without re-ingesting it — the ledger rebuilding its bindings from the
+/// record at boot.
+///
+/// The same decoding the one path uses, exposed rather than copied: a second
+/// decoder would be free to disagree about what the record says.
+pub fn generated_envelope(bytes: &[u8]) -> Result<Envelope, String> {
+    serde_json::from_slice::<GeneratedPayload>(bytes)
+        .map(|stored| stored.envelope)
+        .map_err(|e| format!("a generated payload would not decode: {e}"))
+}
+
 /// A generated payload, read back into the event it holds.
 ///
 /// No panic boundary: this is **our own encoding**, and a failure here is a
@@ -259,9 +291,7 @@ fn interpret(normaliser: &dyn Normalise, payload: &Payload) -> Result<Vec<Envelo
 /// still returns an error rather than panicking, so a record written by an
 /// older build reports itself instead of stopping a rebuild.
 fn decode(payload: &Payload) -> Result<Vec<Envelope>, String> {
-    let stored: GeneratedPayload = serde_json::from_slice(&payload.payload)
-        .map_err(|e| format!("a generated payload would not decode: {e}"))?;
-    Ok(vec![stored.envelope])
+    generated_envelope(&payload.payload).map(|envelope| vec![envelope])
 }
 
 /// Normalise, converting a panic into an error.

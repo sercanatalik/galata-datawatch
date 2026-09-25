@@ -34,3 +34,7 @@ path = "src/bin/galata-vault-exec.rs"
 
 [[bin]]
 name = "galata-datawatch-vault"
+
+[[bin]]
+name = "galata-ledger-vault"
+path = "src/bin/galata-ledger-vault.rs"

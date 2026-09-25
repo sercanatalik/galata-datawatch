@@ -60,6 +60,12 @@ async-nats = "0.50"
 # feature: a signature is a pure function, and a tape reader has no use for one.
 ed25519-dalek = "3"
 base64 = "0.23"
+# The ledger's address fingerprint: HMAC-SHA-256 under a per-deployment key.
+# Keyed because active addresses can be enumerated from public chain data, and
+# an unkeyed hash of one is reversed by hashing that list. Both were already in
+# the lockfile at these versions, through galata-vault's `age`.
+hmac = "0.12"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 # `raw_value` is load-bearing, not a convenience: a normaliser peeks at a
 # frame's channel and takes its `data` as a borrowed span, then types that span

@@ -5,6 +5,7 @@
 #
 #   run-service.sh nats
 #   run-service.sh capture <venue>
+#   run-service.sh ledger <venue>
 #   run-service.sh tower
 #   run-service.sh flows
 #   run-service.sh vault
@@ -12,7 +13,8 @@
 # **Each service gets only its own secrets**, read from the deployment's vault
 # (com.galata.vault) through a token minted for that service alone
 # (var/tokens/<service>.gvt, 0600; scripts/mint-service-tokens.sh): NATS all
-# three broker passwords, capture its own venue's, the tower the reader's, and
+# three broker passwords, capture its own venue's, the tower the reader's, the
+# ledger its own venue's account addresses and the fingerprint key, and
 # the scheduling lane none — it is built to hold no credential.
 # Secrets never go in a launchd plist, which is mode 0644 and readable by
 # every user on the machine.
@@ -84,6 +86,22 @@ case "$service" in
         from_vault "capture-$venue" --only "$(password_var "datawatch-$venue")" -- \
             "$ROOT/target/release/galata-datawatch" "$venue"
         ;;
+    ledger)
+        venue="${2:-}"
+        [[ -n "$venue" ]] || refuse "usage: run-service.sh ledger <venue>"
+        if [[ -f "$ROOT/var/datawatch.local.toml" ]]; then
+            export GALATA_CONFIG="$ROOT/var/datawatch.local.toml"
+        else
+            export GALATA_CONFIG="$ROOT/config/datawatch.toml"
+        fi
+        [[ -x "$ROOT/target/release/galata-ledger" ]] \
+            || refuse "no galata-ledger — cargo build --release first"
+        names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$GALATA_CONFIG" "$venue")" \
+            || refuse "$GALATA_CONFIG declares no ledger account on $venue"
+        only=()
+        while IFS= read -r name; do only+=(--only "$name"); done <<< "$names"
+        from_vault "ledger-$venue" "${only[@]}" -- "$ROOT/target/release/galata-ledger" "$venue"
+        ;;
     tower)
         [[ -x "$TOWER/target/release/galata-tower" ]] \
             || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT"
@@ -116,6 +134,6 @@ case "$service" in
         exec uv run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
         ;;
     *)
-        refuse "usage: run-service.sh vault | nats | capture <venue> | tower | flows"
+        refuse "usage: run-service.sh vault | nats | capture <venue> | ledger <venue> | tower | flows"
         ;;
 esac

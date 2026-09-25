@@ -18,8 +18,14 @@
 /// **Behind the `capture` feature**: it makes HTTP requests. It sits beside
 /// `normalise` because they are about the same venue, and it links separately
 /// because a thing that makes requests is transport whatever it is near.
+/// The ledger's requests, over `client`. Transport.
+#[cfg(all(feature = "capture", feature = "ledger"))]
+pub mod accounts;
 #[cfg(feature = "capture")]
 pub mod client;
+/// Account answers, for the ledger. Pure, like `normalise`.
+#[cfg(feature = "ledger")]
+pub mod ledger;
 pub mod normalise;
 pub mod wire;
 
@@ -114,7 +120,7 @@ impl Market {
     }
 
     /// The REST root. Same rule.
-    fn rest_url(&self) -> &'static str {
+    pub(crate) fn rest_url(&self) -> &'static str {
         match self {
             Market::Mainnet => "https://api.hyperliquid.xyz",
             Market::Testnet => "https://api.hyperliquid-testnet.xyz",

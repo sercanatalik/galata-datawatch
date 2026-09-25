@@ -315,6 +315,20 @@ prove "check-endpoint-reach (expose outside a connect site)" \
       '        let _planted = rpc_url.expose().to_string();
         let client = ChainClient::new(rpc_url);'
 
+# 4. The ledger's loop reaches for a secret source.
+prove "check-secret-reach (the ledger's loop holds a secret source)" \
+      ./scripts/check-secret-reach.sh \
+      crates/galata-datawatch/src/ledger/run.rs \
+      replace 'use crate::config::Secret;' \
+      'use crate::config::{Secret, SecretSource as _Planted};'
+
+# An address exposed where it may become a name. Plants for itself: an address
+# written into a partition path, the leak `ledger-accounts-and-snapshots` D1
+# exists to prevent.
+prove "check-no-address-in-names (an address written into a path)" \
+      ./scripts/check-no-address-in-names.sh \
+      crates/galata-datawatch/src/record/mod.rs own
+
 # The scheduling lane: five rules, five plants.
 
 # 1. An import outside the list — `os`, the door an inherited environment

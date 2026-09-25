@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use galata_wire::Kind;
+use galata_wire::{Addressing, Kind};
 
 /// `decimal(38,18)` — exact, and it aggregates natively in DuckDB and Polars.
 ///
@@ -108,8 +108,9 @@ fn with(extra: Vec<Field>) -> Option<SchemaRef> {
 /// `#[non_exhaustive]` and this is a different crate: the compiler requires a
 /// catch-all here and cannot be made to complain about a missing arm. So the
 /// catch-all returns `None` — a loud refusal at the writer — and
-/// `every_dataset_has_a_schema` iterates [`Kind::ALL`] to catch a dataset that
-/// was added and never projected. The check moves from build time to test time,
+/// `every_dataset_has_a_schema` iterates every [`projected`] dataset to catch
+/// one that was added and never given a schema. An account's datasets are
+/// excluded by name, not by omission. The check moves from build time to test time,
 /// which is what the vocabulary's own `#[non_exhaustive]` costs its consumers,
 /// and is worth saying out loud rather than claiming a guarantee that is not
 /// there.
@@ -296,16 +297,44 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
     }
 }
 
+/// Whether a dataset belongs in **this** tape: the market's.
+///
+/// An account's datasets are not projected here. Their rows name an account
+/// rather than an instrument, so they cannot carry the common five; and they
+/// live under their own root (`var/ledger`), readable by its owner only, which
+/// a tape the tower reads must not become a copy of. Projecting the ledger is
+/// a later change, with its own schema.
+pub fn projected(kind: Kind) -> bool {
+    !matches!(kind.addressing(), Addressing::Account)
+}
+
+/// Every dataset this tape projects.
+pub fn projected_kinds() -> impl Iterator<Item = Kind> {
+    Kind::ALL.into_iter().filter(|k| projected(*k))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_accounts_datasets_are_not_projected_into_the_market_tape() {
+        for kind in [Kind::Margin, Kind::Positions, Kind::Accounts] {
+            assert!(!projected(kind), "{kind}");
+            assert!(
+                schema_for(kind).is_none(),
+                "{kind} has a market-tape schema"
+            );
+        }
+        assert_eq!(projected_kinds().count(), Kind::ALL.len() - 3);
+    }
 
     #[test]
     fn every_dataset_has_a_schema() {
         // The check `#[non_exhaustive]` takes away from the compiler, taken
         // back here: a Kind added to the vocabulary and never projected fails
         // this rather than silently returning None at run time.
-        for kind in Kind::ALL {
+        for kind in projected_kinds() {
             assert!(
                 schema_for(kind).is_some(),
                 "{kind} is a dataset with no tape schema"
@@ -315,7 +344,7 @@ mod tests {
 
     #[test]
     fn every_dataset_carries_the_common_five() {
-        for kind in Kind::ALL {
+        for kind in projected_kinds() {
             let schema = schema_for(kind).unwrap();
             for (index, expected) in ["venue", "ticker", "at_micros", "recv_micros", "stream_seq"]
                 .iter()
@@ -334,7 +363,7 @@ mod tests {
     #[test]
     fn the_venue_clock_is_nullable_and_ours_is_not() {
         // An event the venue did not timestamp is not *at* any venue time.
-        for kind in Kind::ALL {
+        for kind in projected_kinds() {
             let schema = schema_for(kind).unwrap();
             assert!(schema.field(2).is_nullable(), "{kind}: at_micros");
             assert!(!schema.field(3).is_nullable(), "{kind}: recv_micros");
@@ -346,7 +375,7 @@ mod tests {
         // `kind` and `date` are the path. Repeating either as a column would
         // give it a value that depends on a reader flag — measured on DuckDB
         // 1.5.5, and the reason `venue` is a column and NOT a level.
-        for kind in Kind::ALL {
+        for kind in projected_kinds() {
             for field in schema_for(kind).unwrap().fields() {
                 assert_ne!(field.name(), "kind", "{kind}");
                 assert_ne!(field.name(), "date", "{kind}");
@@ -356,7 +385,7 @@ mod tests {
 
     #[test]
     fn the_prune_columns_exist_in_every_dataset() {
-        for kind in Kind::ALL {
+        for kind in projected_kinds() {
             let schema = schema_for(kind).unwrap();
             for column in PRUNE_ON {
                 assert!(
@@ -371,7 +400,7 @@ mod tests {
     fn no_price_is_a_float() {
         // A float in one dataset would make its arithmetic differ from
         // another's, silently.
-        for kind in Kind::ALL {
+        for kind in projected_kinds() {
             for field in schema_for(kind).unwrap().fields() {
                 assert!(
                     !matches!(field.data_type(), DataType::Float32 | DataType::Float64),

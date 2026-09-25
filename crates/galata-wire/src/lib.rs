@@ -16,7 +16,7 @@
 //! # What is here
 //!
 //! ```text
-//!   identity   Venue · Ticker · Market      validated once, at construction
+//!   identity   Venue · Ticker · Market · Account   validated once, at construction
 //!   dataset    Series · Kind · Addressing   what may be declared, what is written
 //!   event      Envelope · Event · Gap       two clocks, and a stream position
 //!   token      Token · Num                  numbers as the venue spelled them
@@ -33,10 +33,11 @@ pub mod token;
 
 pub use dataset::{Addressing, Kind, Series};
 pub use event::{
-    Address, Book, BookLevel, Candle, Clipped, Envelope, Event, Funding, Gap, GapCause, Instrument,
-    Mark, Mint, Origin, Quote, Reorg, Session, SessionKind, Side, Trade, Transfer, Unparsed,
+    AccountMode, AccountSeen, Address, Book, BookLevel, Candle, Clipped, Envelope, Event, Funding,
+    Gap, GapCause, Instrument, Margin, Mark, Mint, Origin, Position, Quote, Reorg, Session,
+    SessionKind, Side, Trade, Transfer, Unparsed,
 };
-pub use identity::{MAX_TOKEN, Market, Ticker, TokenError, Venue};
+pub use identity::{Account, MAX_TOKEN, Market, Ticker, TokenError, Venue};
 pub use token::{Num, NumError, Token, require};
 
 /// The version every stored row carries.
