@@ -287,6 +287,13 @@ pub struct Capture {
     /// nobody watched. Exceeding it exits non-zero, because this one is ours to
     /// raise.
     pub walk_cap: u32,
+    /// Seconds between settles of the bars closed while running, or none.
+    ///
+    /// **Optional, with no default.** The stream never sends a bar final and
+    /// the walk runs at boot, so without this a running capture holds forming
+    /// rows and no closes; how stale a close may be is the operator's to state.
+    #[serde(default)]
+    pub settle_secs: Option<u64>,
 }
 
 /// What the operator considers worth telling somebody about.
@@ -703,6 +710,16 @@ impl Config {
                 field: "capture.walk_share",
                 value: self.capture.walk_share.to_string(),
                 bound: "0.001..=1.0 — a share of the venue's stated budget, never a rate",
+            });
+        }
+        if let Some(settle) = self.capture.settle_secs
+            && !(60..=86_400).contains(&settle)
+        {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "capture.settle_secs",
+                value: settle.to_string(),
+                bound: "60..=86400 — under a minute is a poll, over a day leaves a day bar unsettled for two",
             });
         }
         if !(1..=100_000).contains(&self.capture.walk_cap) {
@@ -1382,6 +1399,25 @@ dexes = ["", "xyz"]
             .to_string();
         assert!(err.contains("walk_share"), "{err}");
         assert!(err.contains("share of the venue"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_settle_cadence_settles_nothing() {
+        assert_eq!(load(GOOD).unwrap().capture.settle_secs, None);
+    }
+
+    #[test]
+    fn a_settle_cadence_under_a_minute_is_refused() {
+        let err = load(&GOOD.replace("walk_cap = 200", "walk_cap = 200\nsettle_secs = 30"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("capture.settle_secs") && err.contains("60..=86400"),
+            "{err}"
+        );
+        let ok =
+            load(&GOOD.replace("walk_cap = 200", "walk_cap = 200\nsettle_secs = 300")).unwrap();
+        assert_eq!(ok.capture.settle_secs, Some(300));
     }
 
     #[test]

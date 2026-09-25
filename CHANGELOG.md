@@ -17,7 +17,21 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **`capture.settle_secs`: the bars closed while running are settled.** The
+  stream never sends a candle final and the walk runs at boot, so a running
+  capture held forming rows and no closes (11 BTC finals in 15 live hours).
+  Every `settle_secs`, each instrument and candle width whose bar has closed
+  since its last settle is asked for through the fill queue, paced, retried
+  and taken through the one path as a gap fill is. Optional and off when
+  absent; **rebuild every binary that reads the document before writing it**,
+  since each refuses a key it does not know.
+
 ### Changed
+
+- A queued fill is identified by its ticker, series **and width**, so a
+  settle's 1h fill does not widen its 1m fill.
 
 - **A Hyperliquid candle is final when its receipt is at or past the close
   the venue states (`T`), whichever path carried it.** A walked page's newest

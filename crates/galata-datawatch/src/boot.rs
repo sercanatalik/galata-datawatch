@@ -397,6 +397,12 @@ pub fn boot(
             let at = SystemClock.now_micros();
             async move { history.fetch(fetch, at).await }
         });
+        // And the bars closed while running, where the operator asked: the
+        // stream never sends one final, so without this nothing closes them.
+        if let Some(secs) = config.capture.settle_secs {
+            capture.settle_every(secs);
+            tracing::info!(settle_secs = secs, "settling the bars closed while running");
+        }
 
         let shutdown = tokio_util::sync::CancellationToken::new();
         let signal = shutdown.clone();

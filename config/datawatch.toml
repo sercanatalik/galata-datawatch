@@ -31,6 +31,12 @@ walk_share = 0.25
 # The most requests one series' walk will make. Exceeding it exits non-zero,
 # because this bound is ours to raise.
 walk_cap = 200
+# Seconds between settles of the candle bars closed while running. The stream
+# never sends a bar final and the walk runs at boot, so WITHOUT THIS A RUNNING
+# CAPTURE HOLDS FORMING ROWS AND NO CLOSES. Optional, no default, 60..=86400.
+# Commented because every binary that reads this document refuses a key it
+# does not know: rebuild the ledger and the tower before writing it.
+# settle_secs = 300
 
 [venue.hyperliquid]
 market = "mainnet"

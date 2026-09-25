@@ -5,6 +5,7 @@
 //! the rules live in the modules below it — and every timestamp anything
 //! downstream sees originates here.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -179,6 +180,21 @@ struct Filler {
     sender: tokio::sync::mpsc::UnboundedSender<(Fetch, FetchResult)>,
     results: tokio::sync::mpsc::UnboundedReceiver<(Fetch, FetchResult)>,
     last_start_micros: Option<i64>,
+    /// The settle of bars closed while running, where one was asked for.
+    settle: Option<Settle>,
+}
+
+/// When to settle, and how far each pair has been.
+///
+/// See [`Capture::settle_step`].
+struct Settle {
+    every_micros: i64,
+    /// The next tick. The first is one cadence after boot.
+    next_micros: i64,
+    /// The moment the walk covered to: where every pair's first settle starts.
+    boot_micros: i64,
+    /// Per (ticker, width), the last bar close a settle asked through.
+    settled: BTreeMap<(Ticker, i64), i64>,
 }
 
 impl CaptureError {
@@ -861,6 +877,7 @@ impl Capture {
                 // Never awaits: a finished page is taken, a due fill is
                 // started as its own task, and the read below is never
                 // cancelled for either.
+                self.settle_step(now);
                 self.fill_step(now)?;
 
                 match source.next_frame().await {
@@ -1267,7 +1284,113 @@ impl Capture {
             sender,
             results,
             last_start_micros: None,
+            settle: None,
         });
+    }
+
+    /// Settle the candle bars closed while running, every `secs`, through the
+    /// fill this was given by [`Capture::fill_with`]. Without a fill, nothing.
+    pub fn settle_every(&mut self, secs: u64) {
+        let now = self.wiring.clock.now_micros();
+        let every_micros = secs as i64 * 1_000_000;
+        if let Some(filler) = self.filler.as_mut() {
+            filler.settle = Some(Settle {
+                every_micros,
+                next_micros: now + every_micros,
+                boot_micros: now,
+                settled: BTreeMap::new(),
+            });
+        }
+    }
+
+    /// **Settle the bars closed while running.** Never awaits: it only queues.
+    ///
+    /// The stream never sends a bar final — Hyperliquid's candle carries no
+    /// closed flag and falls silent on a bar once the next opens — and the walk
+    /// runs at boot, so a running capture held forming rows and no closes.
+    /// Measured 2026-09-25: BTC's 1m bars held 11 finals in 15 live hours.
+    ///
+    /// At each tick, for each instrument and each candle width the walk was
+    /// asked for, a fill is queued where a bar of that width has closed since
+    /// that pair's last settle, from one width before it, so the bar open at
+    /// the previous tick is asked again, closed. A 1m width is settled every
+    /// tick, 1h once an hour. It is a fill like any other: paced, retried,
+    /// dropped by name, and taken through the one path.
+    pub fn settle_step(&mut self, now_micros: i64) {
+        let Some(filler) = self.filler.as_ref() else {
+            return;
+        };
+        let Some(settle) = filler.settle.as_ref() else {
+            return;
+        };
+        if now_micros < settle.next_micros
+            || !self
+                .wiring
+                .adapter
+                .declaration()
+                .serves_historically(Series::Candles)
+        {
+            return;
+        }
+        let widths: Vec<i64> = filler
+            .request
+            .items
+            .iter()
+            .filter(|(series, _)| *series == Series::Candles)
+            .map(|(_, interval)| interval.interval_micros)
+            .filter(|width| *width > 0)
+            .collect();
+        let instruments = self.instruments_for(Series::Candles);
+        let mut due = Vec::new();
+        for (ticker, _) in &instruments {
+            for &width in &widths {
+                let closed = now_micros.div_euclid(width) * width;
+                let last = settle
+                    .settled
+                    .get(&(ticker.clone(), width))
+                    .copied()
+                    .unwrap_or(settle.boot_micros.div_euclid(width) * width);
+                if closed > last {
+                    due.push((ticker.clone(), width, last, closed));
+                }
+            }
+        }
+        for (ticker, width, last, closed) in due {
+            self.enqueue(Fill {
+                ticker: ticker.clone(),
+                series: Series::Candles,
+                interval_micros: width,
+                from_micros: last - width,
+                due_micros: now_micros,
+                attempts: 0,
+            });
+            if let Some(settle) = self.filler.as_mut().and_then(|f| f.settle.as_mut()) {
+                settle.settled.insert((ticker, width), closed);
+            }
+        }
+        if let Some(settle) = self.filler.as_mut().and_then(|f| f.settle.as_mut()) {
+            settle.next_micros = now_micros + settle.every_micros;
+        }
+    }
+
+    /// Queue a fill, **one per ticker, series and width**: a second for the
+    /// same widens the first rather than spending the budget twice. The width
+    /// is part of it because a settle queues several widths of one series.
+    fn enqueue(&mut self, fill: Fill) {
+        let Some(filler) = self.filler.as_mut() else {
+            return;
+        };
+        match filler.queue.iter_mut().find(|queued| {
+            queued.ticker == fill.ticker
+                && queued.series == fill.series
+                && queued.interval_micros == fill.interval_micros
+        }) {
+            Some(queued) => {
+                queued.from_micros = queued.from_micros.min(fill.from_micros);
+                queued.due_micros = queued.due_micros.max(fill.due_micros);
+            }
+            None => filler.queue.push(fill),
+        }
     }
 
     /// Queue a gap published while running, if its series is one the venue
@@ -1312,17 +1435,7 @@ impl Capture {
             due_micros: noticed_micros + interval.interval_micros,
             attempts: 0,
         };
-        match filler
-            .queue
-            .iter_mut()
-            .find(|queued| queued.ticker == fill.ticker && queued.series == fill.series)
-        {
-            Some(queued) => {
-                queued.from_micros = queued.from_micros.min(fill.from_micros);
-                queued.due_micros = queued.due_micros.max(fill.due_micros);
-            }
-            None => filler.queue.push(fill),
-        }
+        self.enqueue(fill);
     }
 
     /// One turn of the fill, **never awaiting**: take the pages that came
@@ -2418,6 +2531,117 @@ mod tests {
             .map(|a| a.symbol.clone())
             .collect();
         assert_eq!(tickers, ["BTC".to_string(), "ETH".to_string()].into());
+    }
+
+    // ---- settling the bars closed while running -----------------------------
+
+    /// The queue as (ticker, width, from), sorted.
+    fn queued(f: &Fixture) -> Vec<(String, i64, i64)> {
+        let mut out: Vec<(String, i64, i64)> = f
+            .capture
+            .filler
+            .as_ref()
+            .unwrap()
+            .queue
+            .iter()
+            .map(|q| {
+                (
+                    q.ticker.as_str().to_string(),
+                    q.interval_micros,
+                    q.from_micros,
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn the_live_width_is_settled_each_tick_from_one_bar_back() {
+        // Measured 2026-09-25: 11 finals in 15 live hours, because nothing
+        // but a boot or a gap asked the venue for a closed bar.
+        let (mut f, _asked) = filling(candles_only(500));
+        f.capture.settle_every(300);
+        f.clock.advance_secs(299);
+        f.capture.settle_step(f.clock.now_micros());
+        assert!(queued(&f).is_empty(), "settled before the cadence");
+
+        f.clock.advance_secs(1);
+        f.capture.settle_step(f.clock.now_micros());
+        let from = 100 * DAY - MINUTE;
+        assert_eq!(
+            queued(&f),
+            vec![("BTC".into(), MINUTE, from), ("ETH".into(), MINUTE, from)],
+            "from one bar before the boot's own"
+        );
+
+        f.capture.filler.as_mut().unwrap().queue.clear();
+        f.clock.advance_secs(300);
+        f.capture.settle_step(f.clock.now_micros());
+        let from = 100 * DAY + 300 * SEC - MINUTE;
+        assert_eq!(
+            queued(&f),
+            vec![("BTC".into(), MINUTE, from), ("ETH".into(), MINUTE, from)],
+            "from one bar before the previous settle's last close"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_coarse_width_is_settled_once_its_bar_has_closed_and_stays_its_own_fill() {
+        let mut f = walk_fixture(100 * DAY + 10 * MINUTE);
+        f.capture.report_restart_gap();
+        f.capture.fill_with(
+            WalkRequest {
+                items: vec![
+                    (Series::Candles, WalkInterval::live(MINUTE)),
+                    (
+                        Series::Candles,
+                        WalkInterval {
+                            interval_micros: HOUR,
+                            need_micros: Some(DAY),
+                        },
+                    ),
+                ],
+                share: 0.25,
+                cold_start_days: 7,
+                cap: 500,
+            },
+            |_fetch: Fetch| async { Err::<Payload, String>("not asked".into()) },
+        );
+        f.capture.settle_every(300);
+        let widths = |f: &Fixture, ticker: &str| -> Vec<i64> {
+            queued(f)
+                .into_iter()
+                .filter(|(t, _, _)| t == ticker)
+                .map(|(_, w, _)| w)
+                .collect()
+        };
+
+        // Ticks inside the hour the boot fell in: 1m only.
+        for _ in 0..9 {
+            f.clock.advance_secs(300);
+            f.capture.settle_step(f.clock.now_micros());
+        }
+        assert_eq!(
+            widths(&f, "BTC"),
+            vec![MINUTE],
+            "an open hour is not settled"
+        );
+
+        // The tick at the top of the hour: the hour closed, and it is its own
+        // fill beside the minute's, not a widening of it.
+        f.clock.advance_secs(300);
+        f.capture.settle_step(f.clock.now_micros());
+        assert_eq!(widths(&f, "BTC"), vec![MINUTE, HOUR]);
+        assert!(queued(&f).contains(&("BTC".into(), HOUR, 100 * DAY - HOUR)));
+    }
+
+    #[tokio::test]
+    async fn without_a_cadence_nothing_is_settled() {
+        let (mut f, _asked) = filling(candles_only(500));
+        f.clock.advance_secs(3_600);
+        f.capture.settle_step(f.clock.now_micros());
+        assert!(queued(&f).is_empty());
     }
 
     #[tokio::test]
