@@ -230,6 +230,7 @@ cargo build --release                  # capture and the flows run release binar
 scripts/install-services.sh            # nats, capture:hyperliquid, tower, flows
 scripts/install-services.sh capture:rh-chain      # one more venue
 scripts/install-services.sh --uninstall tower     # or remove one
+scripts/install-services.sh --status              # every com.galata.* agent, flagging ones it did not install
 ```
 
 Every agent runs `scripts/run-service.sh <service>`. Five services, `vault`

@@ -3,6 +3,7 @@
 # Install — or remove — galata's long-running services as launchd agents.
 #
 #   install-services.sh [--uninstall] [service ...]
+#   install-services.sh --status
 #
 #   services: vault  nats  capture:<venue>  tower  flows   (default: all
 #             five, vault first, with capture:hyperliquid)
@@ -28,6 +29,23 @@ DOMAIN="gui/$(id -u)"
 
 refuse() { echo "install-services: REFUSED — $1" >&2; exit 1; }
 [[ "$(uname)" == Darwin ]] || refuse "launchd is macOS; elsewhere write a systemd unit running scripts/run-service.sh"
+
+# --status: every loaded com.galata.* agent, and whether this installer
+# manages it. Added when legacy's com.galata.compact.testnet was found still
+# loaded, exiting 127 on every run, reading as one of these in launchctl list
+# because nothing listed what the deployment had loaded.
+if [[ "${1:-}" == --status ]]; then
+    printf '%-34s %-10s %s\n' LABEL "PID/EXIT" MANAGED
+    launchctl list | awk '$3 ~ /^com\.galata\./ {print $1, $2, $3}' | sort -k3 | while read -r pid status label; do
+        case "$label" in
+            com.galata.vault|com.galata.nats|com.galata.tower|com.galata.flows|com.galata.capture.*) managed=yes ;;
+            *) managed="NO — not rendered by this installer" ;;
+        esac
+        if [[ "$pid" == "-" ]]; then state="exit $status"; else state="pid $pid"; fi
+        printf '%-34s %-10s %s\n' "$label" "$state" "$managed"
+    done
+    exit 0
+fi
 
 UNINSTALL=0
 if [[ "${1:-}" == --uninstall ]]; then UNINSTALL=1; shift; fi
