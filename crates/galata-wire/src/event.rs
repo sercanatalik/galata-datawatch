@@ -532,6 +532,13 @@ pub struct Gap {
     pub cause: GapCause,
     /// What the interval was clipped against, when the row was written.
     pub clipped: Clipped,
+    /// The dex the gap is about, **where the thing that went uncovered was
+    /// asked per dex**: a ledger snapshot is taken per (account, dex), and
+    /// the two gaps of one missed pass must be told apart. `None` for a
+    /// market-data gap, whose ticker already names its dex's instrument, and
+    /// for every row written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dex: Option<String>,
 }
 
 /// A payload that would not normalise.
@@ -898,6 +905,17 @@ mod tests {
             let back: Envelope = serde_json::from_value(json).unwrap();
             assert_eq!(back, envelope, "the row round-trips exactly");
         }
+    }
+
+    #[test]
+    fn a_gap_written_before_its_dex_existed_still_decodes() {
+        // Generated gaps are stored as their JSON and decoded on every
+        // rebuild. A row from before `dex` must read as no dex, not fail.
+        let old = r#"{"series":"candles","from_micros":1,"to_micros":2,"cause":"session_lost","clipped":"continuous"}"#;
+        let gap: Gap = serde_json::from_str(old).unwrap();
+        assert_eq!(gap.dex, None);
+        // And a market-data gap still writes exactly what it wrote before.
+        assert!(!serde_json::to_string(&gap).unwrap().contains("dex"));
     }
 
     #[test]

@@ -176,6 +176,7 @@ impl Coverage {
                     to_micros,
                     cause,
                     clipped: self.clipped,
+                    dex: None,
                 },
             ));
         }

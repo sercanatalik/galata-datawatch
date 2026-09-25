@@ -221,6 +221,7 @@ impl Capture {
                 // declares one, and an unknown overstates the loss rather than
                 // erasing it.
                 clipped: galata_wire::Clipped::Continuous,
+                dex: None,
             }),
         );
         if let Err(error) = self.record_generated_event(venue.as_str(), envelope) {

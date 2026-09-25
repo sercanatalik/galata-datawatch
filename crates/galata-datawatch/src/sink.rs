@@ -340,6 +340,7 @@ mod sink_tests {
                 to_micros: 1,
                 cause: GapCause::SessionLost,
                 clipped: Clipped::Continuous,
+                dex: None,
             }),
         )
     }

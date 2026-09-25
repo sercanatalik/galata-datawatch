@@ -516,6 +516,7 @@ mod tests {
                     to_micros: DAY + 5,
                     cause: GapCause::SessionLost,
                     clipped: Clipped::Continuous,
+                    dex: None,
                 }),
             ),
         )

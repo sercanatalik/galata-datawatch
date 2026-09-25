@@ -113,6 +113,7 @@ mod tests {
                 to_micros: 1,
                 cause: GapCause::SessionLost,
                 clipped: Clipped::Continuous,
+                dex: None,
             }),
         );
         assert_eq!(

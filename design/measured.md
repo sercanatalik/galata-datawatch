@@ -3762,3 +3762,40 @@ to run.*
 - **Repointing the alias was refused live**: the same root, the same key, a
   different address — refused naming both fingerprints and the newest
   segment, and nothing was written (11 segments before, 11 after).
+
+## The ledger's outage test — 2026-09-25
+
+*Task 7.2. A scratch ledger (its own root and status, the zero address, a
+10 s cadence) reached the venue only through a local CONNECT proxy, and the
+proxy was killed for 30 s mid-run and started again. The outage reached that
+process alone: capture uses the same host and was never cut (`pid 49621`
+before and after), and the installed ledger ran beside it with no miss and no
+gap. A staged outage was never written into the real `var/ledger`.*
+
+```
+  −23.8 s … −2.6 s   three passes, two snapshots each (main, xyz)
+     0.0 s           proxy killed
+   +7.5 s            2 gaps  margin · poll_failed · from −3.0 / −2.8 s · 10.5 s wide
+  +17.6 s            2 gaps  same start · 20.6 s wide
+  +27.6 s            2 gaps  same start · 30.6 s wide
+  +30.0 s            proxy restored
+  +38.0 s … +48.8 s  snapshots again, both dexes; no gap after recovery
+```
+
+- **Held:** every missed cadence recorded a gap for each dex, dated from the
+  last answer actually recorded, never from the moment the loss was noticed.
+  The first snapshot after recovery came on the next cadence.
+- **Consecutive misses nest, and grow.** Each gap runs from the last answer
+  to *now*, so three misses give 10, 20 and 30 s gaps over one 30 s loss.
+  This is the shared poll lane (`venue::Cadence`) as `poll-source` specifies
+  it, and capture's polled venues behave the same way. **A reader must take
+  the union of a series' gaps, never the sum**: summed, this outage reads as
+  60 s per dex. The ledger spec's *"one cadence wide"* was wrong for any but
+  the first miss.
+- **A gap does not say which dex it is about.** `Gap` carries the account
+  (in its address), the series and the interval, and the ledger snapshots
+  per (account, dex): the two gaps of each pass above are the main dex's and
+  `xyz`'s, and nothing in the record tells them apart. **Fixed the same
+  day**: `Gap` carries an optional `dex`, spelled as the margin rows spell
+  it (`None` is the main dex), and a market-data gap and every older row
+  read as before (`a_gap_names_its_dex`).

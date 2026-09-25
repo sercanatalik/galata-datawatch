@@ -4,7 +4,7 @@
 //!   boot        each declared master's role, once   ──▶ refuse a sub-account
 //!               discovery                            ──▶ bindings, modes
 //!   every snapshot_secs   each (account, dex)        ──▶ the one path
-//!                         a failure                  ──▶ a gap, one cadence wide
+//!                         a failure                  ──▶ a gap, from the last answer
 //!   every discover_secs   discovery again            ──▶ a report, always
 //! ```
 //!
@@ -481,7 +481,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                             cause,
                         } = missed
                         {
-                            self.record_gap(&account, from_micros, to_micros, cause)?;
+                            self.record_gap(&account, &dex, from_micros, to_micros, cause)?;
                             pass.gaps += 1;
                         }
                     }
@@ -499,6 +499,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     fn record_gap(
         &mut self,
         account: &ResolvedAccount,
+        dex: &str,
         from_micros: i64,
         to_micros: i64,
         cause: GapCause,
@@ -516,6 +517,9 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 // Account state has no session calendar: the venue answers at
                 // any hour, so nothing is clipped and the bound is exact.
                 clipped: galata_wire::Clipped::Continuous,
+                // Which of the account's snapshots went uncovered, spelled as
+                // its margin rows spell it: `None` is the main dex.
+                dex: (!dex.is_empty()).then(|| dex.to_string()),
             }),
         );
         record_generated_at(
@@ -797,9 +801,58 @@ mod tests {
             assert_eq!(
                 gap.to_micros - gap.from_micros,
                 10 * SECOND,
-                "one cadence wide"
+                "the first miss is one cadence wide"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_gap_names_its_dex() {
+        // Found by the outage test (measured.md, 2026-09-25): the two gaps of
+        // one missed pass were the main dex's and xyz's, and nothing in the
+        // record told them apart.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.clock.advance_secs(10);
+        *run.venue.snapshot.lock().unwrap() = Err(Refusal::Unreachable);
+        run.snapshot_all().await.unwrap();
+        let dexes: BTreeSet<Option<String>> = gaps(&root).into_iter().map(|g| g.dex).collect();
+        assert_eq!(
+            dexes,
+            [None, Some("xyz".to_string())].into(),
+            "one gap per dex, each named"
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_misses_nest_from_the_last_answer() {
+        // The poll lane's specified behaviour (`poll-source`): each missed
+        // pass records a gap from the last answer to now, so consecutive
+        // misses NEST, and a reader must take their union, never their sum.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        *run.venue.snapshot.lock().unwrap() = Err(Refusal::Unreachable);
+        for _ in 0..3 {
+            run.clock.advance_secs(10);
+            run.snapshot_all().await.unwrap();
+        }
+        let main: Vec<Gap> = gaps(&root)
+            .into_iter()
+            .filter(|g| g.dex.is_none())
+            .collect();
+        let widths: Vec<i64> = main
+            .iter()
+            .map(|g| (g.to_micros - g.from_micros) / SECOND)
+            .collect();
+        assert_eq!(widths, vec![10, 20, 30]);
+        assert!(
+            main.iter().all(|g| g.from_micros == T0),
+            "every one from the last answer"
+        );
     }
 
     #[tokio::test]
