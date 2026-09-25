@@ -1,13 +1,16 @@
-"""Project the last closed days of the archive onto the tape. Nightly.
+"""Project the recent days of the archive onto the tape. Hourly.
 
 **The tape exists only when this runs.** Capture writes the archive and never
 the tape; ``galata-tape-rebuild`` is the tape's one writer. Without a cadence
 the product stops at whatever date somebody last rebuilt by hand.
 
-**A fixed trailing window, replaced, remembered nowhere.** Each night rebuilds
-the three closed days before today, half-open, with ``--replace`` — so a run
-is idempotent, a missed night is re-projected by the next, and nothing about
-*which days are done* lives in cereyan's store (invariant 1). This departs
+**A fixed trailing window, replaced, remembered nowhere.** Each hour rebuilds
+the three closed days before today **and today so far**, half-open, with
+``--replace`` — so a run is idempotent, a missed run is re-projected by the
+next, and nothing about *which days are done* lives in cereyan's store
+(invariant 1). Today is safe to replace hourly only since ``replace-by-source``:
+before it, a replacing run removed rows from receipt days it did not read, and
+an hourly one would have done so every hour. This departs
 from legacy, where the rebuild was the one flow that retried: it had no
 ``--replace``, so a range could not be redone and a missed date was a hole.
 
@@ -27,9 +30,12 @@ from cereyan import Cron, flow, task
 
 from . import _runner
 
-# 00:40 UTC: thirty minutes after compaction starts. The shared resource is
-# what actually orders them; the gap only makes waiting the unusual case.
-SCHEDULE = Cron("40 0 * * *", timezone="UTC")
+# Hourly at :40. At 00:40 that is thirty minutes after compaction starts, and
+# every hour it is clear of the watch at :05. The shared resource is what
+# actually orders a run behind an overrunning compaction; the gap only makes
+# waiting the unusual case. An hourly run costs seconds: 7.72 s for the whole
+# window at 12:02 UTC, today uncompacted (design/measured.md).
+SCHEDULE = Cron("40 * * * *", timezone="UTC")
 
 # Two consecutive missed nights still self-heal, and a late arrival for
 # yesterday is picked up on each of the next two nights. The cost is measured
@@ -39,13 +45,15 @@ TRAILING_DAYS = 3
 
 
 def window(now: datetime) -> tuple[date, date]:
-    """The closed days to project, half-open: ``[today - 3, today)``.
+    """The days to project, half-open: ``[today - 3, today + 1)``.
 
-    The moment is a parameter so the boundary is visible and testable.
-    Today is not closed, so it is the exclusive end.
+    The three closed days and today so far. The moment is a parameter so the
+    boundary is visible and testable. Today is open, and each hour's run
+    replaces the whole of it; the last run of a day still includes that day,
+    and the next day's first run carries it as a closed one.
     """
     today = now.astimezone(timezone.utc).date()
-    return today - timedelta(days=TRAILING_DAYS), today
+    return today - timedelta(days=TRAILING_DAYS), today + timedelta(days=1)
 
 
 def declared_venues(config: str) -> list[str]:
@@ -64,13 +72,13 @@ def project_venue(config: str, venue: str, start: str, end: str) -> str:
 
 
 @flow(
-    name="project-the-closed-days",
+    name="project-the-recent-days",
     schedule=SCHEDULE,
     max_concurrent=1,
     on_overlap="skip",
     resources={"galata-record": 1},
 )
-def project_the_closed_days(config: str = str(_runner.CONFIG)) -> dict[str, str]:
+def project_the_recent_days(config: str = str(_runner.CONFIG)) -> dict[str, str]:
     start, end = window(datetime.now(timezone.utc))
     said: dict[str, str] = {}
     refused: list[str] = []

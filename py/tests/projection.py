@@ -7,12 +7,21 @@ from datetime import date, datetime, timezone
 import pytest
 
 from flows import _runner, project
-from flows.project import project_the_closed_days, window
+from flows.project import project_the_recent_days, window
 
 
-def the_window_is_three_closed_days_half_open():
-    start, end = window(datetime(2026, 9, 24, 0, 40, tzinfo=timezone.utc))
-    assert (start, end) == (date(2026, 9, 21), date(2026, 9, 24))
+def the_window_is_three_closed_days_and_today():
+    start, end = window(datetime(2026, 9, 24, 13, 40, tzinfo=timezone.utc))
+    assert (start, end) == (date(2026, 9, 21), date(2026, 9, 25))
+
+
+def the_last_run_of_the_day_still_includes_that_day():
+    assert window(datetime(2026, 9, 24, 23, 40, tzinfo=timezone.utc))[1] == date(2026, 9, 25)
+    # and the next day's first run carries it as a closed day
+    assert window(datetime(2026, 9, 25, 0, 40, tzinfo=timezone.utc)) == (
+        date(2026, 9, 22),
+        date(2026, 9, 26),
+    )
 
 
 def the_window_is_taken_in_utc():
@@ -20,13 +29,13 @@ def the_window_is_taken_in_utc():
     from datetime import timedelta
     new_york = timezone(timedelta(hours=-4))
     start, end = window(datetime(2026, 9, 23, 23, 30, tzinfo=new_york))
-    assert end == date(2026, 9, 24)
+    assert end == date(2026, 9, 25)
 
 
 def the_projection_replaces_its_window(tools, config, monkeypatch):
     monkeypatch.setattr(project, "window", lambda now: (date(2026, 9, 21), date(2026, 9, 24)))
     tools.exits("galata-tape-rebuild", 0)
-    project_the_closed_days(str(config))
+    project_the_recent_days(str(config))
     [call] = tools.calls("galata-tape-rebuild")
     assert call["argv"] == ["--replace", "hyperliquid", "2026-09-21", "2026-09-24"]
 
@@ -36,7 +45,7 @@ def every_declared_venue_is_projected_even_after_one_fails(tools, tmp_path):
     config.write_text("[venue.hyperliquid]\n\n[venue.rh-chain]\n")
     tools.exits("galata-tape-rebuild", 1, 0)
     with pytest.raises(_runner.Broken, match="hyperliquid"):
-        project_the_closed_days(str(config))
+        project_the_recent_days(str(config))
     venues = [call["argv"][1] for call in tools.calls("galata-tape-rebuild")]
     assert venues == ["hyperliquid", "rh-chain"]
 
@@ -46,5 +55,5 @@ def no_declared_venue_is_a_refusal(tools, tmp_path):
     config.write_text('[paths]\narchive = "var/archive"\n')
     tools.exits("galata-tape-rebuild", 0)
     with pytest.raises(_runner.BadArgument, match=r"declares no \[venue"):
-        project_the_closed_days(str(config))
+        project_the_recent_days(str(config))
     assert tools.calls("galata-tape-rebuild") == []

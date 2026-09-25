@@ -3651,3 +3651,26 @@ and from a full one, ends byte-identical to a single full rebuild.
   receipt day each. The removal plan reads two labels per segment; at the
   ~20 µs a label measured in `examples/cost-of-labels.rs` that is about 1 ms
   over this tape, inside a 4.43 s run.
+
+## Projecting hourly, today included — 2026-09-25
+
+*Behind `project-every-hour`.* Once `replace-by-source` made a replacing run
+remove only its own receipt days, the projection could run hourly over
+`[today − 3, tomorrow)`. The cost question is today: compaction only folds
+closed days, and the rebuild pays per segment opened (3.4× above).
+
+Measured at 12:02 UTC against the real archive, read-only, into a scratch
+tape, with the release binary:
+
+```
+  today's archive      ~11,600 segments per kind (candles 11,574 · quotes 11,677 · trades 11,629)
+  today alone          959,070 payloads → 1,261,848 rows in 13 segments     8.63 s
+  the hourly window    [09-22, 09-26) --replace, 961,725 payloads, 13 replaced   7.72 s
+```
+
+Half a day in, the whole window is under 8 s. **A full day is estimated at
+roughly double, about 17 s at 23:40**. That's an extrapolation from half a day,
+stated as one, and re-measured from the flow's own run times once it has run
+past 23:00. That puts an hour's run at seconds, under 7 minutes of CPU a
+day, and the rows of the replaced days absent from the tape for about as long
+each run.

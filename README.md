@@ -369,7 +369,7 @@ whose flows only call the release binaries as subprocesses.
 | Flow | Runs | When (UTC) |
 |---|---|---|
 | `compact-the-archive` | `galata-compact` | daily 00:10 |
-| `project-the-closed-days` | `galata-tape-rebuild --replace`, the last 3 closed days, per declared venue | daily 00:40 |
+| `project-the-recent-days` | `galata-tape-rebuild --replace`, the last 3 closed days and today so far, per declared venue | hourly at :40 |
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
