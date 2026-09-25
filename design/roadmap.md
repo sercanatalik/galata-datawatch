@@ -261,6 +261,10 @@ different shape from the one planned here.
   separate crate, with the position mapped from receipt time through the
   archive. It lands only with its first caller, `galata-research`. Written up
   in [`planning/bound-the-replay.md`](../planning/bound-the-replay.md).
+  **Checked 2026-09-25: still no caller.** `galata-research` is Python and
+  reads the tape's parquet directly; it bounds by `as_of` on each bar's close
+  and never holds this reader. A Rust replay reader has a caller only once a
+  Rust host does, or once research reaches the tape through a binding.
 
 > **Exit, met:** `SELECT * FROM read_parquet('tape/kind=quotes/**/*.parquet')`
 > in DuckDB returns six instruments with their venues **and needs no flags**,
@@ -727,6 +731,16 @@ BTC/GOLD's typed 0.11 was noise ([−0.40, 0.09]).*
 - The xyz instruments were measured continuous on 2026-09-20, so no session
   mask is needed for today's universe. The grid still takes one, for the first
   instrument that closes.
+- **The live hours were missing, and backfill said nothing — 2026-09-25**
+  (`heard-at-the-close`, `settle-the-live-bars`). Hyperliquid's candle stream
+  never sends a bar final and the walk ran only at boot, so a running capture
+  held forming rows and no closes: 11 BTC finals in 15 live hours, n = 0 on a
+  derivation over them. A candle is now final by its receipt against the
+  venue's stated close (the walk's open bar is forming); backfill is judged by
+  a forming row heard within one width of the close; and
+  `capture.settle_secs` asks for the bars closed while running through the
+  fill queue. **Off until the operator writes the key**, after rebuilding every
+  binary that reads the document.
 
 The tower's Portfolio view reads Tiers 11–15 as they land. Until Tier 12 its
 positions are the viewer's own inputs. The risk arithmetic (risk share, VaR,
