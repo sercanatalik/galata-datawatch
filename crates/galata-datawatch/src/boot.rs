@@ -325,6 +325,17 @@ pub fn boot(
             .into());
         }
 
+        // **The same fetch, paced and capped by the same request, for the gaps
+        // this process publishes while running.** The walk above resumed from
+        // the record's latest receipt and never looks behind it, so without
+        // this a session lost mid-run keeps candles and funding the venue
+        // would hand back missing until nobody remembers why.
+        capture.fill_with(request, move |fetch| {
+            let history = history.clone();
+            let at = SystemClock.now_micros();
+            async move { history.fetch(fetch, at).await }
+        });
+
         let shutdown = tokio_util::sync::CancellationToken::new();
         let signal = shutdown.clone();
         tokio::spawn(async move {

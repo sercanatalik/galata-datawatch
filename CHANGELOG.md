@@ -61,6 +61,11 @@ First release. Nothing is on crates.io yet, so everything is new.
   built without it links no venue transport at all — 541 crates down to 279 —
   which `check-no-transport.sh` asks cargo about rather than reading from a
   manifest. `galata-tower` takes exactly that build.
+- History is walked at boot from the record's latest receipt, and a gap
+  published **while running** (a lost session) is filled too: once the bar of
+  the loss has closed, capture asks the venue for that ticker and series from
+  the gap's start, as its own task so the live loop never waits for it, paced
+  and capped like the walk (`Capture::fill_with`, `Capture::fill_step`).
 - The hyperliquid adapter, including HIP-3 dexes: a per-instrument `dex`, and a
   duplicate ticker across dexes refused at load, naming both.
 - The rh-chain adapter: capture at the head, readers bounded at finalized,

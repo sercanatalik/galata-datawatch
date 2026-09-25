@@ -119,6 +119,14 @@ and `test-guards.sh` proving each guard can fail.
   `catch_unwind` around the adapter and a `NullSink`.
 - **`capture/`** — the loop that owns the clock: `clock` · `coverage` ·
   `subscriptions` · `session` · `walk` · `status`.
+  **And the walk has a live form** (2026-09-25, `fill-mid-run-gaps`): the
+  boot walk resumes from the latest receipt and never looks behind it, so a
+  session lost mid-run left candles and funding the venue would hand back
+  missing. Capture now queues each gap it publishes while running on a
+  historical series and asks for it once the bar of the loss has closed, as
+  its own task, one at a time at the walk's pace, taken between frames so the
+  socket is never waited on or cancelled. The record held 216 gaps that day,
+  every one a restart gap: nothing had needed this yet.
 - **`adapters/hyperliquid`** — BTC, ETH, HYPE. `bbo`, `trades`, `candle`,
   `activeAssetCtx`. `RotateAhead { observed 624s, rotate 480s, ping 20s }`.
 - **`config/`** — file source only, `Origin::File`. Trimmed hard from legacy's

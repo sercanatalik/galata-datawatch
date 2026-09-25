@@ -135,6 +135,50 @@ pub struct Capture {
     /// A walk, while one is running. Cleared when it ends, so the surface never
     /// claims a backfill that finished.
     walking: Option<WalkStatus>,
+    /// The gaps this process published while running, still to be asked of
+    /// the venue — `None` until [`Capture::fill_with`] gives it a fetch.
+    filler: Option<Filler>,
+}
+
+/// A historical fetch the live loop can start without waiting for it.
+///
+/// Boxed and `Send`, because it runs as its own task: the loop never awaits a
+/// fill, so a slow venue cannot hold a live frame behind a backfill.
+pub type FillFetch = Arc<
+    dyn Fn(Fetch) -> std::pin::Pin<Box<dyn std::future::Future<Output = FetchResult> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// What a fetch came back with.
+pub type FetchResult = Result<Payload, String>;
+
+/// One gap still to be asked for.
+#[derive(Debug, Clone, PartialEq)]
+struct Fill {
+    ticker: Ticker,
+    series: Series,
+    interval_micros: i64,
+    /// Where the request starts — the gap's start less the walk's overlap,
+    /// or where the previous page of a longer fill ended.
+    from_micros: i64,
+    /// Not asked for before this: one bar after the loss was noticed, so the
+    /// minute of the reconnect is history rather than a forming bar.
+    due_micros: i64,
+    /// Failed requests so far. At the walk's cap the fill is dropped by name.
+    attempts: u32,
+}
+
+/// The live loop's fill queue. See [`Capture::fill_step`].
+struct Filler {
+    request: WalkRequest,
+    fetch: FillFetch,
+    queue: Vec<Fill>,
+    /// The fill whose request is out. One at a time, like the walk.
+    in_flight: Option<Fill>,
+    sender: tokio::sync::mpsc::UnboundedSender<(Fetch, FetchResult)>,
+    results: tokio::sync::mpsc::UnboundedReceiver<(Fetch, FetchResult)>,
+    last_start_micros: Option<i64>,
 }
 
 impl CaptureError {
@@ -191,6 +235,7 @@ impl Capture {
             last_event: std::collections::BTreeMap::new(),
             sink_reachable: true,
             walking: None,
+            filler: None,
         }
     }
 
@@ -539,6 +584,7 @@ impl Capture {
             .coverage
             .gaps_for_all(now_micros, GapCause::SessionLost);
         for (ticker, gap) in gaps {
+            self.queue_fill(&ticker, &gap, now_micros);
             self.emit_gap(&ticker, gap);
         }
         self.session = None;
@@ -812,6 +858,10 @@ impl Capture {
 
                 self.flush_if_due(now)?;
                 self.publish_status_if_due(now);
+                // Never awaits: a finished page is taken, a due fill is
+                // started as its own task, and the read below is never
+                // cancelled for either.
+                self.fill_step(now)?;
 
                 match source.next_frame().await {
                     Ok(Frame::Bytes(bytes)) => self.take_frame(&bytes)?,
@@ -1185,6 +1235,276 @@ impl Capture {
             tokio::time::sleep(pace).await;
         }
         Ok(())
+    }
+}
+
+/// Filling the gaps this process publishes while running.
+///
+/// The boot walk resumes from the record's latest receipt, so it never looks
+/// behind it: a session lost mid-run left candles and funding the venue would
+/// have handed back missing until somebody noticed. The fill asks for them —
+/// **inside the live loop and never in its way**. The walk sleeps between
+/// requests, which is right before the subscription and wrong during it, so a
+/// fill runs as its own task, one at a time, paced from the walk's share of
+/// the budget, and its page is taken between frames through the one path.
+impl Capture {
+    /// Give the live loop a fetch, and the walk request it paces and caps by.
+    ///
+    /// Until this is called a lost session publishes its gaps and asks for
+    /// nothing, which is what every loop did before.
+    pub fn fill_with<F, Fut>(&mut self, request: WalkRequest, fetch: F)
+    where
+        F: Fn(Fetch) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = FetchResult> + Send + 'static,
+    {
+        let fetch: FillFetch = Arc::new(move |request| Box::pin(fetch(request)));
+        let (sender, results) = tokio::sync::mpsc::unbounded_channel();
+        self.filler = Some(Filler {
+            request,
+            fetch,
+            queue: Vec::new(),
+            in_flight: None,
+            sender,
+            results,
+            last_start_micros: None,
+        });
+    }
+
+    /// Queue a gap published while running, if its series is one the venue
+    /// hands back and the walk was asked for.
+    ///
+    /// A second loss on a pair before its fill starts **widens** that fill
+    /// rather than adding another: one request covers both, and the budget is
+    /// spent once.
+    fn queue_fill(&mut self, ticker: &Ticker, gap: &Gap, noticed_micros: i64) {
+        let Some(filler) = self.filler.as_mut() else {
+            return;
+        };
+        if !self
+            .wiring
+            .adapter
+            .declaration()
+            .serves_historically(gap.series)
+        {
+            return;
+        }
+        let Some((_, interval)) = filler
+            .request
+            .items
+            .iter()
+            .find(|(series, _)| *series == gap.series)
+        else {
+            return;
+        };
+        let declaration = self.wiring.adapter.declaration().clone();
+        let overlap = Walk::new(
+            &declaration,
+            filler.request.share,
+            filler.request.cold_start_days,
+            filler.request.cap,
+        )
+        .overlap_micros();
+        let fill = Fill {
+            ticker: ticker.clone(),
+            series: gap.series,
+            interval_micros: interval.interval_micros,
+            from_micros: gap.from_micros - overlap,
+            due_micros: noticed_micros + interval.interval_micros,
+            attempts: 0,
+        };
+        match filler
+            .queue
+            .iter_mut()
+            .find(|queued| queued.ticker == fill.ticker && queued.series == fill.series)
+        {
+            Some(queued) => {
+                queued.from_micros = queued.from_micros.min(fill.from_micros);
+                queued.due_micros = queued.due_micros.max(fill.due_micros);
+            }
+            None => filler.queue.push(fill),
+        }
+    }
+
+    /// One turn of the fill, **never awaiting**: take the pages that came
+    /// back, then start the next due fill if none is out and the pace allows.
+    ///
+    /// Called by the live loop between frames. A page waits at most one poll
+    /// window to be taken, and its receipt time was set when it arrived, not
+    /// when it is taken.
+    pub fn fill_step(&mut self, now_micros: i64) -> Result<(), CaptureError> {
+        let Some(filler) = self.filler.as_mut() else {
+            return Ok(());
+        };
+        let mut returned = Vec::new();
+        while let Ok(result) = filler.results.try_recv() {
+            returned.push((filler.in_flight.take(), result));
+        }
+        for (fill, (request, result)) in returned {
+            self.fill_returned(fill, request, result, now_micros)?;
+        }
+        self.start_due_fill(now_micros);
+        Ok(())
+    }
+
+    /// A fill's page came back, or its request failed.
+    fn fill_returned(
+        &mut self,
+        fill: Option<Fill>,
+        request: Fetch,
+        result: FetchResult,
+        now_micros: i64,
+    ) -> Result<(), CaptureError> {
+        let Some(mut fill) = fill else {
+            return Ok(());
+        };
+        match result {
+            Ok(page) => {
+                let copy = page.clone();
+                self.take(page)?;
+                tracing::info!(
+                    ticker = request.ticker.as_str(),
+                    series = request.series.as_str(),
+                    from = request.from_micros,
+                    to = request.to_micros,
+                    "filled a gap published while running"
+                );
+                // **A full forward page is not the last one**: continue from
+                // past its last row, as the walk does. The adapter reads where
+                // it ended; the loop parses no venue payload.
+                let declaration = self.wiring.adapter.declaration().clone();
+                if declaration
+                    .paging(fill.series)
+                    .is_some_and(|p| p.direction == PageDirection::ForwardFromStart)
+                    && let Some(end) = self.wiring.adapter.page_end(&copy)
+                    && end.rows
+                        >= declaration
+                            .paging(fill.series)
+                            .map_or(u32::MAX, |p| p.max_rows_per_call)
+                    && let Some(filler) = self.filler.as_mut()
+                {
+                    filler.queue.push(Fill {
+                        from_micros: end.last_micros + 1,
+                        due_micros: now_micros,
+                        attempts: 0,
+                        ..fill
+                    });
+                }
+            }
+            Err(error) => {
+                fill.attempts += 1;
+                let Some(filler) = self.filler.as_mut() else {
+                    return Ok(());
+                };
+                if fill.attempts >= filler.request.cap {
+                    tracing::error!(
+                        ticker = fill.ticker.as_str(),
+                        series = fill.series.as_str(),
+                        interval_micros = fill.interval_micros,
+                        from = fill.from_micros,
+                        attempts = fill.attempts,
+                        error,
+                        "a gap published while running could not be filled and is dropped; its \
+                         gap row stays in the record"
+                    );
+                } else {
+                    tracing::warn!(
+                        ticker = fill.ticker.as_str(),
+                        series = fill.series.as_str(),
+                        attempts = fill.attempts,
+                        error,
+                        "a fill's request failed; it is asked again"
+                    );
+                    fill.due_micros = now_micros;
+                    filler.queue.push(fill);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Start the earliest due fill, as its own task, if none is out and the
+    /// walk's pace allows.
+    fn start_due_fill(&mut self, now_micros: i64) {
+        let declaration = self.wiring.adapter.declaration().clone();
+        let Some(filler) = self.filler.as_mut() else {
+            return;
+        };
+        if filler.in_flight.is_some() {
+            return;
+        }
+        let planner = Walk::new(
+            &declaration,
+            filler.request.share,
+            filler.request.cold_start_days,
+            filler.request.cap,
+        );
+        let pace_micros = planner.request_interval_ms() as i64 * 1_000;
+        if filler
+            .last_start_micros
+            .is_some_and(|last| now_micros < last + pace_micros)
+        {
+            return;
+        }
+        let Some(index) = filler
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, fill)| fill.due_micros <= now_micros)
+            .min_by_key(|(_, fill)| fill.due_micros)
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        let fill = filler.queue.remove(index);
+
+        // The first step of the plan now; the rest queued behind it, so a long
+        // outage is paged at the walk's pace rather than all at once.
+        let steps = planner.plan(
+            fill.series,
+            fill.from_micros,
+            now_micros,
+            fill.interval_micros,
+        );
+        let Some(first) = steps.first() else {
+            return;
+        };
+        if let Some(next) = steps.get(1) {
+            filler.queue.push(Fill {
+                from_micros: next.from_micros,
+                due_micros: now_micros,
+                attempts: 0,
+                ..fill.clone()
+            });
+        }
+        let Some(symbol) = self.wiring.adapter.venue_symbol(&fill.ticker) else {
+            tracing::warn!(
+                ticker = fill.ticker.as_str(),
+                "the seam has no venue symbol for it, so its gap is not filled"
+            );
+            return;
+        };
+        let request = Fetch {
+            series: fill.series,
+            ticker: fill.ticker.clone(),
+            symbol,
+            interval_micros: fill.interval_micros,
+            interval_label: self.wiring.adapter.interval_label(fill.interval_micros),
+            from_micros: first.from_micros,
+            to_micros: first.to_micros,
+        };
+        let Some(filler) = self.filler.as_mut() else {
+            return;
+        };
+        let future = (filler.fetch)(request.clone());
+        let sender = filler.sender.clone();
+        tokio::spawn(async move {
+            let result = future.await;
+            // A loop that has stopped is not listening, and that is fine: the
+            // gap row is already in the record.
+            let _ = sender.send((request, result));
+        });
+        filler.in_flight = Some(fill);
+        filler.last_start_micros = Some(now_micros);
     }
 }
 
@@ -1890,5 +2210,228 @@ mod tests {
             .unwrap();
         assert!(outcomes.is_empty());
         assert_eq!(calls.into_inner(), 0);
+    }
+
+    // ---- filling gaps published while running ------------------------------
+
+    type Asked = Arc<std::sync::Mutex<Vec<Fetch>>>;
+
+    /// A capture of candles and funding for BTC and ETH, covered from its
+    /// start, with a fill fetch that records every request and answers with a
+    /// candle page from the requested start.
+    fn filling(request: WalkRequest) -> (Fixture, Asked) {
+        let mut f = walk_fixture(100 * DAY);
+        f.capture.report_restart_gap();
+        let asked: Asked = Arc::default();
+        let log = asked.clone();
+        f.capture.fill_with(request, move |fetch: Fetch| {
+            let page = candle_page(&fetch.symbol, fetch.from_micros / 1_000);
+            log.lock().unwrap().push(fetch);
+            async move { Ok(page) }
+        });
+        (f, asked)
+    }
+
+    /// Let spawned fetches return, and take what they brought.
+    async fn settle(f: &mut Fixture) {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            f.capture.fill_step(f.clock.now_micros()).unwrap();
+        }
+    }
+
+    fn the_walks_pace(request: &WalkRequest, capture: &Capture) -> i64 {
+        let declaration = capture.wiring.adapter.declaration().clone();
+        Walk::new(
+            &declaration,
+            request.share,
+            request.cold_start_days,
+            request.cap,
+        )
+        .request_interval_ms() as i64
+            * 1_000
+    }
+
+    #[tokio::test]
+    async fn a_lost_sessions_candles_are_fetched_after_the_bar_closes() {
+        // Until this change the walk ran once, at boot, from the record's
+        // latest receipt: a session lost mid-run left candles the venue would
+        // hand back missing, and nothing asked for them.
+        let (mut f, asked) = filling(candles_only(500));
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+
+        f.clock.advance_secs(59);
+        settle(&mut f).await;
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "a fill was asked for before the bar of the loss had closed"
+        );
+
+        f.clock.advance_secs(2);
+        settle(&mut f).await;
+        let first = asked.lock().unwrap()[0].clone();
+        assert_eq!(first.series, Series::Candles);
+        assert_eq!(
+            first.from_micros,
+            100 * DAY - MINUTE,
+            "the fill starts at the gap's start, less the walk's overlap"
+        );
+        assert_eq!(asked.lock().unwrap().len(), 1, "one at a time");
+
+        // Through the one path: archived and emitted, as a live frame is.
+        assert!(
+            f.sink
+                .emitted()
+                .iter()
+                .any(|e| matches!(e.event, Event::Candle(_))),
+            "a filled page must reach the sink"
+        );
+        assert!(
+            f.capture
+                .wiring
+                .archive_root
+                .join("venue=hyperliquid/kind=candles")
+                .is_dir(),
+            "a filled page must be archived"
+        );
+
+        // And the other pair, once the walk's pace has passed.
+        f.clock
+            .advance(the_walks_pace(&candles_only(500), &f.capture));
+        settle(&mut f).await;
+        let tickers: std::collections::BTreeSet<String> = asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| a.symbol.clone())
+            .collect();
+        assert_eq!(tickers, ["BTC".to_string(), "ETH".to_string()].into());
+    }
+
+    #[tokio::test]
+    async fn a_series_without_history_is_not_filled() {
+        // Quotes are pushed and never served back: their gap stays a gap.
+        let mut f = fixture(100 * DAY);
+        f.capture.report_restart_gap();
+        f.capture.fill_with(
+            WalkRequest {
+                items: vec![(Series::Quotes, WalkInterval::live(MINUTE))],
+                share: 1.0,
+                cold_start_days: 7,
+                cap: 500,
+            },
+            |_fetch: Fetch| async { Err::<Payload, String>("not asked".into()) },
+        );
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+        assert!(f.capture.filler.as_ref().unwrap().queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_losses_before_a_fill_widen_one_fill() {
+        let (mut f, _asked) = filling(candles_only(500));
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+        f.clock.advance_secs(20);
+        f.capture.session_lost(f.clock.now_micros());
+
+        let queue = &f.capture.filler.as_ref().unwrap().queue;
+        assert_eq!(queue.len(), 2, "one fill per pair, not one per loss");
+        assert!(
+            queue
+                .iter()
+                .all(|fill| fill.from_micros == 100 * DAY - MINUTE)
+        );
+        assert!(
+            queue
+                .iter()
+                .all(|fill| fill.due_micros == 100 * DAY + 50 * SEC + MINUTE),
+            "the widened fill waits for the later loss's bar"
+        );
+    }
+
+    #[tokio::test]
+    async fn frames_are_taken_while_a_fill_is_in_flight() {
+        // A venue that never answers must not hold a live frame back.
+        let mut f = walk_fixture(100 * DAY);
+        f.capture.report_restart_gap();
+        f.capture.fill_with(candles_only(500), |_fetch: Fetch| {
+            std::future::pending::<FetchResult>()
+        });
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+        f.clock.advance_secs(61);
+        settle(&mut f).await;
+        assert!(f.capture.filler.as_ref().unwrap().in_flight.is_some());
+
+        for i in 0..5 {
+            f.capture.take_frame(&bbo("BTC", 1_000 + i)).unwrap();
+            f.capture.fill_step(f.clock.now_micros()).unwrap();
+        }
+        assert!(
+            f.sink
+                .emitted()
+                .iter()
+                .any(|e| matches!(e.event, Event::Quote(_))),
+            "live frames stopped behind a fill"
+        );
+    }
+
+    #[tokio::test]
+    async fn fills_are_paced_like_the_walk_and_one_at_a_time() {
+        let (mut f, asked) = filling(candles_only(500));
+        let pace = the_walks_pace(&candles_only(500), &f.capture);
+        assert!(
+            pace > 0,
+            "the declaration states a budget, so there is a pace"
+        );
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+        f.clock.advance_secs(61);
+
+        settle(&mut f).await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        // Returned and taken, but the pace has not passed: still one.
+        f.clock.advance(pace - 1);
+        settle(&mut f).await;
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            1,
+            "the second started inside the pace"
+        );
+        f.clock.advance(1);
+        settle(&mut f).await;
+        assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failing_fill_is_dropped_by_name_after_the_cap() {
+        let cap = 3;
+        let mut f = walk_fixture(100 * DAY);
+        f.capture.report_restart_gap();
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = calls.clone();
+        f.capture
+            .fill_with(candles_only(cap), move |_fetch: Fetch| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Err::<Payload, String>("the venue refused".into()) }
+            });
+        let pace = the_walks_pace(&candles_only(cap), &f.capture);
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+        f.clock.advance_secs(61);
+
+        for _ in 0..20 {
+            settle(&mut f).await;
+            f.clock.advance(pace);
+        }
+        let filler = f.capture.filler.as_ref().unwrap();
+        assert!(filler.queue.is_empty() && filler.in_flight.is_none());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2 * cap,
+            "each pair asked exactly the cap's number of times, then dropped"
+        );
     }
 }

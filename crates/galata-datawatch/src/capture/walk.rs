@@ -234,6 +234,12 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// How far a request reaches back before the moment it resumes from — the
+    /// same overlap successive steps take, for a venue's boundary handling.
+    pub fn overlap_micros(&self) -> i64 {
+        self.overlap_micros
+    }
+
     /// The interval between requests, from the venue's stated budget and the
     /// declared share. **No interval constant appears here.**
     pub fn request_interval_ms(&self) -> u64 {
