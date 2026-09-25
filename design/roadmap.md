@@ -219,6 +219,13 @@ different shape from the one planned here.
   on two real restarts — 2,337 payloads, 2,337 distinct sequences, zero
   collisions.
 
+- **`bound-the-replay`**: **NOT PROPOSED.** Named 2026-09-25. `view()` is
+  bounded at the durable frontier, and nothing can say *the view as it stood at
+  T*, which a replay host needs. Carries forward legacy's `reader-replay` as a
+  separate crate, with the position mapped from receipt time through the
+  archive. It lands only with its first caller, `galata-research`. Written up
+  in [`planning/bound-the-replay.md`](../planning/bound-the-replay.md).
+
 > **Exit, met:** `SELECT * FROM read_parquet('tape/kind=quotes/**/*.parquet')`
 > in DuckDB returns six instruments with their venues **and needs no flags**,
 > and `galata-tape-rebuild` run twice over a frozen archive writes identical

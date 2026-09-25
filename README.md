@@ -8,288 +8,491 @@
 [![check](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml/badge.svg)](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml)
 [![MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE-MIT)
 [![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-b7410e.svg)](rust-toolchain.toml)
+[![status: pre-0.1.0](https://img.shields.io/badge/status-pre--0.1.0-orange.svg)](#roadmap)
 
-Multi-venue market data capture and Parquet archival, in Rust.
+**Multi-venue market data capture and Parquet archival, in Rust.**
 
-galata-datawatch is the data foundation of **Galata**, a low-latency
-algorithmic trading framework in Rust. Galata covers the path from market data
-capture to signal generation, deterministic portfolio risk controls, and
-agentic strategy execution. That execution layer is driven by a fine-tuned
-decision model that turns market signals into calibrated probabilities. Each
-later layer depends on the record this one keeps. That record has to be
-complete and replayable, and it has to say plainly where its gaps are.
-
-Datawatch runs one capture process per venue. Every payload is made durable
-**before** anything parses it. Gaps are published as explicit events rather
-than inferred from silence. The store reports its durable frontier from a
-directory listing, without opening a file.
-
-| | |
-|---|---|
-| **Archive first** | every payload lands verbatim before a parser sees it, so a parse bug costs a re-run and never the data |
-| **A gap is an event** | an absence is written down with its cause and its bounds, never inferred from missing rows |
-| **The frontier is a listing** | *how far am I durable* is answered from directory entries, with no parquet decode |
-| **Venues are features** | a venue that is not compiled in cannot be reached, and a guard holds it |
-| **The tape is a cache** | delete it and `galata-tape-rebuild` writes it again from the archive |
+galata-datawatch captures market data from several venues. Every payload is
+stored verbatim before anything parses it, gaps are recorded as explicit
+events, and a queryable Parquet tape can be rebuilt from that archive at any
+time. It is the data layer of **Galata**, a low-latency algorithmic trading
+framework.
 
 > **Status: pre-0.1.0.** Capture, the archive, the tape, the broker, vault
-> integration and scheduled maintenance are built, and can be deployed as
-> launchd services. No crate is published to crates.io yet. See [Roadmap](#roadmap) for
-> what comes next, and [`design/roadmap.md`](./design/roadmap.md) for the full
-> tiered plan.
->
-> The operator UI for this record is
-> [galata-tower](https://github.com/sercanatalik/galata-tower).
+> integration and scheduled maintenance are all built, and the reference
+> deployment runs them as launchd services. Nothing is on crates.io yet. Publishing 0.1.0 is the
+> next milestone. See the [Roadmap](#roadmap).
+
+---
+
+## Contents
+
+- [Galata at a glance](#galata-at-a-glance)
+- [Design principles](#design-principles)
+- [Architecture](#architecture)
+- [The crates](#the-crates)
+- [Venues](#venues)
+- [Quick start](#quick-start)
+- [Storage layout](#storage-layout)
+- [Querying the tape](#querying-the-tape)
+- [Operations](#operations)
+  - [Configuration and secrets](#configuration-and-secrets)
+  - [Scheduled maintenance](#scheduled-maintenance)
+  - [Running as services](#running-as-services)
+- [Development](#development)
+- [Publishing](#publishing)
+- [Roadmap](#roadmap)
+- [Related repositories](#related-repositories)
+- [Licence](#licence)
+
+---
+
+## Galata at a glance
+
+Galata is a Rust framework for low-latency algorithmic trading. It covers the
+whole path from market data to orders:
+
+1. **Multi-venue market data capture.** This repository.
+2. **Research and replay.** Strategies are tested only against the data they
+   could have seen at the time.
+3. **Signal generation.** Features and signals are computed from the tape and
+   can be reproduced from the archive.
+4. **Deterministic portfolio risk controls.** Plain, auditable code that sits
+   between every decision and every order. No model can override it.
+5. **Agentic strategy execution.** A fine-tuned decision model turns market
+   signals into calibrated probabilities. Execution agents act on those
+   probabilities, inside the limits the risk layer sets.
+
+Every layer after the first reads from the record this repository keeps, so
+the record has to be complete and replayable, and it has to state its gaps.
+Backtests and live runs therefore work from the same bytes.
+
+### Infrastructure
+
+```mermaid
+flowchart LR
+    subgraph Venues
+        HL["Hyperliquid<br/>WebSocket"]
+        RHC["Robinhood Chain<br/>eth_getLogs"]
+        RHX["Robinhood Crypto<br/>signed REST"]
+    end
+
+    subgraph DW["galata-datawatch"]
+        CAP["capture<br/>one process per venue"]
+        ARC[("archive<br/>the record")]
+        TAPE[("tape<br/>rebuildable cache")]
+    end
+
+    VAULT["galata-vault<br/>config + secrets"]
+    NATS{{"NATS<br/>markets.* · status.*"}}
+    FLOWS["cereyan<br/>scheduled maintenance"]
+    TOWER["galata-tower<br/>operator UI"]
+
+    subgraph Next["Planned layers"]
+        RES["galata-research<br/>replay + backtests"]
+        SIG["signals"]
+        RISK["risk controls"]
+        EXEC["decision model<br/>+ execution agents"]
+    end
+
+    HL & RHC & RHX --> CAP
+    VAULT -. boot-time config .-> CAP
+    CAP -- "verbatim, before parsing" --> ARC
+    CAP -- normalised events --> NATS
+    FLOWS -- compact · rebuild · watch --> ARC
+    ARC -- galata-tape-rebuild --> TAPE
+    ARC & TAPE --> TOWER
+    NATS -- "status.>" --> TOWER
+    TAPE --> RES --> SIG --> RISK --> EXEC
+    NATS -. live .-> SIG
+```
+
+| Component | Role | Repository |
+|---|---|---|
+| **galata-datawatch** | capture, the archive, the tape, the broker vocabulary | this one |
+| **galata-vault** | end-to-end-encrypted configuration and secrets; the single source of both | [sercanatalik/galata-vault](https://github.com/sercanatalik/galata-vault) |
+| **galata-tower** | operator UI: axum read API and a React screen in one binary | [sercanatalik/galata-tower](https://github.com/sercanatalik/galata-tower) |
+| **cereyan** | the scheduler that runs compaction, tape rebuilds and health checks | [sercanatalik/cereyan](https://github.com/sercanatalik/cereyan) |
+| **NATS** | the live bus that downstream strategy processes subscribe to | [nats.io](https://nats.io) |
+| **galata-research** | point-in-time replay, one fill model, a run manifest | planned; not yet a repository |
+
+---
+
+## Design principles
+
+| Principle | What it means in practice |
+|---|---|
+| **Archive first** | Every payload lands verbatim before a parser sees it. A parse bug costs a re-run, never the data. |
+| **Gaps are events** | Every absence is written down with its cause and bounds. Nothing is inferred from missing rows. |
+| **The frontier is a listing** | "How far am I durable?" is answered from directory entries, with no Parquet decode. |
+| **Venues are features** | A venue that is not compiled in cannot be reached, and a guard checks that. |
+| **The tape is a cache** | Delete it and `galata-tape-rebuild` writes it again, byte for byte, from the archive. |
+| **No float money** | Prices and sizes are decimals end to end. A guard fails any `f64` on a money path. |
+| **The loop owns the clock** | Adapters are pure and clockless, so every normalisation can be replayed in a test. |
+
+---
+
+## Architecture
+
+Each venue runs as its own capture process, and every payload follows one
+path through it:
+
+```text
+  transport ─bytes─▶ Archive ──▶ Adapter::normalise ──▶ Envelope ──▶ Sink (NATS)
+  (stream │ poll    (fsync,       (pure: no clock,       (galata-wire)
+   │ block range)    rename)       no I/O)
+                        │
+                        └──────────▶ galata-tape-rebuild ──▶ tape (Parquet, by dataset)
+```
+
+- **The transport** sits above the venue seam and owns any credentials: a
+  long-lived WebSocket stream, a signed REST poll, or paging a chain by block
+  range.
+- **`Adapter`** is the venue seam, and it is pure. It turns bytes into
+  events, classifies failures, and declares the venue's subscriptions,
+  symbols and limits. It never sees a socket or a clock, and it defines no
+  method that places, cancels or amends an order.
+- **Archive, normalise, emit** is implemented once, in `ingest`, so the order
+  holds by construction rather than by convention.
+- **Positions** are generalised in `galata-segments` as
+  `Cursor::{Time, Block, Seq}`, which makes a blockchain venue a first-class
+  source rather than a special case.
+
+Normalised events are published on NATS as `markets.<venue>.<ticker>.<kind>`,
+and each capture reports its own health on `status.<venue>`. The two roots are
+granted separately, so a dashboard can read status without the market-data
+firehose.
+
+---
 
 ## The crates
 
-| crate | holds | links |
+| Crate | Holds | Links |
 |---|---|---|
-| `galata-wire` | the vocabulary: `Envelope`, `Event`, `Kind`, `Series`, `Ticker`, `Num` | `serde` only |
-| `galata-broker` | `Publisher`/`Subscriber` and the NATS implementation | `galata-wire` |
-| `galata-segments` | durable parquet segments: write, sync, rename, compact | `arrow`, `parquet` |
-| `galata-datawatch` | the record, the venue seam, the capture loop, the tape | all three |
+| [`galata-wire`](crates/galata-wire) | the vocabulary: `Envelope`, `Event`, `Kind`, `Series`, `Ticker`, `Num` | `serde` only |
+| [`galata-broker`](crates/galata-broker) | `Publisher`/`Subscriber`, subjects, identities and grants, the NATS implementation | `galata-wire` |
+| [`galata-segments`](crates/galata-segments) | durable Parquet segments: write, sync, rename, compact | `arrow`, `parquet` |
+| [`galata-datawatch`](crates/galata-datawatch) | the record, the venue seam, the capture loop, the tape, the operator binaries | all three |
 
-A downstream process that only wants to *hear* about market data takes
-`galata-wire` and `galata-broker` and links no columnar format:
+A downstream process that only needs to *hear* market data takes the first
+two, and links no columnar format:
 
 ```toml
 galata-wire   = "0.1"
 galata-broker = "0.1"
 ```
 
-## Venues are features, not crates
+`crates/galata-datawatch-vault` is an unpublished fifth member. It keeps the
+vault integration in the workspace so that a guard can prove the four
+published crates link none of it.
+
+### Binaries
+
+| Binary | Purpose |
+|---|---|
+| `galata-datawatch` | capture one venue, with configuration from a file |
+| `galata-datawatch-vault` | the same, with configuration and secrets fetched from galata-vault at boot |
+| `galata-tape-rebuild` | project the archive into the tape; `--replace` rebuilds a venue's range |
+| `galata-compact` | merge the small segments of closed days (never today) |
+| `galata-watch` | judge the record's freshness and completeness, per venue |
+| `galata-retain` | report, and optionally delete, what a retention horizon would expire |
+
+---
+
+## Venues
 
 ```sh
 cargo add galata-datawatch --features rh-chain
 ```
 
-`hyperliquid` (WebSocket), `rh-chain` (block cursor over `eth_getLogs`) and
-`rh-crypto` (signed REST poll) ship in-tree.
+| Feature | Venue | Source | Credential | Instruments (v0.1) |
+|---|---|---|---|---|
+| `hyperliquid` | Hyperliquid perps, including the HIP-3 `xyz` dex | WebSocket stream | none | BTC, ETH, HYPE, `xyz:WTIOIL`, `xyz:XYZ100`, `xyz:GOLD` |
+| `rh-chain` | Robinhood Chain (Arbitrum Orbit L2, chain 4663) | block cursor over `eth_getLogs`, bounded at finalized | provider RPC key | tokenized equities |
+| `rh-crypto` | Robinhood Crypto Trading API | signed REST poll (Ed25519) | API key + private key | top of book |
 
-**A venue can also live in your own crate.** `Adapter` carries a worked example
-that compiles, and the claim itself is checked by
-[`tests/out_of_tree_venue.rs`](./crates/galata-datawatch/tests/out_of_tree_venue.rs)
-— cargo builds that file as its own crate, so it sees exactly what a stranger
-sees. If a venue needs something private, the compiler says which thing there
-rather than in somebody's repository. The venue it implements is fictional on
-purpose: one resembling an in-tree venue would tempt reuse of its helpers, and
-reuse is what makes a test pass for the wrong reason.
+Hyperliquid captures `bbo`, trades, candles and `activeAssetCtx`. Its `bbo`
+and rh-crypto's `best_bid_ask` share one `quotes` dataset, so a cross-venue
+quote comparison is a single-table query.
 
-docs.rs is told `all-features = true`, so every venue appears and every gated
-item carries a badge naming the feature it needs.
+**A venue can live in your own crate.** `Adapter`'s documentation carries a
+worked example that compiles.
+[`tests/out_of_tree_venue.rs`](crates/galata-datawatch/tests/out_of_tree_venue.rs)
+checks that claim: cargo builds the file as a separate crate, so it sees only
+what an outside user sees. If a venue needs something private, the compiler
+names it. docs.rs builds with `all-features = true`, so every venue is
+documented and each gated item shows the feature it needs.
 
-## Vault-backed capture
+---
 
-The unpublished `galata-datawatch-vault` binary fetches its configuration once
-at boot and hands the same text to the same validator as the file binary. When
-configuration names a broker password, it fetches that secret once too. The
-capture loop holds neither the vault nor the credential.
+## Quick start
 
-Install the published `galata-vault 0.4` tools, then provision a project and
-environment. Keep the recovery kit produced by `gv init` somewhere safe.
+Requirements: Rust 1.98 (pinned by `rust-toolchain.toml`). NATS is optional
+for local capture, and [uv](https://docs.astral.sh/uv/) is needed for the
+scheduled flows.
 
 ```sh
+git clone https://github.com/sercanatalik/galata-datawatch
+cd galata-datawatch
+
+cargo test                                   # no network access
+cargo run --release --bin galata-datawatch   # capture Hyperliquid into var/archive
+cargo run --release --bin galata-tape-rebuild -- --help
+```
+
+The capture binary reads [`config/datawatch.toml`](config/datawatch.toml),
+the committed and annotated configuration, unless `GALATA_CONFIG` names
+another file. A configuration that is absent, unparseable or out of bounds is
+rejected at load, and the process exits non-zero before it does anything.
+
+---
+
+## Storage layout
+
+```text
+  var/archive/                    THE RECORD: one row per payload, verbatim,
+   venue=hyperliquid/               before any parse was attempted
+     kind=quotes/
+       date=2026-09-20/
+         t-1758326400000000_1758326460000000_4711_3.parquet
+         failures/                  same sequence, no payload column
+
+  var/tape/                       THE CACHE: one row per event, typed, by
+   kind=quotes/                     venue time, rebuildable from the record
+     date=2026-09-20/
+       s-1790058447399177_1790058637809031.parquet
+```
+
+The archive is partitioned by venue, because its unit is the capture: a
+venue's bytes are kept, replayed or dropped as one subtree. The tape's unit is
+the dataset, so one dataset across every venue is a single prefix. In the
+tape, `venue` is a column and deliberately not a directory level. Written
+both ways, DuckDB's `hive_partitioning` flag decides which value a reader
+sees, with no warning.
+
+Segment filenames carry the range they cover and the fact that they are
+durable. A segment is only named after its bytes have been synced, so readers
+never see a half-written file. See
+[`galata-segments`](crates/galata-segments/README.md).
+
+---
+
+## Querying the tape
+
+The tape is plain, Hive-partitioned Parquet. DuckDB, polars and pyarrow read
+it with no flags:
+
+```sql
+SELECT * FROM read_parquet('var/tape/kind=quotes/**/*.parquet');
+```
+
+| Dataset | Contents |
+|---|---|
+| `quotes` | top of book: bid/ask price and size |
+| `trades` | executions, with the venue's `trade_id` |
+| `candles` | OHLCV bars, live and walked back through venue history |
+| `funding` | funding rates |
+| `marks` | mark, index and oracle prices, and open interest |
+| `gaps` | every known absence, with cause and bounds |
+
+Two things to know before filtering:
+
+- **`at_micros` is null when the venue did not timestamp the event.** That is
+  common. Over a 24-minute run, 100% of `marks` and 89% of `funding` had no
+  venue time, against 0% of `quotes` and `trades`. Filling in the receipt time
+  would turn missing information into a latency of zero, so the column stays
+  null, and `WHERE at_micros BETWEEN …` silently drops all of `marks`. Filter
+  on `recv_micros`, or use the bounded reader.
+- **An execution can arrive twice.** A venue that replays recent history on
+  subscribe does so again on every reconnection: 1.55% of a 24-minute run,
+  once per session rotation. Both receipts are recorded because both
+  happened. Group on `trade_id` to count each execution once.
+
+---
+
+## Operations
+
+### Configuration and secrets
+
+In production, [galata-vault](https://github.com/sercanatalik/galata-vault) is
+the single source of configuration and secrets. The unpublished
+`galata-datawatch-vault` binary fetches the configuration document once at
+boot and passes it to the same validator the file binary uses. If the
+configuration names a broker password, it fetches that secret once too. The
+capture loop never holds the vault or the credential.
+
+```sh
+# Install the published galata-vault 0.4 tools.
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-installer.sh | sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-server-installer.sh | sh
 
+# Provision a project and environment. Keep the recovery kit gv init writes.
 gv-server local
 gv init galata-datawatch --server http://127.0.0.1:8750
 gv env add galata-datawatch/prod
 gv config set datawatch --format toml --env galata-datawatch/prod < config/datawatch.toml
 ```
 
-The binary opens one vault through the SDK's environment contract: set
+The binary opens the vault through the SDK's environment contract: set
 `GV_SERVER`, then exactly one of `GV_TOKEN` or `GV_TOKEN_FILE`. A token file
-must be mode `0600` or `0400`; setting both token variables is refused. The
-Datawatch source does not duplicate the SDK's authentication rules.
-
-Use the smallest credential the document needs:
+must be mode `0600` or `0400`. Mint the smallest token the document needs:
 
 ```sh
 # No [broker] block: configuration documents only.
 gv token mint --scope config --env galata-datawatch/prod
 
-# With [broker]: read the document and only the named broker secret.
+# With [broker]: the document, plus only the named broker secret.
 printf %s "$BROKER_PASSWORD" | \
   gv set GALATA_DATAWATCH_PASSWORD --env galata-datawatch/prod
 gv token mint --scope read --only GALATA_DATAWATCH_PASSWORD \
   --env galata-datawatch/prod
 ```
 
-`password_var` names an environment variable for the file binary's
-`EnvSecrets`, and a vault secret name for `VaultSecrets`. Use a child vault when
-credentials must be cryptographically isolated between Datawatch instances or
-venues; an allow-list is server policy, not a second encryption boundary.
+`password_var` names an environment variable for the file binary, and a vault
+secret for the vault binary. Use a child vault when credentials must be
+cryptographically isolated between instances or venues. An allow-list is
+server policy, not a second encryption boundary.
 
-The integration removes the broker secret from the Datawatch capture process's
-environment. The current generated NATS authorization file still reads that
-password from the NATS server's environment.
+The broker secret is kept out of the capture process's environment. The
+generated NATS authorization file still reads it from the NATS server's
+environment.
 
-## Two stores
+### Scheduled maintenance
 
-```
-  var/archive/                    THE RECORD — one row per payload, verbatim
-   venue=hyperliquid/               before any parse was attempted
-     kind=quotes/
-       date=2026-09-20/
-         1758326400000000-1758326460000000-4711-3.parquet
-         failures/                  same seq, no payload column
-
-  var/tape/                       THE CACHE — one row per event, rebuildable
-   kind=quotes/                     from the record at any time
-     venue=hyperliquid/
-       date=2026-09-20/
-         part-000000123456-000000234567.parquet
-```
-
-`venue` sits above `kind` in the archive and below it in the tape. The
-archive's unit is the capture — a venue's bytes are retained, replayed or
-dropped as a subtree. The tape's unit is the dataset, so *this dataset across
-every venue* is one prefix.
-
-## Reading the tape
-
-```sql
-SELECT * FROM read_parquet('var/tape/kind=quotes/**/*.parquet');
-```
-
-Two things to know before filtering it.
-
-**`at_micros` is null where the venue did not timestamp the event**, which is
-not rare: measured over a 24-minute run, 100% of `marks` and 89% of `funding`
-carry no venue time, against 0% of `quotes` and `trades`. Giving those rows our
-receipt time would turn an absence of information into a latency of zero, so
-the column is left null — and a `WHERE at_micros BETWEEN …` drops all of
-`marks` without saying so. Filter on `recv_micros`, or use the bounded reader,
-which keeps such a row once the partition holding it is in range.
-
-**An execution can arrive twice.** A venue that sends recent history on
-subscribe redelivers it on every reconnection — measured at 1.55% of a
-24-minute run, once per session rotation. Both receipts are recorded because
-both arrived; group on `trade_id` to count each execution once.
-
-## Scheduling the maintenance
-
-Capture writes the archive; four one-shot tools keep it. **The tape exists only
-when `galata-tape-rebuild` runs**, so without a schedule the queryable half
-stops at whatever day somebody last rebuilt by hand. `py/` is the schedule: a
-[cereyan](https://github.com/sercanatalik/cereyan) lane whose flows are
-subprocess calls to the release binaries, and nothing else.
+Capture writes the archive, and four one-shot tools maintain it. **The tape
+exists only when `galata-tape-rebuild` runs**, so it needs a schedule. The
+schedule is `py/`: a [cereyan](https://github.com/sercanatalik/cereyan) lane
+whose flows only call the release binaries as subprocesses.
 
 | Flow | Runs | When (UTC) |
 |---|---|---|
 | `compact-the-archive` | `galata-compact` | daily 00:10 |
 | `project-the-closed-days` | `galata-tape-rebuild --replace`, the last 3 closed days, per declared venue | daily 00:40 |
-| `report-what-retention-would-expire` | `galata-retain`, the report only | Sundays 01:30 |
+| `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
-| `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | never; a backfill over history |
+| `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
 uv sync --project py
-cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open   # from py/: runs import `flows`
+cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
 ```
 
-**Its own cereyan home.** `~/.cereyan` is shared with every other cereyan
-project on the machine, and a server started on it imports and schedules
-their flows too. `scripts/install-services.sh flows` sets this for you.
+- **The lane has its own cereyan home.** `~/.cereyan` is shared with every
+  other cereyan project on the machine, and a server started there would
+  schedule their flows too.
+- **One configuration per deployment.** Capture and the lane both use
+  `var/datawatch.local.toml` if it exists (the committed file plus this
+  machine's `[broker]` and `[watch]` blocks), and `config/datawatch.toml`
+  otherwise. The two are never merged.
+- **Build the features your venues need.** A binary that cannot speak a
+  declared venue rejects the whole configuration, and every scheduled job
+  fails with the venue's name until the build matches.
 
-**One configuration per deployment.** Capture and the lane both run from
-`var/datawatch.local.toml` when it exists — the committed file plus this
-machine's `[broker]` and `[watch]` — and from `config/datawatch.toml`
-otherwise. Whole-file, never merged.
+Several things are ruled out by construction, and
+`scripts/check-python-flows.sh` enforces them over the lane's import graph:
 
-**Build with the features your declared venues need.** `rh-chain` is not a
-default feature, and a binary that does not speak a declared venue refuses the
-whole configuration at load — every scheduled job fails, by name, until the
-build matches the file.
+- **No credentials are passed.** A job's environment is built from scratch
+  (`GALATA_CONFIG`, `PATH`, `RUST_LOG`, `NO_COLOR`). The rebuild uses
+  `AdapterConfig::for_replay`, which withholds keyed providers, so a keyed
+  chain venue can be projected every night without a key in reach.
+- **Nothing deletes.** `galata-retain --delete` is not a flow, because
+  cereyan's MCP `run_flow` can start any registered flow.
+- **The scheduler holds no state that matters.** The projection takes a fixed
+  window, not a cursor, so deleting cereyan's store changes nothing.
 
-Under launchd, that last line is the `ProgramArguments` of a `KeepAlive` agent
-(cereyan's [run-as-a-service guide](https://github.com/sercanatalik/cereyan/blob/main/docs/guides/run-as-a-service.md)
-has the plist). Loading it is left to you; nothing here installs a service.
+### Running as services
 
-What the lane will not do, by construction rather than by care:
+On macOS the deployment runs as launchd agents (`com.galata.*`). They are
+rendered from one tracked template and restarted whenever they exit.
 
-- **Pass a credential.** A job's environment is built — `GALATA_CONFIG`,
-  `PATH`, `RUST_LOG`, `NO_COLOR` — and nothing is inherited from the scheduler.
-  None needs one: the rebuild builds adapters with
-  `AdapterConfig::for_replay`, which withholds a keyed provider rather than
-  reading it, so a chain venue behind a provider key projects nightly with no
-  key in reach.
-- **Delete.** `galata-retain --delete` is not a flow, because cereyan's MCP
-  `run_flow` starts any registered one.
-- **Hold truth.** Deleting cereyan's store changes nothing about what a flow
-  does next: the projection takes a fixed window, not a cursor.
-- **Retry what the next night repairs.** Only `rebuild-one-day` retries, only
-  on exit `1`, never on a bad argument.
-
-`scripts/check-python-flows.sh` holds those rules over the lane's import graph,
-and `check-all.sh` runs the lane's tests offline, so the gate needs
-[uv](https://docs.astral.sh/uv/).
-
-## Running as services
-
-On macOS, the deployment's four long-running processes are launchd agents,
-rendered from one tracked template and restarted whenever they exit:
+| Service | Listens on | Reads |
+|---|---|---|
+| `vault` (`gv-server local`) | `127.0.0.1:8750` | its data directory, `~/.local/share/galata-vault` |
+| `nats` | `127.0.0.1:4222` | all three broker passwords |
+| `capture:<venue>` | outbound only | its venue's configuration and credentials |
+| `tower` | `127.0.0.1:8777` | the `reader` broker password |
+| `flows` (cereyan) | `127.0.0.1:4200` | nothing |
 
 ```sh
-cargo build --release                  # capture and the flows run release binaries
+cargo build --release
 (cd ../galata-tower && cargo build --release)
-scripts/install-services.sh            # nats, capture:hyperliquid, tower, flows
-scripts/install-services.sh capture:rh-chain      # one more venue
-scripts/install-services.sh --uninstall tower     # or remove one
-scripts/install-services.sh --status              # every com.galata.* agent, flagging ones it did not install
+scripts/install-services.sh                        # vault, nats, capture:hyperliquid, tower, flows
+scripts/install-services.sh capture:rh-chain       # add a venue
+scripts/install-services.sh --uninstall tower      # remove one
+scripts/install-services.sh --status               # every com.galata.* agent, flagging strays
 ```
 
-Every agent runs `scripts/run-service.sh <service>`. Five services, `vault`
-first: `gv-server local` (loopback, data in `~/.local/share/galata-vault`) is
-the deployment's secret store. **Each service reads only its own secrets,
-through a token minted for it alone** — NATS all three broker passwords,
-capture its venue's, the tower the `reader`'s, the flows none — via
-`galata-vault-exec --only NAME -- <command>`. Not `gv run`: `gv` reads through
-the owner key, which this machine holds, so it would hand any service every
-secret. No secret goes in a plist, which launchd leaves readable by every
-user. Logs are `var/logs/<service>.log`.
-
-Once, on a new machine, after `scripts/install-services.sh vault`:
+First-time setup on a new machine, after `scripts/install-services.sh vault`:
 
 ```sh
 scripts/provision-vault.sh        # project galata-datawatch, env .../prod, secrets imported
-scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, 0600, 365 days
+scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 365 days
 ```
 
-**The recovery kit** lands in `var/galata-datawatch-recovery.gvkit`. It is
-the only way to recover the project — move it to offline storage and delete
-that copy. **The tokens expire** after 365 days, the server's maximum:
-re-run `mint-service-tokens.sh` before then and reinstall the services.
+- **Each service reads only its own secrets**, through a token minted for it
+  alone, using `galata-vault-exec --only NAME -- <command>`. `gv run` is not
+  used because it reads through the owner key, which would give any service
+  every secret. No secret goes into a plist, since launchd leaves plists
+  readable by every user.
+- **The recovery kit** is written to `var/galata-datawatch-recovery.gvkit`.
+  It is the only way to recover the project, so move it to offline storage
+  and delete that copy.
+- **Tokens expire** after 365 days, the server's maximum. Re-run
+  `mint-service-tokens.sh` and reinstall the services before then.
+- **Stopping is clean.** Capture treats SIGTERM as a shutdown: it flushes,
+  and the next start records the outage as `downtime`, not a crash.
+  Installing a service twice replaces it, and a hand-started copy is stopped
+  first, because two captures of one venue would be two writers to one
+  archive.
 
-A stop is SIGTERM, which capture treats as a clean shutdown — it flushes,
-marks, and the next start records the outage as `downtime` rather than a
-crash. Installing twice replaces the agent, and a hand-started instance of
-the same service is stopped first: two captures of one venue would be two
-writers of one archive scope.
+Logs are written to `var/logs/<service>.log`.
 
-## Building
+---
+
+## Development
 
 ```sh
-cargo test                 # no network is touched
-scripts/check-all.sh       # format, lints, guards, the guard harness, tests, the lane
-scripts/test-guards.sh     # proves every guard can fail
+cargo test                 # the full suite; no network access
+scripts/check-all.sh       # format, lints, guards, guard harness, tests, the Python lane
+scripts/test-guards.sh     # proves each guard can fail
 ```
 
-**CI runs `check-all.sh` and nothing else**, so the badge above and the command
-above cannot disagree. Everything after the dependency fetch runs `--offline`:
-the workspace is provable without a network, and an accidental network
-dependency should fail rather than succeed quietly.
+**CI runs `scripts/check-all.sh` and nothing else**, so the badge and the
+local command always agree. Everything after the dependency fetch runs with
+`--offline`, so an accidental network dependency fails instead of passing
+quietly.
+
+The gate includes some twenty structural guards under [`scripts/`](scripts).
+Each one is planted with a violation by `test-guards.sh` to show it can go
+red. Among them:
+
+| Guard | Holds |
+|---|---|
+| `check-no-float-money.sh` | no floating-point type on a money path |
+| `check-clock-discipline.sh` | nothing below the capture loop reads a clock |
+| `check-ingest-callers.sh` | nothing reaches past the one archive → normalise → emit path |
+| `check-no-transport.sh` | with `capture` off, `galata-datawatch` links no transport |
+| `check-venue-boundary.sh` | exactly one module names a venue; everything above the seam holds a `dyn Adapter` |
+| `check-vault-reach.sh` | no published crate links the vault |
+| `check-secret-reach.sh` | a secret is read in one place |
+| `check-grant-coverage.sh` | every NATS subject root is granted to someone |
+| `check-feature-matrix.sh` | every advertised feature combination builds |
+| `check-package.sh` / `check-tarball-builds.sh` | every crate builds from its own published tarball |
+
+Design documents live in [`design/`](design), with every measured figure and
+the tool that produced it in [`design/measured.md`](design/measured.md).
+Changes move through `planning/` → `design/` → `openspec/`.
+
+---
 
 ## Publishing
 
-Not published yet. When it is, **the order is forced by the dependency graph**
-and getting it wrong fails partway through a sequence that cannot be undone —
-a crates.io version is permanent.
+Not published yet. **The order is fixed by the dependency graph**, and a
+mistake fails partway through a sequence that cannot be undone, because a
+crates.io version is permanent:
 
 ```text
   galata-wire        no internal dependencies   ─┐
@@ -298,81 +501,99 @@ a crates.io version is permanent.
   galata-datawatch   needs wire, segments, broker
 ```
 
-`cargo package` on `galata-broker` or `galata-datawatch` **fails today**, and
-correctly so — it cannot resolve a dependency that is not on the registry:
-
-```text
-  error: failed to prepare local package for uploading
-  Caused by: no matching package named `galata-wire` found
-```
-
-All four are verified before any publish happens, and by the gate rather than
-by remembering:
+Every tarball is verified in the gate before any publish:
 
 ```sh
 cargo package --workspace     # every crate, built from its own tarball
 ```
 
-`cargo package --workspace` builds a temporary registry under `target/package`,
-publishes each crate into it, and compiles every unpacked tarball against the
-*packaged* versions of the rest — not against the path dependencies this
-workspace supplies. That distinction is the point: inside a workspace cargo
-prefers the path dependency, so a crate can compile perfectly here while using
-a sibling change its own manifest does not require.
+This builds a temporary registry under `target/package` and compiles each
+unpacked tarball against the *packaged* versions of its siblings, not the
+workspace's path dependencies. Inside a workspace, cargo prefers the path
+dependency, so without this a crate can build here while relying on a sibling
+change its own manifest does not require.
 
-Two guards, two questions. `scripts/check-package.sh` asks what a tarball would
-*contain*, using `cargo package --list`, which resolves nothing — so it still
-answers for a crate that will not build. `scripts/check-tarball-builds.sh` asks
-whether it *compiles*, which is the half that could not be checked at all
-before `--workspace` existed. About 19s warm, 95s on a cold tree, measured.
+`scripts/check-package.sh` checks what each tarball *contains*.
+`scripts/check-tarball-builds.sh` checks that it *compiles*, with default
+features and with each feature set this README advertises. Allow a moment
+between publishes so the registry index carries each crate before the next
+one resolves it. The full procedure is in [RELEASING.md](RELEASING.md).
 
-Verification builds default features; combinations are
-`scripts/check-feature-matrix.sh`'s.
-
-Allow a moment between publishes: the registry index needs to carry a crate
-before the next one can resolve it.
+---
 
 ## Roadmap
 
-Datawatch is the first layer of Galata. The plan runs in two horizons. The
-first finishes and publishes this repository. The second builds the rest of
-the framework on top of it.
+The ordering rule is: *build first the things whose wrong answer cannot be
+recovered.* A byte that was never captured is gone for good, so the record
+came before everything else. The full tiered plan, with the reasoning for
+each tier, is [`design/roadmap.md`](design/roadmap.md).
 
-### Near term: this repository
+### This repository
 
-| Item | Status | Summary |
+| Tier | Milestone | Status |
 |---|---|---|
-| **Publish 0.1.0** | next | Release `galata-wire`, `galata-segments`, `galata-broker` and `galata-datawatch` to crates.io together, in dependency order. `cargo package --workspace` already verifies every tarball in the gate. |
-| **`bound-the-replay`** | planned | A view of the tape *as it stood at time T*, so that a replay host cannot see data that arrived after its simulated clock. It lands together with its first caller, `galata-research`. See [`planning/bound-the-replay.md`](./planning/bound-the-replay.md). |
-| **`rh-crypto` live endpoint** | open | The signed poll loop is built and tested against a local server. Pointing it at the live venue will settle two questions its published documentation disagrees on. |
-| **Retention policy** | operator's decision | `galata-retain` works but ships no default horizon. How long market data is kept is left to the operator. |
+| 0 | **The spine**: `galata-wire` and `galata-segments` | done |
+| 1 | **The record**: one venue, archive-first capture, gaps as events | done |
+| 2 | **HIP-3 dex support** and the venue's universe check; the planned trading calendar was dropped after the record showed all six instruments trade around the clock | done |
+| 3 | **The tape**, the bounded reader, compaction, rebuild and retention tools | done |
+| 4 | **The broker**: NATS publisher/subscriber, identities and grants | done |
+| 5 | **The vault**: configuration and secrets from galata-vault | done |
+| 6 | **galata-tower**: the operator UI over the record | done |
+| 7 | **`rh-chain`**: Robinhood Chain via finalized `eth_getLogs`, with reorgs recorded as rows | done |
+| 8 | **`rh-crypto`**: the signed REST poll | built; first live poll pending credentials |
+| 9 | **Scheduling**: the cereyan lane, `galata-watch`, launchd services | done |
+| 10 | **Publish 0.1.0** of the four crates to crates.io | **next** |
 
-### Longer term: the Galata framework
+Also in progress or planned here:
 
-Each layer below reads from the record kept here and never writes to it.
-Archive-first, gaps as events and deterministic rebuilds keep backtests and
-live runs working from the same data.
+- **`replace-by-source`** (in progress). `galata-tape-rebuild --replace` must
+  never delete tape rows it did not rebuild, even when history walked at boot
+  lands in a day that another receipt day also fed.
+- **`bound-the-replay`** (planned). A view of the tape *as it stood at time
+  T*, so a replay host cannot see data that arrived after its simulated
+  clock. It lands together with its first caller, `galata-research`. See
+  [`planning/bound-the-replay.md`](planning/bound-the-replay.md).
+- **Retention policy** (the operator's decision). `galata-retain` works but
+  ships no default horizon.
 
-1. **Research and replay.** `galata-research` replays captured history through
-   point-in-time views, so a strategy is tested only against data it could
-   have seen when it made its decision.
-2. **Signal generation.** Features and signals are computed from the tape and
-   published over the same broker. They are versioned and reproducible from
-   the archive.
-3. **Deterministic portfolio risk controls.** Exposure, limit and loss checks
-   are plain, deterministic code. They sit between every decision and every
-   order, and no model can override them.
-4. **Agentic strategy execution.** A fine-tuned decision model turns signals
-   into calibrated probabilities. Execution agents size and route orders from
-   those probabilities, inside the limits the risk layer sets.
-5. **Low-latency execution path.** Venue order entry is built on the same
-   adapter seam as capture, with latency budgets that are measured and held by
-   the gate.
+### The Galata framework
+
+Each later layer reads from the record kept here and never writes to it.
+
+| Phase | Layer | Scope | Status |
+|---|---|---|---|
+| 1 | **Data foundation** | multi-venue capture, the archive and tape, the broker, the vault, the operator UI | built; publishing |
+| 2 | **Research and replay** | `galata-research`: point-in-time replay, a `Strategy` seam shared with live, a virtual clock, one pessimistic fill model, a hashed run manifest, coverage and gaps reported as figures | planned |
+| 3 | **Signal generation** | features and signals computed from the tape, published over the same broker, versioned and reproducible from the archive | planned |
+| 4 | **Deterministic risk controls** | exposure, limit and loss checks in plain, deterministic code, between every decision and every order; no model can override them | planned |
+| 5 | **Agentic strategy execution** | a fine-tuned decision model that turns signals into calibrated probabilities; execution agents size and route orders from them, within the risk limits | planned |
+| 6 | **Low-latency order entry** | venue order entry on the same adapter seam as capture, a paper venue before any live one, and latency budgets measured and enforced by the gate | planned |
+
+Two rules carry across every phase:
+
+- **Research reports; it never deploys.** A research result reaches a live
+  configuration only through a person. Nothing in research gates, sizes or
+  retires anything live.
+- **Research comes before the trading half.** Three earlier rewrites of this
+  system built trading first and deferred research, and two of them never got
+  back to it. Here the harness that says whether a strategy is worth trading
+  comes first.
 
 These layers are design intent, not shipped code. Each one moves through
 `planning/` → `design/` → `openspec/` before it is built. See
-[`planning/README.md`](./planning/README.md).
+[`planning/README.md`](planning/README.md).
+
+---
+
+## Related repositories
+
+- [**galata-tower**](https://github.com/sercanatalik/galata-tower): the
+  operator UI for this record.
+- [**galata-vault**](https://github.com/sercanatalik/galata-vault):
+  end-to-end-encrypted configuration and secrets.
+- [**cereyan**](https://github.com/sercanatalik/cereyan): the scheduler that
+  runs the maintenance lane.
 
 ## Licence
 
-MIT. See [LICENSE-MIT](./LICENSE-MIT).
+MIT. See [LICENSE-MIT](LICENSE-MIT).
