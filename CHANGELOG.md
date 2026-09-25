@@ -72,9 +72,13 @@ First release. Nothing is on crates.io yet, so everything is new.
   none should be; the request is proved against a local server.
 - The tape: parquet a `SELECT` can read with no flags, rebuilt deterministically
   — twice over a frozen archive gives identical segment names and identical
-  bytes. Every tape segment holds one venue and says so in its footer
-  (`galata.venue`); `--replace` replaces only the rebuilt venue's segments,
-  since a partition is shared by every venue that supplies its dataset.
+  bytes. Every tape segment holds one venue's rows from one receipt day and
+  says so in its footer (`galata.venue`, `galata.source_day`); `--replace`
+  (`Replace::SourceDays`) removes only the rebuilt venue's segments from the
+  receipt days it reads, since a partition is shared by every venue that
+  supplies its dataset **and** by every receipt day whose walk reached back
+  into its date. It refuses a range that splits a day and a segment missing
+  either label, removing nothing.
 - `LabelCache`, `Bound::of_cached`, `Reader::open_cached`: a caller asking
   repeatedly reads each segment's label once, not once a call.
 - The bounded reader's `Bound` is a position **per venue** (`positions`,

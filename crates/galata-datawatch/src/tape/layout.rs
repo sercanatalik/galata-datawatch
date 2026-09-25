@@ -309,6 +309,7 @@ mod tests {
         for (i, seq) in seqs.iter().enumerate() {
             tape.take(Row {
                 stream_seq: *seq,
+                source_recv_micros: 86_400_000_000,
                 envelope: Envelope::new(
                     Venue::new(venue).unwrap(),
                     Ticker::new("BTC").unwrap(),

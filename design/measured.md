@@ -3583,3 +3583,71 @@ The 52 s is a planned restart and a connection handover. 300 s is about six
 times the worst silence healthy capture has produced and a hundred times the
 soak's — far enough that a finding means capture stopped, near enough that
 it is found at the next hourly watch.
+
+## `--replace` took other receipt days' rows, and every boot's walk made it happen — 2026-09-25
+
+**Found by reasoning, then run before anything was changed**, on a copy of the
+real `var/archive` and `var/tape` with the release binary. The tape partitions
+by the **venue's** time; the rebuild reads the archive by **receipt** day. A
+boot's walk receives old history today — the 09-25 boot walked candles and
+funding back to 09-22 06:30, and the 09-22 boot had walked back to 09-20 — so
+one `kind=/date=` partition is fed by several receipt days. `--replace`
+removed every segment of the venue in each partition it wrote.
+
+```
+  tonight's projection    --replace hyperliquid 2026-09-23 2026-09-26   "3 segments replaced"
+    candles/date=2026-09-22   2,518 rows (received 09-22) → 6,306 (received 09-25 only)
+    funding/date=2026-09-22     415                      →   102
+    gaps/date=2026-09-22         72                      →    24
+
+  the obvious repair      --replace hyperliquid 2026-09-22              "11 segments replaced"
+    date=2026-09-22           the 09-22 rows back, the walked rows gone
+    candles/date=2026-09-20   7,883 →   774
+    funding/date=2026-09-20  13,394 →    12
+```
+
+**No order of per-day replacements converged**: each removed what the other
+wrote, and only one run over every receipt day produced the right tape. The
+worst casualty is `gaps` — a tape short of gap rows reads as covered where it
+is not. `quotes`, `trades` and `marks` were untouched only because the venue
+serves no history for them, so no walk reaches back into their dates.
+
+**Fixed by the unit the rebuild reads** (`replace-by-source`). A tape segment
+now holds one venue's rows from one **receipt** day and states that day in its
+footer (`galata.source_day`), and replacement removes a segment only when its
+venue is rebuilt *and* its source day is in the run's range — anywhere in the
+tape, never by the partition it sits in. Replacement by sequence range was
+considered and does not work alone: the nightly window slides a day, so last
+night's segment spans days tonight's run half-reads, and neither removing nor
+keeping it is right until segments are cut at receipt days — at which point
+the day is the simpler key.
+
+`a_walked_day_does_not_cost_the_live_day_its_rows` and
+`rebuilding_the_live_day_leaves_the_walked_rows` were written first and failed
+on the unchanged code with exactly the loss above.
+`any_order_of_day_rebuilds_converges_on_the_full_rebuild` holds the property
+the defect broke: every order of three walked receipt days, from an empty tape
+and from a full one, ends byte-identical to a single full rebuild.
+
+**Proved on a fresh copy of the real record**, with the rebuilt release binary:
+
+- **The old tape refuses.** `--replace hyperliquid 2026-09-23 2026-09-26` over
+  the 14 pre-change segments exited 1, naming
+  `kind=candles/date=2026-09-20/s-21_1790058447399152.parquet` and the remedy,
+  and `diff -r` found the tape unchanged.
+- **One full rebuild, then tonight's projection, is the full rebuild.** The
+  tape removed and rebuilt `2026-09-20 → 2026-09-26` (696,797 payloads →
+  926,139 rows in 29 segments, 5.63 s). Then the nightly run `[09-23, 09-26)`
+  with `--replace` (13 segments replaced, 4.43 s): `diff -r` against the full
+  rebuild, **identical**. Then the reverse repair, `--replace 2026-09-22`
+  (11 replaced): **identical** again.
+- **Nothing lost against the pre-change tape**: 0 of 24 `(kind, date)`
+  partitions hold fewer rows. The two the defect had emptied hold both receipt
+  days: `candles/date=2026-09-22` 2,518 → 8,824 (= 2,518 + 6,306 walked),
+  `funding` 415 → 517, `gaps` 72 → 96.
+- **What the split costs: 5 segments.** 29 segments over 24 partitions, and
+  the extra five are exactly the partitions a walk reached into
+  (`candles` and `funding` on 09-20 and 09-22, `gaps` on 09-22), one extra
+  receipt day each. The removal plan reads two labels per segment; at the
+  ~20 µs a label measured in `examples/cost-of-labels.rs` that is about 1 ms
+  over this tape, inside a 4.43 s run.

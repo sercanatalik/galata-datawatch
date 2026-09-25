@@ -509,6 +509,7 @@ mod tests {
     fn row_for(seq: u64, venue: &str, ticker: &str, at: Option<i64>) -> Row {
         Row {
             stream_seq: seq,
+            source_recv_micros: at.unwrap_or(100 * DAY),
             envelope: Envelope::new(
                 Venue::new(venue).unwrap(),
                 Ticker::new(ticker).unwrap(),
@@ -618,6 +619,7 @@ mod tests {
         tape.take(row(9, "hyperliquid", Some(100 * DAY)));
         tape.take(Row {
             stream_seq: 3,
+            source_recv_micros: 100 * DAY,
             envelope: Envelope::new(
                 Venue::new("hyperliquid").unwrap(),
                 Ticker::new("BTC").unwrap(),
@@ -830,6 +832,7 @@ mod tests {
     fn funding_row(seq: u64, venue: &str) -> Row {
         Row {
             stream_seq: seq,
+            source_recv_micros: 100 * DAY,
             envelope: Envelope::new(
                 Venue::new(venue).unwrap(),
                 Ticker::new("BTC").unwrap(),

@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for envelope in hl.normalise(&hl.classify(frame, at))? {
         tape.take(Row {
             stream_seq: 1,
+            source_recv_micros: envelope.recv_micros,
             envelope,
         });
     }
@@ -56,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for envelope in rh_crypto::wire::read(&venue, &parsed, &tickers, at) {
         tape.take(Row {
             stream_seq: 2,
+            source_recv_micros: envelope.recv_micros,
             envelope,
         });
     }

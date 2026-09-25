@@ -213,6 +213,12 @@ different shape from the one planned here.
 - ~~**A `--replace` flag for the rebuild.**~~ **Done**, and it was not a
   convenience: Tier 9 runs the rebuild from a scheduler, every scheduler
   retries, and a retry after the archive has grown wrote both copies.
+  **And it took rows it had not rebuilt** (2026-09-25, `replace-by-source`):
+  the tape dates rows by the venue's time and a boot's walk receives old
+  history today, so a partition holds several receipt days and replacing one
+  removed the others'. Measured on a copy of the real record — no order of
+  per-day rebuilds converged. Replacement is now by venue **and** receipt day,
+  each stated in the segment's footer (`design/measured.md`).
 - ~~**`stream_seq` is not unique across restarts.**~~ **Fixed**: the loop seeds
   the archive from the clock it already reads, because
   `check-clock-discipline.sh` forbids the archive reading one itself. Verified

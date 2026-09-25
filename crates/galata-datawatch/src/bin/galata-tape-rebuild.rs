@@ -87,11 +87,15 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             eprintln!(
                 "usage: galata-tape-rebuild [--replace] <venue> <date>\n       \
                  galata-tape-rebuild [--replace] <venue> <from-date> <to-date>   (half-open)\n\n\
-                 --replace removes this venue's segments from the partitions this run will write, \
-                 BEFORE writing them, so this venue's rows there are absent for the duration of the \
-                 rebuild. Other venues' segments in the same partitions are left alone. The tape is a cache and the \
-                 archive is untouched, so the remedy for a crash in that window is to run it \
-                 again.\n\n\
+                 --replace removes, from anywhere in the tape, this venue's segments whose \
+                 payloads were RECEIVED on the days this run reads, BEFORE writing them, so those \
+                 rows are absent for the duration of the rebuild. Other venues' segments, and this \
+                 venue's segments from other receipt days — which a walk of history puts into the \
+                 same dates — are left alone. It refuses, removing nothing, a segment that does not \
+                 state its venue or its receipt day; every segment written before those labels is \
+                 one, and the remedy is to remove the tape and rebuild the whole archive range \
+                 once. The tape is a cache and the archive is untouched, so the remedy for a crash \
+                 in that window is to run it again.\n\n\
                  Without it, a re-run after the archive has grown leaves both copies and \
                  check_layout reports the overlap — which a scheduled retry will hit."
             );
@@ -158,7 +162,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         from_micros,
         to_micros,
         if replace {
-            tape::Replace::Partitions
+            tape::Replace::SourceDays
         } else {
             tape::Replace::Never
         },
