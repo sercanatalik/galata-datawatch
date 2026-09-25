@@ -21,3 +21,4 @@ project-level roadmap is in the [README](../README.md#roadmap).
 | Feature | Tier | Named | Origin |
 |---|---|---|---|
 | [`bound-the-replay`](./bound-the-replay.md) | 3 | 2026-09-25 | `galata-research` needs a view at a replay position; carries forward legacy `reader-replay` |
+| [`walk-the-coarse-candles`](./walk-the-coarse-candles.md) | 1 | 2026-09-25 | `galata-research` found the venue's `1h`/`4h` history rolling away uncaptured; carries forward legacy `walk_candles` |

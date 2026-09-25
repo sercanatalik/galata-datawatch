@@ -64,6 +64,27 @@ pub fn boot(
         .nth(1)
         .ok_or("usage: galata-datawatch <venue>. One process per venue.")?;
 
+    // **`--import <dir>`: a rescue, taken once, inside this boot.** Verified in
+    // full here, before a runtime exists or anything is written: a bad page
+    // refuses the whole directory, and the boot never publishes a gap it then
+    // abandons. The pages are taken after the restart gap and before the walk.
+    let rest: Vec<String> = std::env::args().skip(2).collect();
+    let import_dir: Option<std::path::PathBuf> = match rest.as_slice() {
+        [] => None,
+        [flag, dir] if flag == "--import" => Some(std::path::PathBuf::from(dir)),
+        _ => {
+            return Err(format!(
+                "usage: galata-datawatch <venue> [--import <dir>]; not understood: {}",
+                rest.join(" ")
+            )
+            .into());
+        }
+    };
+    let imported: Vec<crate::capture::ImportedPage> = match &import_dir {
+        Some(dir) => crate::capture::verified_pages(dir, &venue_name)?,
+        None => Vec::new(),
+    };
+
     // One source, one type, one load. Anything absent, unparseable, unknown or
     // out of bounds refuses here and the process exits non-zero — and naming
     // two sources at once is itself a refusal, rather than a precedence rule
@@ -104,6 +125,7 @@ pub fn boot(
         .map(|instrument| Ticker::new(instrument.ticker.clone()))
         .collect::<Result<_, _>>()?;
     let walk_config = adapter_config.clone();
+    let walk_candles: Vec<String> = venue.walk_candles.clone();
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
@@ -111,9 +133,10 @@ pub fn boot(
         // rather than a refusal, and it takes every other subscription with
         // it — seventeen resets in eighteen seconds, measured, with a log that
         // reads like a network fault. One request per dex removes it.
-        adapters::check_universe(&adapter_config).await?;
-        let adapter = adapters::build(adapter_config)?;
-
+        // **Built first, and asked nothing.** Construction is local, so the
+        // declared walk widths are checked against the venue's own names below
+        // before a single request is made.
+        let adapter = adapters::build(adapter_config.clone())?;
         // Which history to walk, taken from the venue's own declaration: the
         // series it hands back on request, at the bar width it PUSHES — which
         // is the one width that may resume from the record, because live
@@ -122,6 +145,12 @@ pub fn boot(
         // width is carried for every item and used where the series has one;
         // funding pages forward and has none.
         let streams = adapter.transport().is_stream();
+        if !streams && !imported.is_empty() {
+            return Err(format!(
+                "{venue_name} is not a stream venue, and an import is taken beside a stream's walk"
+            )
+            .into());
+        }
         // **Only a streaming venue has a bar width to resume from.** A chain
         // has none, and asking it for one before noticing that is how a
         // cursor venue got refused for not being a stream.
@@ -134,11 +163,24 @@ pub fn boot(
             // planned.
             0
         };
-        let walk_items: Vec<(Series, WalkInterval)> = declared_series
-            .iter()
-            .filter(|series| adapter.declaration().serves_historically(**series))
-            .map(|series| (*series, WalkInterval::live(live_interval)))
-            .collect();
+        // And the widths the walk FETCHES beside it (`walk_candles`), each for
+        // the venue's whole reach. Refused here, before the universe check or
+        // any socket, if the venue cannot name one: a walk for a width it
+        // does not serve would spend the budget on refusals.
+        let walk_items: Vec<(Series, WalkInterval)> = if streams {
+            crate::capture::walk_items(
+                adapter.declaration(),
+                |label| adapter.interval_micros(label),
+                &declared_series,
+                live_interval,
+                &walk_candles,
+            )
+            .map_err(|e| format!("[venue.{venue_name}] {e}"))?
+        } else {
+            Vec::new()
+        };
+
+        adapters::check_universe(&adapter_config).await?;
 
         // **The boot asymmetry.** A broker that is ABSENT is an outage the
         // record survives, so capture runs on a NullSink and says so. A broker
@@ -290,6 +332,26 @@ pub fn boot(
         // requests is minutes of work and a silent process is indistinguishable
         // from a stuck one.
         let history = History::for_config(&walk_config)?;
+
+        // **The rescue, through the one path, after the restart gap and before
+        // the walk.** Each page's receipt time is the clock as it is taken:
+        // the moment this record received it. Its original fetch time stays in
+        // the manifest; carrying it here would put an older receipt under a
+        // newer sequence, and the tape's bound and replay assume the two agree.
+        if let Some(dir) = &import_dir {
+            let pages = imported.len();
+            for page in imported {
+                let at = SystemClock.now_micros();
+                capture.take(history.candle_page(&page.symbol, page.bytes, at))?;
+                tracing::info!(
+                    file = page.file,
+                    interval = page.interval,
+                    "imported a rescued page"
+                );
+            }
+            tracing::info!(pages, dir = %dir.display(), "imported a rescue through the one path");
+        }
+
         let request = WalkRequest {
             items: walk_items,
             share: config.capture.walk_share,

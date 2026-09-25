@@ -16,6 +16,7 @@ pub mod coverage;
 /// **Behind the `rh-chain` feature**: the only cursor venue in-tree.
 #[cfg(feature = "rh-chain")]
 pub mod cursor;
+pub mod import;
 #[cfg(feature = "capture")]
 pub mod poll;
 pub mod run;
@@ -29,10 +30,11 @@ pub use coverage::Coverage;
 #[cfg(feature = "capture")]
 #[cfg(feature = "rh-chain")]
 pub use cursor::Pass;
+pub use import::{ImportError, ImportedPage, verified_pages};
 #[cfg(feature = "capture")]
 pub use poll::{Polls, Refusal};
 pub use run::{Capture, CaptureError, Fetch, WalkRequest, Wiring};
 pub use session::{Act, Session};
 pub use status::{Connection, PairState, PairStatus, Status, StatusFile};
 pub use subscriptions::{Held, Outcome};
-pub use walk::{Ask, Step, Walk, WalkInterval, WalkOutcome};
+pub use walk::{Ask, Step, Walk, WalkInterval, WalkOutcome, WalkWidthError, walk_items};

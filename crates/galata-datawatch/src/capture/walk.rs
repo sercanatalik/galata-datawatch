@@ -422,6 +422,106 @@ impl<'a> Walk<'a> {
     }
 }
 
+/// A declared walk width the walk cannot be asked for.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WalkWidthError {
+    /// The venue has no bar of that label.
+    #[error(
+        "walk_candles names \"{width}\", which this venue serves no bar of; a walk for it would \
+         spend the budget on refusals"
+    )]
+    Unnamed {
+        /// The label.
+        width: String,
+    },
+    /// The live width, walked again.
+    #[error(
+        "walk_candles names \"{width}\", which is already the live candle width; it is captured \
+         live and walked from the record"
+    )]
+    LiveRepeated {
+        /// The label.
+        width: String,
+    },
+    /// A width listed twice.
+    #[error("walk_candles names \"{width}\" twice")]
+    Duplicate {
+        /// The label.
+        width: String,
+    },
+    /// Walk widths on a venue that does not capture candles.
+    #[error("walk_candles is declared, and candles is not among the declared series")]
+    NoCandles,
+    /// A width whose reach the venue does not state, so "its whole reach"
+    /// has no size.
+    #[error(
+        "walk_candles names \"{width}\", and the venue states no reach at that width, so there is \
+         no whole reach to ask for"
+    )]
+    NoReach {
+        /// The label.
+        width: String,
+    },
+}
+
+/// What the walk is asked for: the declared series at the live width, and
+/// each declared walk width's **whole reach**.
+///
+/// The live width resumes from the record, because live capture keeps the
+/// record's receipt clock within seconds of it. A walk width cannot — the
+/// record, dated by receipt, cannot say how far a width it does not push is
+/// covered — so it asks for everything the venue holds, every boot. On a venue
+/// whose reach is one page that is one request per instrument per width.
+///
+/// `name` is the venue's own mapping from a label to a width, handed in so
+/// this stays free of any venue.
+pub fn walk_items(
+    declaration: &Declaration,
+    name: impl Fn(&str) -> Option<i64>,
+    declared: &[Series],
+    live_interval_micros: i64,
+    walk_candles: &[String],
+) -> Result<Vec<(Series, WalkInterval)>, WalkWidthError> {
+    let mut items: Vec<(Series, WalkInterval)> = declared
+        .iter()
+        .filter(|series| declaration.serves_historically(**series))
+        .map(|series| (*series, WalkInterval::live(live_interval_micros)))
+        .collect();
+    if walk_candles.is_empty() {
+        return Ok(items);
+    }
+    if !declared.contains(&Series::Candles) || !declaration.serves_historically(Series::Candles) {
+        return Err(WalkWidthError::NoCandles);
+    }
+    let mut seen: Vec<i64> = Vec::new();
+    for width in walk_candles {
+        let Some(micros) = name(width) else {
+            return Err(WalkWidthError::Unnamed {
+                width: width.clone(),
+            });
+        };
+        if micros == live_interval_micros {
+            return Err(WalkWidthError::LiveRepeated {
+                width: width.clone(),
+            });
+        }
+        if seen.contains(&micros) {
+            return Err(WalkWidthError::Duplicate {
+                width: width.clone(),
+            });
+        }
+        seen.push(micros);
+        let Some(reach) = declaration.reach_micros(Series::Candles, micros) else {
+            return Err(WalkWidthError::NoReach {
+                width: width.clone(),
+            });
+        };
+        items.push((Series::Candles, WalkInterval::needed(micros, reach)));
+    }
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,5 +811,95 @@ mod tests {
         assert_eq!(span(5_000 * MINUTE), "3d 11h 20m");
         assert_eq!(span(7 * DAY), "7d");
         assert_eq!(span(-1), "0m");
+    }
+
+    /// Hyperliquid's labels, for the tests: the venue's mapping is handed in.
+    fn named(label: &str) -> Option<i64> {
+        match label {
+            "1m" => Some(MINUTE),
+            "1h" => Some(HOUR),
+            "4h" => Some(4 * HOUR),
+            "1d" => Some(DAY),
+            _ => None,
+        }
+    }
+
+    const DECLARED: [Series; 3] = [Series::Trades, Series::Candles, Series::Funding];
+
+    fn widths(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn declared_widths_are_asked_for_their_reach() {
+        let d = declaration(None, Some(5_000));
+        let items = walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h", "4h", "1d"])).unwrap();
+        // The live width for each historical series, as before, then each walk
+        // width at its whole reach: 5,000 bars of it.
+        assert_eq!(
+            items,
+            vec![
+                (Series::Candles, WalkInterval::live(MINUTE)),
+                (Series::Funding, WalkInterval::live(MINUTE)),
+                (Series::Candles, WalkInterval::needed(HOUR, 5_000 * HOUR)),
+                (
+                    Series::Candles,
+                    WalkInterval::needed(4 * HOUR, 5_000 * 4 * HOUR)
+                ),
+                (Series::Candles, WalkInterval::needed(DAY, 5_000 * DAY)),
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_means_the_live_width_only() {
+        let d = declaration(None, Some(5_000));
+        let items = walk_items(&d, named, &DECLARED, MINUTE, &[]).unwrap();
+        assert!(items.iter().all(|(_, i)| i.is_live()));
+    }
+
+    #[test]
+    fn a_width_the_venue_cannot_name_is_refused() {
+        let d = declaration(None, Some(5_000));
+        assert_eq!(
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["7m"])),
+            Err(WalkWidthError::Unnamed { width: "7m".into() })
+        );
+    }
+
+    #[test]
+    fn the_live_width_repeated_is_refused() {
+        let d = declaration(None, Some(5_000));
+        assert_eq!(
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1m"])),
+            Err(WalkWidthError::LiveRepeated { width: "1m".into() })
+        );
+    }
+
+    #[test]
+    fn a_width_listed_twice_is_refused() {
+        let d = declaration(None, Some(5_000));
+        assert_eq!(
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h", "1h"])),
+            Err(WalkWidthError::Duplicate { width: "1h".into() })
+        );
+    }
+
+    #[test]
+    fn walk_widths_without_candles_are_refused() {
+        let d = declaration(None, Some(5_000));
+        assert_eq!(
+            walk_items(&d, named, &[Series::Trades], MINUTE, &widths(&["1h"])),
+            Err(WalkWidthError::NoCandles)
+        );
+    }
+
+    #[test]
+    fn a_width_with_no_stated_reach_is_refused() {
+        let d = declaration(None, None);
+        assert_eq!(
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h"])),
+            Err(WalkWidthError::NoReach { width: "1h".into() })
+        );
     }
 }

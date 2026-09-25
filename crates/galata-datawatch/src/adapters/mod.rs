@@ -545,6 +545,23 @@ impl History {
         }
     }
 
+    /// Saved `candleSnapshot` bytes as the payload the walk's own fetch would
+    /// have produced, taken at `recv_micros`: for an import of a rescue.
+    ///
+    /// Through the seam, because building a payload names a venue, and one
+    /// constructor per venue so an import and a fetch cannot disagree.
+    pub fn candle_page(&self, symbol: &str, bytes: Vec<u8>, recv_micros: i64) -> Payload {
+        match self {
+            #[cfg(feature = "hyperliquid")]
+            History::Hyperliquid(_) => hyperliquid::client::candle_page(symbol, bytes, recv_micros),
+            #[cfg(not(feature = "hyperliquid"))]
+            _ => {
+                let _ = (symbol, bytes, recv_micros);
+                unreachable!("History has no variants without a venue feature")
+            }
+        }
+    }
+
     /// One historical request, returning the bytes **and the moment they
     /// arrived** — the payload the one path then archives verbatim.
     ///
@@ -628,6 +645,7 @@ mod tests {
             market: "mainnet".into(),
             series: vec![galata_wire::Series::Transfers],
             candle: "1m".into(),
+            walk_candles: Vec::new(),
             instruments: vec![crate::config::InstrumentDecl {
                 ticker: "NVDA".into(),
                 dex: None,
@@ -744,6 +762,7 @@ mod tests {
             market: "mainnet".into(),
             series: vec![galata_wire::Series::Quotes],
             candle: "1m".into(),
+            walk_candles: Vec::new(),
             instruments: vec![crate::config::InstrumentDecl {
                 ticker: "BTC".into(),
                 dex: None,

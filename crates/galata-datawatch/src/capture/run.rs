@@ -2212,6 +2212,117 @@ mod tests {
         assert_eq!(calls.into_inner(), 0);
     }
 
+    #[tokio::test]
+    async fn a_walk_width_asks_for_the_venues_reach() {
+        // A width the stream does not push cannot resume from the record, so
+        // it asks for everything the venue holds: at 1h on this venue, 5,000
+        // bars, one request per instrument.
+        let mut f = walk_fixture(100 * DAY);
+        let reach = f
+            .capture
+            .wiring
+            .adapter
+            .declaration()
+            .reach_micros(Series::Candles, HOUR)
+            .expect("the venue states its candle reach");
+        let request = WalkRequest {
+            items: vec![(Series::Candles, WalkInterval::needed(HOUR, reach))],
+            share: 1.0,
+            cold_start_days: 7,
+            cap: 500,
+        };
+        let asked: std::sync::Mutex<Vec<Fetch>> = std::sync::Mutex::new(Vec::new());
+        f.capture
+            .walk(&request, |fetch: Fetch| {
+                let page = candle_page(&fetch.symbol, fetch.from_micros / 1_000);
+                asked.lock().unwrap().push(fetch);
+                async move { Ok(page) }
+            })
+            .await
+            .unwrap();
+
+        let asked = asked.into_inner().unwrap();
+        assert_eq!(
+            asked.len(),
+            2,
+            "one request per instrument: the reach is one page"
+        );
+        for fetch in &asked {
+            assert_eq!(fetch.interval_label.as_deref(), Some("1h"));
+            assert_eq!(
+                fetch.from_micros,
+                100 * DAY - reach,
+                "the whole reach, not a resume"
+            );
+        }
+        assert!(
+            f.capture
+                .wiring
+                .archive_root
+                .join("venue=hyperliquid/kind=candles")
+                .is_dir(),
+            "a walked page must be archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verified_rescue_is_taken_through_the_one_path() {
+        // Saved outside the record because the venue was about to stop serving
+        // it; taken in through the same constructor the walk's fetch uses, and
+        // the same `take` a live frame crosses.
+        use sha2::Digest;
+        let mut f = walk_fixture(100 * DAY);
+        let rescue = tempfile::tempdir().unwrap();
+        let bytes = br#"[{"t":8640000000,"T":8643599999,"s":"BTC","i":"1h","o":"1","c":"2","h":"3","l":"0","v":"5","n":7}]"#;
+        std::fs::write(rescue.path().join("BTC-1h.json"), bytes).unwrap();
+        let sha: String = sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(
+            rescue.path().join("manifest.json"),
+            serde_json::json!({"venue": "hyperliquid", "pages": [{
+                "file": "BTC-1h.json", "sha256": sha,
+                "request": {"type": "candleSnapshot", "req": {"coin": "BTC", "interval": "1h"}}
+            }]})
+            .to_string(),
+        )
+        .unwrap();
+
+        let pages = crate::capture::verified_pages(rescue.path(), "hyperliquid").unwrap();
+        for page in pages {
+            let at = f.clock.now_micros();
+            f.capture
+                .take(crate::adapters::hyperliquid::client::candle_page(
+                    &page.symbol,
+                    page.bytes,
+                    at,
+                ))
+                .unwrap();
+        }
+
+        let candle = f
+            .sink
+            .emitted()
+            .into_iter()
+            .find_map(|e| match e.event {
+                Event::Candle(c) => Some(c),
+                _ => None,
+            })
+            .expect("a rescued page must reach the sink as a candle");
+        assert_eq!(candle.interval, "1h");
+        assert_eq!(candle.trade_count, Some(7));
+        f.capture.shutdown().unwrap();
+        assert!(
+            f.capture
+                .wiring
+                .archive_root
+                .join("venue=hyperliquid/kind=candles")
+                .is_dir(),
+            "a rescued page must be archived"
+        );
+    }
+
     // ---- filling gaps published while running ------------------------------
 
     type Asked = Arc<std::sync::Mutex<Vec<Fetch>>>;

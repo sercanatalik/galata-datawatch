@@ -382,6 +382,10 @@ impl Adapter for Hyperliquid {
         )
     }
 
+    fn interval_micros(&self, label: &str) -> Option<i64> {
+        interval_micros_of(label)
+    }
+
     fn live_interval_micros(&self) -> Option<i64> {
         // The width this adapter subscribed. Everything else the walk asks for
         // must state its own need.

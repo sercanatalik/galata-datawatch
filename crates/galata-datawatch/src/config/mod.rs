@@ -405,6 +405,17 @@ pub struct VenueConfig {
     pub series: Vec<Series>,
     /// The bar width subscribed live.
     pub candle: String,
+    /// Bar widths the walk **fetches** beside `candle`, never subscribed live.
+    ///
+    /// The venue serves a rolling window of each width (Hyperliquid's most
+    /// recent ~5,000 bars, measured 2026-09-25: `1h` back to March, `4h` to the
+    /// June before last), so a width nobody declares is history leaving the
+    /// venue uncaptured. Each is asked for its whole reach on every boot,
+    /// because the record, dated by receipt, cannot say how far a width is
+    /// covered. Named by the adapter and refused before anything connects if
+    /// it cannot be. Absent means none.
+    #[serde(default)]
+    pub walk_candles: Vec<String>,
     /// The instruments.
     pub instruments: Vec<InstrumentDecl>,
     /// The variable holding this venue's endpoint, **on a chain venue**.
@@ -1127,6 +1138,27 @@ dexes = ["", "xyz"]
         assert_eq!(
             c.venue["hyperliquid"].instruments[1].dex.as_deref(),
             Some("xyz")
+        );
+    }
+
+    #[test]
+    fn a_venue_with_no_walk_widths_walks_its_live_width_only() {
+        assert!(
+            load(GOOD).unwrap().venue["hyperliquid"]
+                .walk_candles
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn declared_walk_widths_load_in_order() {
+        let text = GOOD.replace(
+            "candle = \"1m\"",
+            "candle = \"1m\"\nwalk_candles = [\"1h\", \"4h\", \"1d\"]",
+        );
+        assert_eq!(
+            load(&text).unwrap().venue["hyperliquid"].walk_candles,
+            ["1h", "4h", "1d"]
         );
     }
 

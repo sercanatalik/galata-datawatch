@@ -71,6 +71,15 @@ First release. Nothing is on crates.io yet, so everything is new.
   the loss has closed, capture asks the venue for that ticker and series from
   the gap's start, as its own task so the live loop never waits for it, paced
   and capped like the walk (`Capture::fill_with`, `Capture::fill_step`).
+- `walk_candles` per venue: bar widths the walk fetches beside the live
+  `candle`, never subscribed live, each for the venue's whole reach on every
+  boot, because the venue serves a rolling window of each width. A width the
+  venue cannot name, the live width repeated, or a duplicate is refused before
+  any request (`Adapter::interval_micros`, `capture::walk_items`).
+- `galata-datawatch <venue> --import <dir>`: a rescue of saved venue pages,
+  verified against its manifest's sha256 in full before any page is taken,
+  then taken through the one path inside the boot, after the restart gap and
+  before the walk (`capture::verified_pages`, `History::candle_page`).
 - The hyperliquid adapter, including HIP-3 dexes: a per-instrument `dex`, and a
   duplicate ticker across dexes refused at load, naming both.
 - The rh-chain adapter: capture at the head, readers bounded at finalized,

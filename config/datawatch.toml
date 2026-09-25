@@ -35,6 +35,12 @@ walk_cap = 200
 [venue.hyperliquid]
 market = "mainnet"
 candle = "1m"
+# Bar widths the walk FETCHES beside `candle`, never subscribed live. The venue
+# serves the most recent ~5,000 bars of each on a rolling window (measured
+# 2026-09-25: 1h back to 2026-03-01, 4h to 2024-06-14, 1d from listing), so a
+# width not declared here is history leaving the venue uncaptured. Each is
+# asked for its whole reach on every boot: 18 requests across six instruments.
+walk_candles = ["1h", "4h", "1d"]
 # `quotes` is the venue's `bbo` channel rather than `l2Book`: it carries sizes
 # (it is `l2Book` at one level a side) and it is emitted when the top of book
 # changes, where the public `l2Book` is a throttled snapshot on a timer

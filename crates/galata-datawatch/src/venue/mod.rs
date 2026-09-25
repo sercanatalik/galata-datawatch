@@ -323,6 +323,17 @@ pub trait Adapter: Normalise {
     /// report success over sixty times too little.
     fn interval_label(&self, interval_micros: i64) -> Option<String>;
 
+    /// The bar width a label names, in the venue's own vocabulary — the
+    /// inverse of [`Adapter::interval_label`]. `None` for a label the venue does
+    /// not serve.
+    ///
+    /// **Defaults to `None`**, so a venue that names no widths refuses every
+    /// declared walk width before anything connects, rather than a walk
+    /// spending the budget on requests the venue refuses.
+    fn interval_micros(&self, _label: &str) -> Option<i64> {
+        None
+    }
+
     /// The bar width the venue **pushes**, where it pushes one.
     ///
     /// The walk needs this to know which width may resume from the record.

@@ -110,18 +110,7 @@ impl Client {
             }
         });
         let bytes = self.post(&body).await?;
-        Ok(Payload {
-            seq: 0,
-            recv_micros: now_micros,
-            address: PayloadAddress::Venue(VENUE.into()),
-            channel: "candleSnapshot".into(),
-            kind: "candles".into(),
-            symbol: Some(symbol.to_string()),
-            // Covers a range nothing will fetch again, so it is durable before
-            // the walk advances past it.
-            origin: Origin::Fetched,
-            payload: bytes,
-        })
+        Ok(candle_page(symbol, bytes, now_micros))
     }
 
     /// One page of funding history: the oldest rows at or after `from_micros`,
@@ -315,6 +304,24 @@ pub fn funding_page_end(bytes: &[u8]) -> Option<crate::venue::PageEnd> {
         last_micros: galata_wire::millis_to_micros(last),
         rows: rows.len() as u32,
     })
+}
+
+/// A `candleSnapshot` response as the payload the one path archives — **the
+/// one constructor**, used by the walk's own fetch and by an import of pages
+/// saved from it, so the two cannot build different records of the same bytes.
+pub fn candle_page(symbol: &str, bytes: Vec<u8>, recv_micros: i64) -> Payload {
+    Payload {
+        seq: 0,
+        recv_micros,
+        address: PayloadAddress::Venue(VENUE.into()),
+        channel: "candleSnapshot".into(),
+        kind: "candles".into(),
+        symbol: Some(symbol.to_string()),
+        // Covers a range nothing will fetch again, so it is durable before the
+        // walk advances past it.
+        origin: Origin::Fetched,
+        payload: bytes,
+    }
 }
 
 #[cfg(test)]

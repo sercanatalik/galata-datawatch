@@ -143,6 +143,12 @@ and `test-guards.sh` proving each guard can fail.
   its own task, one at a time at the walk's pace, taken between frames so the
   socket is never waited on or cancelled. The record held 216 gaps that day,
   every one a restart gap: nothing had needed this yet.
+  **And it keeps the widths the venue lets go** (2026-09-25,
+  `walk-the-coarse-candles`): the venue serves ~5,000 bars per width on a
+  rolling window, and only `1m` was kept, so `1h` and `4h` history was
+  leaving uncaptured a day at a time. `walk_candles = ["1h", "4h", "1d"]` asks
+  each for its whole reach on every boot, and `--import` took the rescue saved
+  that morning into the record through the one path.
 - **`adapters/hyperliquid`** — BTC, ETH, HYPE. `bbo`, `trades`, `candle`,
   `activeAssetCtx`. `RotateAhead { observed 624s, rotate 480s, ping 20s }`.
 - **`config/`** — file source only, `Origin::File`. Trimmed hard from legacy's

@@ -84,6 +84,9 @@ capture = [
     "dep:rand",
     "dep:rustls",
     "dep:reqwest",
+    # Verifying a rescue's pages against their recorded hashes before an
+    # import takes any of them (`capture::import`).
+    "dep:sha2",
 ]
 # The seam itself is unconditional; an adapter is a feature.
 hyperliquid = []

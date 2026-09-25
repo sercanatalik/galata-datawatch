@@ -74,7 +74,7 @@ case "$service" in
         ;;
     capture)
         venue="${2:-}"
-        [[ -n "$venue" ]] || refuse "usage: run-service.sh capture <venue>"
+        [[ -n "$venue" ]] || refuse "usage: run-service.sh capture <venue> [--import <dir>]"
         # This machine's broker block lives in the local configuration, which
         # is the committed one plus [broker]; without it, capture archives and
         # publishes nothing.
@@ -84,7 +84,7 @@ case "$service" in
             export GALATA_CONFIG="$ROOT/config/datawatch.toml"
         fi
         from_vault "capture-$venue" --only "$(password_var "datawatch-$venue")" -- \
-            "$ROOT/target/release/galata-datawatch" "$venue"
+            "$ROOT/target/release/galata-datawatch" "$venue" "${@:3}"
         ;;
     ledger)
         venue="${2:-}"
