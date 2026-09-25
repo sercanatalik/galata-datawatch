@@ -17,6 +17,22 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Changed
+
+- **Hyperliquid's `midPx` is no longer filed as the index.** `activeAssetCtx`
+  prints a book midpoint and no index, and `Mark.index` had carried the one as
+  the other, so the tape's `marks.index` was the mid and every mark-to-index
+  basis read from it was a mark-to-mid basis. `index` is now `None` on this
+  venue. **A tape rebuild corrects every captured day**; the archive holds the
+  bytes.
+
+### Added
+
+- `Mark.mid` and `Mark.premium` in `galata-wire` (`#[serde(default)]`, so an
+  envelope serialised before them still reads), carried by the Hyperliquid
+  adapter from `midPx` and `premium`, and two tape columns, `marks.mid` and
+  `marks.premium`, appended after `open_interest`.
+
 ## [0.1.0] - unreleased
 
 First release. Nothing is on crates.io yet, so everything is new.

@@ -413,12 +413,12 @@ pub struct Mint {
     pub log_index: u32,
 }
 
-/// Four different prices, none derivable from another, each as the venue
-/// printed it.
+/// The venue's own prices around the mark, none derivable from another, each
+/// as the venue printed it.
 ///
 /// A price computed in transit is a price from two measurements, and the two
 /// will disagree exactly when it matters. Every field is optional because no
-/// venue publishes all four.
+/// venue publishes all of them.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Mark {
     /// What the venue marks positions at — margin and liquidation.
@@ -429,6 +429,16 @@ pub struct Mark {
     pub oracle: Option<Num>,
     /// Open interest.
     pub open_interest: Option<Num>,
+    /// The midpoint of the book, where the venue prints one of its own.
+    ///
+    /// Not the index. Hyperliquid's asset context prints `midPx` and no
+    /// index at all, and until 2026-09-25 the adapter filed the one as the
+    /// other, so a mark-to-index basis was a mark-to-mid basis.
+    #[serde(default)]
+    pub mid: Option<Num>,
+    /// The premium over the oracle that the venue computes funding from.
+    #[serde(default)]
+    pub premium: Option<Num>,
 }
 
 /// The perpetual funding rate.

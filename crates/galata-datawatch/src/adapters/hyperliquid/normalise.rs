@@ -242,7 +242,16 @@ fn asset_ctx(
             .as_ref()
             .map(|t| t.require("oracle"))
             .transpose()?,
-        index: ctx.mid_px.as_ref().map(|t| t.require("mid")).transpose()?,
+        // This channel prints no index. `midPx` is the book's midpoint, and
+        // filing it as the index made every mark-to-index basis a mark-to-mid
+        // one (galata-research, 2026-09-25).
+        index: None,
+        mid: ctx.mid_px.as_ref().map(|t| t.require("mid")).transpose()?,
+        premium: ctx
+            .premium
+            .as_ref()
+            .map(|t| t.require("premium"))
+            .transpose()?,
         open_interest: ctx
             .open_interest
             .as_ref()

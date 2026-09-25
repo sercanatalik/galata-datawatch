@@ -609,6 +609,38 @@ mod tests {
         );
     }
 
+    /// A BTC asset context as the archive holds it (2026-09-20 21:14:27).
+    const ASSET_CTX: &[u8] = br#"{"channel":"activeAssetCtx","data":{"coin":"BTC","ctx":{"funding":"0.0000125","openInterest":"41659.3892199999","prevDayPx":"81027.0","dayNtlVlm":"1473316310.7910747528","premium":"0.0001981351","oraclePx":"80753.0","markPx":"80769.0","midPx":"80769.5","impactPxs":["80769.0","80770.0"],"dayBaseVlm":"18235.92574"}}}"#;
+
+    fn the_mark(hl: &Hyperliquid) -> galata_wire::Mark {
+        let payload = hl.classify(ASSET_CTX, 1_789_938_867_857_190);
+        hl.normalise(&payload)
+            .unwrap()
+            .into_iter()
+            .find_map(|e| match e.event {
+                galata_wire::Event::Mark(m) => Some(m),
+                _ => None,
+            })
+            .expect("an asset context carries a mark")
+    }
+
+    #[test]
+    fn the_midpoint_is_not_filed_as_the_index() {
+        // This channel prints `midPx` and no index. Filed as the index, every
+        // mark-to-index basis silently measured mark against the book's mid.
+        let mark = the_mark(&shipped());
+        assert_eq!(mark.index, None);
+        assert_eq!(mark.mid, Some("80769.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_premium_funding_is_computed_from_is_carried() {
+        let mark = the_mark(&shipped());
+        assert_eq!(mark.premium, Some("0.0001981351".parse().unwrap()));
+        assert_eq!(mark.mark, Some("80769.0".parse().unwrap()));
+        assert_eq!(mark.oracle, Some("80753.0".parse().unwrap()));
+    }
+
     #[test]
     fn an_unknown_market_is_refused_by_listing_the_known() {
         let err = Market::parse("devnet").unwrap_err().to_string();

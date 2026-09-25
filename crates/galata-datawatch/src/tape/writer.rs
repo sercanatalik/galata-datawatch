@@ -423,6 +423,8 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(dec(rows, |e| mark(e).and_then(|m| m.index))?);
             columns.push(dec(rows, |e| mark(e).and_then(|m| m.oracle))?);
             columns.push(dec(rows, |e| mark(e).and_then(|m| m.open_interest))?);
+            columns.push(dec(rows, |e| mark(e).and_then(|m| m.mid))?);
+            columns.push(dec(rows, |e| mark(e).and_then(|m| m.premium))?);
         }
         Kind::Gaps => {
             columns.push(text(rows, |e| {

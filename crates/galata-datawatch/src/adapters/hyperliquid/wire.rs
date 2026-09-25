@@ -257,6 +257,9 @@ pub struct AssetCtx {
     /// The current funding rate.
     #[serde(default)]
     pub funding: Option<Token>,
+    /// The premium over the oracle that funding is computed from.
+    #[serde(default)]
+    pub premium: Option<Token>,
 }
 
 /// One row of a funding history page: the rate that settled at `time`.

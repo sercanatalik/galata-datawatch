@@ -223,13 +223,18 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("log_index", DataType::UInt32, false),
         ]),
 
-        // Four prices, **none derivable from another**, each as the venue
-        // printed it. A mark that disagrees with the index is the fact.
+        // The venue's prices, **none derivable from another**, each as it
+        // printed them. A mark that disagrees with the index is the fact.
         Kind::Marks => with(vec![
             Field::new("mark", PRICE, true),
             Field::new("index", PRICE, true),
             Field::new("oracle", PRICE, true),
             Field::new("open_interest", PRICE, true),
+            // Where the venue prints them: the book's midpoint, and the
+            // premium funding is computed from. Appended, so the columns
+            // before them keep their places.
+            Field::new("mid", PRICE, true),
+            Field::new("premium", PRICE, true),
         ]),
 
         // An absence, with the reason it happened — never inferred from
