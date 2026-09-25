@@ -53,8 +53,10 @@ Galata is a Rust framework for low-latency algorithmic trading. It covers the
 whole path from market data to orders:
 
 1. **Multi-venue market data capture.** This repository.
-2. **Research and replay.** Strategies are tested only against the data they
-   could have seen at the time.
+2. **Research.** The record loaded with its semantics applied once, and
+   studies judged against selection (the Deflated Sharpe Ratio, the
+   Probability of Backtest Overfitting). A strategy is tested only against the
+   data it could have seen at the time.
 3. **Signal generation.** Features and signals are computed from the tape and
    can be reproduced from the archive.
 4. **Deterministic portfolio risk controls.** Plain, auditable code that sits
@@ -87,9 +89,9 @@ flowchart LR
     NATS{{"NATS<br/>markets.* · status.*"}}
     FLOWS["cereyan<br/>scheduled maintenance"]
     TOWER["galata-tower<br/>operator UI"]
+    RES["galata-research<br/>research + studies"]
 
     subgraph Next["Planned layers"]
-        RES["galata-research<br/>replay + backtests"]
         SIG["signals"]
         RISK["risk controls"]
         EXEC["decision model<br/>+ execution agents"]
@@ -114,7 +116,7 @@ flowchart LR
 | **galata-tower** | operator UI: axum read API and a React screen in one binary | [sercanatalik/galata-tower](https://github.com/sercanatalik/galata-tower) |
 | **cereyan** | the scheduler that runs compaction, tape rebuilds and health checks | [sercanatalik/cereyan](https://github.com/sercanatalik/cereyan) |
 | **NATS** | the live bus that downstream strategy processes subscribe to | [nats.io](https://nats.io) |
-| **galata-research** | point-in-time replay, one fill model, a run manifest | planned; not yet a repository |
+| **galata-research** | the record as polars or DuckDB with its semantics applied once, and marimo studies judged by DSR and PBO | [sercanatalik/galata-research](https://github.com/sercanatalik/galata-research) |
 
 ---
 
@@ -551,7 +553,9 @@ Also in progress or planned here:
   lands in a day that another receipt day also fed.
 - **`bound-the-replay`** (planned). A view of the tape *as it stood at time
   T*, so a replay host cannot see data that arrived after its simulated
-  clock. It lands together with its first caller, `galata-research`. See
+  clock. galata-research's loaders do not need it: they bound on venue time
+  (`as_of`, with a candle known at its close), so this waits for a replay
+  host that needs what was *received* by T. See
   [`planning/bound-the-replay.md`](planning/bound-the-replay.md).
 - **Retention policy** (the operator's decision). `galata-retain` works but
   ships no default horizon.
@@ -563,7 +567,7 @@ Each later layer reads from the record kept here and never writes to it.
 | Phase | Layer | Scope | Status |
 |---|---|---|---|
 | 1 | **Data foundation** | multi-venue capture, the archive and tape, the broker, the vault, the operator UI | built; publishing |
-| 2 | **Research and replay** | `galata-research`: point-in-time replay, a `Strategy` seam shared with live, a virtual clock, one pessimistic fill model, a hashed run manifest, coverage and gaps reported as figures | planned |
+| 2 | **Research** | `galata-research`: candles, trades, quotes, marks, funding and gaps loaded on the clock each has, gaps marked, my margin snapshots decoded; the Deflated Sharpe Ratio and PBO by CSCV, pinned to their papers; next-bar backtests and pre-registered studies | built; 0.x |
 | 3 | **Signal generation** | features and signals computed from the tape, published over the same broker, versioned and reproducible from the archive | planned |
 | 4 | **Deterministic risk controls** | exposure, limit and loss checks in plain, deterministic code, between every decision and every order; no model can override them | planned |
 | 5 | **Agentic strategy execution** | a fine-tuned decision model that turns signals into calibrated probabilities; execution agents size and route orders from them, within the risk limits | planned |
@@ -587,6 +591,8 @@ These layers are design intent, not shipped code. Each one moves through
 
 ## Related repositories
 
+- [**galata-research**](https://github.com/sercanatalik/galata-research): the
+  research environment over this record.
 - [**galata-tower**](https://github.com/sercanatalik/galata-tower): the
   operator UI for this record.
 - [**galata-vault**](https://github.com/sercanatalik/galata-vault):
