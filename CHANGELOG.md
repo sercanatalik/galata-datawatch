@@ -19,6 +19,17 @@ exists so the four above take no vault dependency.
 
 ### Changed
 
+- **A Hyperliquid candle is final when its receipt is at or past the close
+  the venue states (`T`), whichever path carried it.** A walked page's newest
+  bar was filed final while still forming; it is now forming. A candle
+  without `T` is refused by name.
+- **Derived statistics judge backfill by whether capture was heard at the
+  close**: a forming row of the same ticker and width within one bar width of
+  it. The stream never sends a bar final, so a receipt test marked every
+  final bar backfilled. A row flagged final before its own close no longer
+  fills a slot, so rows already on the tape under the old flag are safe
+  without a rebuild.
+
 - **Hyperliquid's `midPx` is no longer filed as the index.** `activeAssetCtx`
   prints a book midpoint and no index, and `Mark.index` had carried the one as
   the other, so the tape's `marks.index` was the mid and every mark-to-index

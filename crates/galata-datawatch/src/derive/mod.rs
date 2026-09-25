@@ -48,10 +48,43 @@ impl Bar {
     fn end_micros(&self) -> i64 {
         self.start_micros + self.width_micros
     }
-    /// Received more than one bar width after it closed: handed back by a
-    /// walk rather than heard live.
-    fn backfilled(&self) -> bool {
-        self.recv_micros > self.end_micros() + self.width_micros
+}
+
+/// When capture heard the stream, per bar width: the receipts of an
+/// instrument's forming rows, sorted.
+///
+/// **Backfilled is judged from these, not from a final bar's receipt.** The
+/// stream falls silent on a bar once the next opens and never sends it final;
+/// every final comes from a walk, received long after the close. Measured
+/// 2026-09-25: with that receipt as the test, every figure read backfilled
+/// 1.00, including 15 hours capture heard live. A forming row within one width
+/// of a close is evidence capture was listening at it; a recorded gap is not
+/// the test, because history walked before capture ever ran has no gap and was
+/// never heard either.
+struct Heard(BTreeMap<i64, Vec<i64>>);
+
+impl Heard {
+    fn of(bars: &[&Bar]) -> Self {
+        let mut by_width: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+        for bar in bars.iter().filter(|b| !b.is_final) {
+            by_width
+                .entry(bar.width_micros)
+                .or_default()
+                .push(bar.recv_micros);
+        }
+        for receipts in by_width.values_mut() {
+            receipts.sort_unstable();
+        }
+        Heard(by_width)
+    }
+
+    /// Whether a bar of this width was heard forming within one width of
+    /// `close`.
+    fn at(&self, width: i64, close: i64) -> bool {
+        self.0.get(&width).is_some_and(|receipts| {
+            let from = receipts.partition_point(|&r| r < close - width);
+            receipts.get(from).is_some_and(|&r| r <= close + width)
+        })
     }
 }
 
@@ -158,10 +191,15 @@ type Returns = BTreeMap<i64, (f64, bool)>;
 /// empty slot, and the returns across it are dropped for that.
 fn returns(bars: &[&Bar], horizon: &Horizon) -> Returns {
     let bucket = horizon.bucket_secs * 1_000_000;
+    let heard = Heard::of(bars);
     // Slot → (receipt, close, backfilled) of its closing bar, the last heard.
     let mut slots: BTreeMap<i64, (i64, f64, bool)> = BTreeMap::new();
     for bar in bars {
         if !bar.is_final
+            // Flagged final before its own close: a walk's open bar, filed
+            // final by the rule adapters held until 2026-09-25. Its close is
+            // not the bar's.
+            || bar.recv_micros < bar.end_micros()
             || bar.width_micros <= 0
             || bucket % bar.width_micros != 0
             || bar.start_micros < horizon.from_micros
@@ -171,7 +209,8 @@ fn returns(bars: &[&Bar], horizon: &Horizon) -> Returns {
             continue;
         }
         let slot = bar.start_micros.div_euclid(bucket);
-        let candidate = (bar.recv_micros, bar.close, bar.backfilled());
+        let backfilled = !heard.at(bar.width_micros, bar.end_micros());
+        let candidate = (bar.recv_micros, bar.close, backfilled);
         slots
             .entry(slot)
             .and_modify(|held| {
@@ -381,6 +420,15 @@ mod tests {
             recv_micros: (minute + 1) * MIN,
         }
     }
+    /// A forming row of the bar opening at `minute`, heard `secs` before its
+    /// close: evidence capture was listening there.
+    fn heard(ticker: &str, minute: i64, secs: i64) -> Bar {
+        Bar {
+            is_final: false,
+            recv_micros: (minute + 1) * MIN - secs * 1_000_000,
+            ..bar(ticker, minute, 0.0)
+        }
+    }
     fn horizon(bucket_secs: i64, minutes: i64, floor: usize) -> Horizon {
         Horizon {
             bucket_secs,
@@ -465,13 +513,18 @@ mod tests {
 
     #[test]
     fn backfill_is_stated_on_the_figure() {
-        let mut late = bar("BTC", 2, 102.0);
-        late.recv_micros = 60 * MIN;
+        // Minutes 0, 1 and 3 were heard near their closes; minute 2 was not.
+        // Minute 3's evidence is the next bar forming half a minute after it
+        // closed: any row within a width of minute 2's close would be heard
+        // there too.
         let bars = vec![
             bar("BTC", 0, 100.0),
+            heard("BTC", 0, 2),
             bar("BTC", 1, 101.0),
-            late,
+            heard("BTC", 1, 2),
+            bar("BTC", 2, 102.0),
             bar("BTC", 3, 100.0),
+            heard("BTC", 4, 30),
         ];
         let s = derive(&bars, &horizon(60, 4, 2));
         let (_, n, backfilled) = value(&s.volatility["BTC"]);
@@ -480,6 +533,31 @@ mod tests {
             (backfilled - 2.0 / 3.0).abs() < 1e-12,
             "two of three returns touch minute 2"
         );
+    }
+
+    #[test]
+    fn a_bar_heard_live_and_finalised_by_a_walk_is_not_backfilled() {
+        // The live case: every final arrives by walk an hour late, and the
+        // stream was heard seconds before each close.
+        let bars: Vec<Bar> = (0..6)
+            .flat_map(|i| {
+                let mut walked = bar("BTC", i, 100.0 + i as f64);
+                walked.recv_micros = (i + 61) * MIN;
+                [walked, heard("BTC", i, 3)]
+            })
+            .collect();
+        let s = derive(&bars, &horizon(60, 6, 2));
+        let (_, n, backfilled) = value(&s.volatility["BTC"]);
+        assert_eq!((n, backfilled), (5, 0.0));
+    }
+
+    #[test]
+    fn a_final_received_before_its_close_is_not_a_close() {
+        let mut early = bar("BTC", 1, 999.0);
+        early.recv_micros = MIN + MIN / 2;
+        let bars = [bar("BTC", 0, 100.0), early];
+        let r = returns(&bars.iter().collect::<Vec<_>>(), &horizon(60, 2, 1));
+        assert!(r.is_empty(), "{r:?}");
     }
 
     #[test]

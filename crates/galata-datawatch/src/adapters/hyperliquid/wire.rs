@@ -208,6 +208,10 @@ pub struct WsBook {
 pub struct WsCandle {
     /// Open, venue milliseconds.
     pub t: i64,
+    /// Close, venue milliseconds: the bar's last millisecond, as the venue
+    /// states it. What finality is judged against.
+    #[serde(rename = "T")]
+    pub close_time: i64,
     /// The venue's own symbol.
     pub s: String,
     /// The bar width, as the venue spells it.

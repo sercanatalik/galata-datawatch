@@ -3955,3 +3955,34 @@ document before and after the keys were written and never restarted
   newest recorded update, inclusive, and archived that page again — two
   rows in the archive, one distinct — and the fold's cash stayed 144.9,
   not 289.8. The one-row-per-event read held on the real record.
+
+## What the candle stream says about a bar's close — 2026-09-25
+
+*The operator's tape, Hyperliquid 1m candles, 2026-09-23 to 19:58 UTC on the
+25th. Capture was live from 05:00 on the 25th after a 32.6 h outage; the
+bars before that were handed back by the boot walk. Read to decide why
+every figure `derive-statistics` produced said backfilled 1.00.*
+
+- **The stream never sends a bar final.** Hyperliquid's candle message
+  carries no closed flag (`t, T, s, i, o, c, h, l, v, n`). 189,398 forming
+  rows against 37,389 final ones; BTC's 1m bars from 05:00 to 19:00 hold
+  **11 finals in 15 hours**, against 60 an hour before capture went live.
+- **The stream does not reliably speak at the close.** Of 860 live minutes,
+  the share with a row received at or after the bar's close: BTC 323, ETH
+  205, HYPE 237, CL 209, XYZ100 103, GOLD 43 (of 834). Finality judged by
+  receipt against `T` catches these and no more.
+- **A walked page's newest bar is open.** 10 to 12 bars per ticker were
+  filed final and received before their own close: the boot walk reaching
+  the present, under the rule legacy also held (`from_walk || recv >= close`).
+- **Capture is heard at the closes.** Each of six tickers had a forming row
+  within one minute of 29 of 30 half-hour closes over the live span, and the
+  venue-wide stream the same 29.
+
+So the backfilled 1.00 on the measured windows was **true**: they lay before
+capture went live. What the share could not have said is anything else: a
+final bar only ever arrives by walk, more than a width after its close, and
+the old test (receipt against close) marked every one. **And the live hours
+are missing from the grid entirely**: the 30m derivation over the last 14 h
+has n = 0 on every instrument, because nothing settles a live bar until the
+next boot or gap walk. `heard-at-the-close` fixes the judgement and the open
+bar; settling the live bars is the next change.

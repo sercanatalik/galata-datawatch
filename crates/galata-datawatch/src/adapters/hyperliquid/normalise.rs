@@ -63,15 +63,15 @@ pub fn normalise(
         }
         "candle" => {
             let c: WsCandle = typed(data)?;
-            Ok(vec![candle(venue, symbols, raw, c, false)?])
+            Ok(vec![candle(venue, symbols, raw, c)?])
         }
         "candleSnapshot" => {
             let candles: Vec<WsCandle> = typed(data)?;
             candles
                 .into_iter()
-                // A bar from a walk is final: the range it covers is closed and
-                // the venue will not revise it.
-                .map(|c| candle(venue, symbols, raw, c, true))
+                // Judged bar by bar like a streamed one: a walk's newest page
+                // reaches the present, and its last bar is still forming.
+                .map(|c| candle(venue, symbols, raw, c))
                 .collect()
         }
         // A walked page: the rate that settled at each hour, one event per row
@@ -187,14 +187,23 @@ fn quote(
     ))
 }
 
+/// A candle, **final exactly when its receipt is at or past the close the
+/// venue states** — whichever path carried it.
+///
+/// The stream carries no closed flag and falls silent on a bar once the next
+/// opens, so a live bar is almost always forming; its final arrives by walk.
+/// And a walk is not final by construction, as legacy held: measured
+/// 2026-09-25, 10 to 12 bars per ticker in 15 hours were handed back by a walk
+/// before their own close. Judged from the payload's receipt, never a clock,
+/// so this stays pure.
 fn candle(
     venue: &Venue,
     symbols: &Symbols,
     raw: &Payload,
     c: WsCandle,
-    is_final: bool,
 ) -> Result<Envelope, NormaliseError> {
     let ticker = resolve(symbols, "candle", &c.s)?;
+    let is_final = raw.recv_micros >= millis_to_micros(c.close_time);
     Ok(Envelope::new(
         venue.clone(),
         ticker,

@@ -609,6 +609,50 @@ mod tests {
         );
     }
 
+    /// Finality of each candle a frame carried, in order.
+    fn finality(hl: &Hyperliquid, payload: &Payload) -> Vec<bool> {
+        hl.normalise(payload)
+            .unwrap()
+            .into_iter()
+            .map(|e| match e.event {
+                galata_wire::Event::Candle(c) => c.is_final,
+                other => panic!("not a candle: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// A streamed 1m bar opening at 60 000 ms, closing at 119 999 ms.
+    const LIVE_BAR: &[u8] = br#"{"channel":"candle","data":{"t":60000,"T":119999,"s":"BTC","i":"1m","o":"1","c":"2","h":"3","l":"0","v":"5","n":7}}"#;
+
+    #[test]
+    fn a_streamed_bar_is_forming_until_its_close() {
+        let hl = shipped();
+        assert_eq!(finality(&hl, &hl.classify(LIVE_BAR, 100_000_000)), [false]);
+    }
+
+    #[test]
+    fn a_streamed_bar_heard_at_or_after_its_close_is_final() {
+        let hl = shipped();
+        assert_eq!(finality(&hl, &hl.classify(LIVE_BAR, 119_999_000)), [true]);
+    }
+
+    #[test]
+    fn a_walked_pages_open_bar_is_forming() {
+        // Measured 2026-09-25: the walk's newest page reaches the present, and
+        // legacy's "a walked bar is final" filed its open bar as a close.
+        let hl = shipped();
+        let page = br#"[{"t":0,"T":59999,"s":"BTC","i":"1m","o":"1","c":"2","h":"3","l":"0","v":"5","n":7},{"t":60000,"T":119999,"s":"BTC","i":"1m","o":"2","c":"2","h":"2","l":"2","v":"1","n":1}]"#;
+        let payload = client::candle_page("BTC", page.to_vec(), 90_000_000);
+        assert_eq!(finality(&hl, &payload), [true, false]);
+    }
+
+    #[test]
+    fn a_candle_without_its_close_is_refused() {
+        let hl = shipped();
+        let frame = br#"{"channel":"candle","data":{"t":60000,"s":"BTC","i":"1m","o":"1","c":"2","h":"3","l":"0","v":"5","n":7}}"#;
+        assert!(hl.normalise(&hl.classify(frame, 1)).is_err());
+    }
+
     /// A BTC asset context as the archive holds it (2026-09-20 21:14:27).
     const ASSET_CTX: &[u8] = br#"{"channel":"activeAssetCtx","data":{"coin":"BTC","ctx":{"funding":"0.0000125","openInterest":"41659.3892199999","prevDayPx":"81027.0","dayNtlVlm":"1473316310.7910747528","premium":"0.0001981351","oraclePx":"80753.0","markPx":"80769.0","midPx":"80769.5","impactPxs":["80769.0","80770.0"],"dayBaseVlm":"18235.92574"}}}"#;
 
