@@ -564,12 +564,22 @@ pub trait Adapters {
     /// What it does implement, for a refusal that says what to do next.
     fn known_names(&self) -> Vec<&'static str>;
     /// What a venue's ledger costs, **where this build keeps a ledger for it**.
-    ///
-    /// Defaulted to none, so a resolver written before the ledger existed
-    /// declares no ledger rather than failing to compile.
     fn ledger_cost(&self, venue: &str) -> Option<LedgerCost> {
         let _ = venue;
         None
+    }
+    /// Whether the loading tool **runs** the ledger, and so judges the
+    /// `[ledger]` block's venues and cost.
+    ///
+    /// **Defaulted to no.** One deployment configuration is read by capture,
+    /// the maintenance tools and the tower as well as the ledger, and a tool
+    /// that runs no ledger has no business refusing one: before this, every
+    /// one of them refused a document with a `[ledger]` block, because its
+    /// resolver answered *no ledger here* for a venue it was never going to
+    /// poll. The block's structure — an address in it, an alias, the cadence
+    /// bounds, the two shares — is still checked by every tool.
+    fn keeps_ledgers(&self) -> bool {
+        false
     }
 }
 
@@ -798,7 +808,7 @@ impl Config {
                     field: "address_var",
                 });
             }
-            if adapters.ledger_cost(&account.venue).is_none() {
+            if adapters.keeps_ledgers() && adapters.ledger_cost(&account.venue).is_none() {
                 let known: Vec<&str> = adapters
                     .known_names()
                     .into_iter()
@@ -826,7 +836,7 @@ impl Config {
             }
             venues.insert(account.venue.as_str());
         }
-        for venue in venues {
+        for venue in venues.into_iter().filter(|_| adapters.keeps_ledgers()) {
             let Some(cost) = adapters.ledger_cost(venue) else {
                 continue;
             };
@@ -886,6 +896,23 @@ mod tests {
                 discovery: 20.0,
                 mode: 20.0,
             })
+        }
+        fn keeps_ledgers(&self) -> bool {
+            true
+        }
+    }
+
+    /// A tool that runs no ledger: capture, the maintenance tools, the tower.
+    struct NoLedger;
+    impl Adapters for NoLedger {
+        fn supplies(&self, venue: &str, series: Series) -> bool {
+            Fake.supplies(venue, series)
+        }
+        fn known(&self, venue: &str) -> bool {
+            Fake.known(venue)
+        }
+        fn known_names(&self) -> Vec<&'static str> {
+            Fake.known_names()
         }
     }
 
@@ -947,6 +974,28 @@ dexes = ["", "xyz"]
             load(GOOD).unwrap().ledger.is_none(),
             "absent means no account is kept"
         );
+    }
+
+    #[test]
+    fn a_tool_that_runs_no_ledger_loads_a_document_that_declares_one() {
+        // The deployment's one document is read by capture and the tower as
+        // well. Before this, both refused it: "keeps no ledger for".
+        let text = format!("{GOOD}{LEDGER}");
+        Config::load_from_str(&text, origin(), &NoLedger).expect("capture must still start");
+        // An account on a venue nothing keeps a ledger for is the ledger's
+        // refusal, not capture's.
+        let elsewhere = text.replace(
+            "venue = \"hyperliquid\"\naddress_var",
+            "venue = \"rh-crypto\"\naddress_var",
+        );
+        assert!(Config::load_from_str(&elsewhere, origin(), &NoLedger).is_ok());
+        assert!(Config::load_from_str(&elsewhere, origin(), &Fake).is_err());
+        // Structure is still every tool's to refuse.
+        let with_address = text.replace(
+            "dexes = [\"\", \"xyz\"]",
+            "dexes = [\"\"]\naddress = \"0x3f9aa0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7\"",
+        );
+        assert!(Config::load_from_str(&with_address, origin(), &NoLedger).is_err());
     }
 
     #[test]

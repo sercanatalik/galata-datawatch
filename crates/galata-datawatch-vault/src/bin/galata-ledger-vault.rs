@@ -34,6 +34,9 @@ impl Adapters for Resolver {
     fn ledger_cost(&self, venue: &str) -> Option<LedgerCost> {
         adapters::ledger_cost(venue)
     }
+    fn keeps_ledgers(&self) -> bool {
+        true
+    }
 }
 
 fn main() -> std::process::ExitCode {
