@@ -27,3 +27,15 @@ def the_job_runs_from_the_repository_root(tools, config):
     compact_the_archive(str(config))
     [call] = tools.calls("galata-compact")
     assert call["cwd"] == str(_runner.REPO)
+
+
+def the_lane_reads_the_deployments_configuration(tmp_path, monkeypatch):
+    local = tmp_path / "datawatch.local.toml"
+    local.write_text("[venue.hyperliquid]\n")
+    monkeypatch.setattr(_runner, "LOCAL", local)
+    assert _runner.deployment_config() == local
+
+
+def a_checkout_without_one_reads_the_committed_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(_runner, "LOCAL", tmp_path / "absent.toml")
+    assert _runner.deployment_config() == _runner.COMMITTED

@@ -37,7 +37,29 @@ from pathlib import Path
 # py/flows/_runner.py -> py/flows -> py -> the checkout.
 REPO = Path(__file__).resolve().parents[2]
 RELEASE = REPO / "target" / "release"
-CONFIG = REPO / "config" / "datawatch.toml"
+COMMITTED = REPO / "config" / "datawatch.toml"
+LOCAL = REPO / "var" / "datawatch.local.toml"
+
+
+def deployment_config() -> Path:
+    """The configuration this deployment runs from — the same file capture does.
+
+    ``var/datawatch.local.toml`` when it exists (the committed file plus this
+    machine's ``[broker]``, ``[watch]`` and whatever else it declares), and
+    otherwise the committed ``config/datawatch.toml``. The test is the one
+    ``scripts/run-service.sh`` applies to capture.
+
+    **Whole-file, never merged.** "One file, one type, one load": a merged
+    override would be a second definition of what capture was told, and the
+    defect this replaced was two — capture read the local file while every
+    flow read the committed one, so a ``[watch]`` bound or a second venue
+    declared for the deployment never reached the lane.
+    """
+    return LOCAL if LOCAL.is_file() else COMMITTED
+
+
+# Resolved at import; the lane is restarted to pick up a new local file.
+CONFIG = deployment_config()
 
 # The whole environment a job receives. `/usr/bin:/bin` because a tool that
 # shells out to nothing still gets a PATH that resolves `sh` rather than an

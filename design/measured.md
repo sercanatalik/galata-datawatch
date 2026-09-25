@@ -3566,3 +3566,20 @@ one `stat` per segment to prove it unchanged. That is ~20 ms a second at
 1,000 segments a kind — 7.7× less, not free. Removing the `stat` would mean
 trusting a path not to be reused, which `--replace` does on purpose; the
 `stat` is what makes a replaced segment be read again.
+
+## How long healthy capture is silent — 2026-09-25
+
+*Behind the deployment's `[watch] max_record_age_secs = 300`.* Silence here
+is the interval between one archive segment's last receipt and the next
+segment's first, across every kind, read from segment names alone:
+
+```
+                         intervals   p50    p99    p99.9   worst
+  4-hour soak               16,720   0.4 s  1.5 s   1.9 s   2.9 s
+  var/archive (w/ today)     3,501   0.5 s  1.8 s   7.7 s  52.0 s
+```
+
+The 52 s is a planned restart and a connection handover. 300 s is about six
+times the worst silence healthy capture has produced and a hundred times the
+soak's — far enough that a finding means capture stopped, near enough that
+it is found at the next hourly watch.

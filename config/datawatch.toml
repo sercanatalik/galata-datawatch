@@ -175,8 +175,9 @@ instruments = [
 #   # A URL CARRYING `user:password@` IS REFUSED AT LOAD. The password has a
 #   # variable of its own, so userinfo here would be a credential in a
 #   # committed file -- and the connect line logs this URL.
-#   # Nothing connects anonymously.
-#   user = "datawatch"
+#   # Nothing connects anonymously. The identity is `datawatch-<venue>`, the
+#   # name config/nats-authorization.conf grants: `datawatch` alone is refused.
+#   user = "datawatch-hyperliquid"
 #   # A REFERENCE, never a secret. The file binary reads this as an environment
 #   # variable; the vault binary reads it as a vault secret name.
 #   password_var = "GALATA_DATAWATCH_PASSWORD"

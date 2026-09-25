@@ -96,7 +96,12 @@ case "$service" in
         # imports and schedules other projects' flows too.
         export CEREYAN_HOME="$HOME/.cereyan-galata"
         export CEREYAN_NO_BROWSER=1
-        exec uv run --project "$ROOT/py" cereyan serve "$ROOT/py" --no-open --host 127.0.0.1 --port 4200
+        # FROM py/, which cereyan's service guide asks for: a run executes in
+        # an engine process that imports `flows.<module>` from its working
+        # directory. Served from the repo root, the flows registered and every
+        # run failed "No module named 'flows'" — found by the first run.
+        cd "$ROOT/py"
+        exec uv run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
         ;;
     *)
         refuse "usage: run-service.sh nats | capture <venue> | tower | flows"

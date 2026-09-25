@@ -179,8 +179,17 @@ subprocess calls to the release binaries, and nothing else.
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
 uv sync --project py
-CEREYAN_HOME=~/.cereyan uv run --project py cereyan serve py --no-open
+cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open   # from py/: runs import `flows`
 ```
+
+**Its own cereyan home.** `~/.cereyan` is shared with every other cereyan
+project on the machine, and a server started on it imports and schedules
+their flows too. `scripts/install-services.sh flows` sets this for you.
+
+**One configuration per deployment.** Capture and the lane both run from
+`var/datawatch.local.toml` when it exists — the committed file plus this
+machine's `[broker]` and `[watch]` — and from `config/datawatch.toml`
+otherwise. Whole-file, never merged.
 
 **Build with the features your declared venues need.** `rh-chain` is not a
 default feature, and a binary that does not speak a declared venue refuses the
