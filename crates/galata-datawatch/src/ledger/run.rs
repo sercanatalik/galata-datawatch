@@ -1233,6 +1233,10 @@ mod tests {
         };
         assert_eq!(rows(Kind::Fills), 1, "one fill, however often archived");
         assert_eq!(rows(Kind::FundingPayments), 0, "none, and a file saying so");
+        for kind in crate::ledger::project::PROJECTED {
+            let path = crate::ledger::project::path_of(&tape, "hyperliquid", "main", kind);
+            assert!(path.exists(), "every kind the fold reads is projected: {kind}");
+        }
         let everything = projected_paths(&tape);
         assert!(
             everything.iter().all(|p| !p.contains(MAIN)),

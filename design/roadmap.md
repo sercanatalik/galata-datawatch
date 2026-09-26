@@ -719,8 +719,9 @@ fills the fold ran in 0.4 ms with no break and no skew at 2×10⁻⁵.*
   no credential, and needs none: the fold reads the record, not the venue.
 
 - **The ledger, projected** (`project-the-ledger`, 2026-09-26): `ledger.tape`
-  makes each fold pass write the rows it read, fills and funding payments
-  first, as typed Parquet under an owner-only root of its own, so a reader
+  makes each fold pass write the rows it read (fills, funding payments,
+  margin, positions and ledger updates, the last long, per dex moved) as
+  typed Parquet under an owner-only root of its own, so a reader
   needs neither the fingerprint key nor a second decoder. It is rewritten
   whole per pass because the ledger is hundreds of rows, not millions.
 

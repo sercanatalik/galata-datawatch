@@ -31,12 +31,20 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use galata_wire::{Envelope, Event, Fill, FundingPayment, Kind, Num};
+use galata_wire::{
+    Counterparty, Effect, Envelope, Event, Fill, FundingPayment, Kind, Margin, Num, Position,
+};
 
 use crate::ledger::accounts::LedgerError;
 
-/// The kinds this projection writes.
-pub const PROJECTED: [Kind; 2] = [Kind::Fills, Kind::FundingPayments];
+/// The kinds this projection writes: every kind the fold reads.
+pub const PROJECTED: [Kind; 5] = [
+    Kind::Fills,
+    Kind::FundingPayments,
+    Kind::Margin,
+    Kind::Positions,
+    Kind::LedgerUpdates,
+];
 
 /// The file each kind is written to, under its directory.
 pub const FILE: &str = "rows.parquet";
@@ -92,7 +100,13 @@ pub fn write(
     crate::ledger::accounts::check_root(root)?;
     let mut written = Vec::new();
     for kind in PROJECTED {
-        let of_kind: Vec<&Envelope> = rows.iter().filter(|e| e.kind() == kind).collect();
+        let expanded: Vec<Envelope>;
+        let of_kind: Vec<&Envelope> = if kind == Kind::LedgerUpdates {
+            expanded = per_effect(rows);
+            expanded.iter().collect()
+        } else {
+            rows.iter().filter(|e| e.kind() == kind).collect()
+        };
         let batch = batch_for(kind, venue, account, &of_kind)?;
         let path = path_of(root, venue, account, kind);
         galata_segments::write_file(&path, &batch, galata_segments::Codec::Zstd)?;
@@ -108,7 +122,9 @@ fn common() -> Vec<Field> {
         Field::new("account", DataType::Utf8, false),
         // `None` is the venue's main dex.
         Field::new("dex", DataType::Utf8, true),
-        Field::new("ticker", DataType::Utf8, false),
+        // The instrument, where the row names one: margin and ledger updates
+        // do not.
+        Field::new("ticker", DataType::Utf8, true),
         // The venue's own time; null where it stated none.
         Field::new("at_micros", DataType::Int64, true),
         Field::new("recv_micros", DataType::Int64, false),
@@ -144,6 +160,51 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("rate", MONEY, false),
             Field::new("samples", DataType::UInt32, true),
         ]),
+        Kind::Margin => fields.extend([
+            // The AccountMode, as the wire spells it: `unified`, `default`, …
+            Field::new("mode", DataType::Utf8, false),
+            // Why this account's equity is not in these figures, where it is
+            // not: a unified account's collateral is spot USDC.
+            Field::new("equity_not_held", DataType::Utf8, true),
+            Field::new("account_value", MONEY, true),
+            Field::new("total_notional", MONEY, true),
+            Field::new("total_raw_usd", MONEY, true),
+            Field::new("margin_used", MONEY, true),
+            Field::new("maintenance_margin_used", MONEY, true),
+            Field::new("withdrawable", MONEY, true),
+        ]),
+        Kind::Positions => fields.extend([
+            // Signed.
+            Field::new("size", MONEY, false),
+            Field::new("entry_price", MONEY, true),
+            Field::new("mark", MONEY, true),
+            Field::new("position_value", MONEY, true),
+            Field::new("unrealised_pnl", MONEY, true),
+            Field::new("return_on_equity", MONEY, true),
+            Field::new("liquidation_price", MONEY, true),
+            Field::new("leverage", MONEY, true),
+            Field::new("leverage_type", DataType::Utf8, true),
+            Field::new("max_leverage", DataType::UInt32, true),
+            Field::new("margin_used", MONEY, true),
+            Field::new("funding_all_time", MONEY, true),
+            Field::new("funding_since_open", MONEY, true),
+            Field::new("funding_since_change", MONEY, true),
+        ]),
+        // Long: one row per (update, dex it moved); `dex` above is that dex.
+        Kind::LedgerUpdates => fields.extend([
+            // The venue's type, verbatim.
+            Field::new("update_kind", DataType::Utf8, false),
+            // False where this build does not know what the update did.
+            Field::new("effect_known", DataType::Boolean, false),
+            // What it moved on this row's dex; null where it moved nothing.
+            Field::new("effect_usdc", MONEY, true),
+            // `account` (our own, by alias) or `fingerprint`. Never an address.
+            Field::new("counterparty_kind", DataType::Utf8, true),
+            Field::new("counterparty", DataType::Utf8, true),
+            Field::new("token", DataType::Utf8, true),
+            Field::new("amount", MONEY, true),
+            Field::new("fee", MONEY, true),
+        ]),
         _ => return None,
     }
     Some(Arc::new(Schema::new(fields)))
@@ -159,6 +220,13 @@ fn batch_for(
     let dex = |e: &Envelope| match &e.event {
         Event::Fill(f) => f.dex.clone(),
         Event::FundingPayment(p) => p.dex.clone(),
+        Event::Margin(m) => m.dex.clone(),
+        Event::Position(p) => p.dex.clone(),
+        // Expanded to one effect per row by `per_effect`.
+        Event::LedgerUpdate(u) => match &u.effect {
+            Effect::Known(effects) => effects.first().and_then(|d| d.dex.clone()),
+            _ => None,
+        },
         _ => None,
     };
     // The instrument the event names: an account-addressed envelope carries
@@ -166,6 +234,7 @@ fn batch_for(
     let ticker = |e: &Envelope| match &e.event {
         Event::Fill(f) => Some(f.ticker.as_str().to_string()),
         Event::FundingPayment(p) => Some(p.ticker.as_str().to_string()),
+        Event::Position(p) => Some(p.ticker.as_str().to_string()),
         _ => None,
     };
     let mut columns: Vec<ArrayRef> = vec![
@@ -226,12 +295,115 @@ fn batch_for(
                 Arc::new(b.finish())
             });
         }
+        Kind::Margin => {
+            let m = |e: &Envelope| match &e.event {
+                Event::Margin(m) => Some(m.clone()),
+                _ => None,
+            };
+            let each = |g: fn(&Margin) -> Option<Num>| move |e: &Envelope| m(e).and_then(|x| g(&x));
+            columns.push(text(rows, |e| {
+                m(e).and_then(|x| serde_json::to_value(x.mode).ok())
+                    .and_then(|v| v.as_str().map(str::to_string))
+            }));
+            columns.push(text(rows, |e| m(e).and_then(|x| x.equity_not_held)));
+            columns.push(dec(rows, each(|x| x.account_value))?);
+            columns.push(dec(rows, each(|x| x.total_notional))?);
+            columns.push(dec(rows, each(|x| x.total_raw_usd))?);
+            columns.push(dec(rows, each(|x| x.margin_used))?);
+            columns.push(dec(rows, each(|x| x.maintenance_margin_used))?);
+            columns.push(dec(rows, each(|x| x.withdrawable))?);
+        }
+        Kind::Positions => {
+            let p = |e: &Envelope| match &e.event {
+                Event::Position(p) => Some(p.clone()),
+                _ => None,
+            };
+            let each =
+                |g: fn(&Position) -> Option<Num>| move |e: &Envelope| p(e).and_then(|x| g(&x));
+            columns.push(dec(rows, each(|x| Some(x.size)))?);
+            columns.push(dec(rows, each(|x| x.entry_price))?);
+            columns.push(dec(rows, each(|x| x.mark))?);
+            columns.push(dec(rows, each(|x| x.position_value))?);
+            columns.push(dec(rows, each(|x| x.unrealised_pnl))?);
+            columns.push(dec(rows, each(|x| x.return_on_equity))?);
+            columns.push(dec(rows, each(|x| x.liquidation_price))?);
+            columns.push(dec(rows, each(|x| x.leverage))?);
+            columns.push(text(rows, |e| p(e).and_then(|x| x.leverage_type)));
+            columns.push({
+                let mut b = UInt32Builder::with_capacity(rows.len());
+                rows.iter()
+                    .for_each(|e| b.append_option(p(e).and_then(|x| x.max_leverage)));
+                Arc::new(b.finish())
+            });
+            columns.push(dec(rows, each(|x| x.margin_used))?);
+            columns.push(dec(rows, each(|x| x.funding_all_time))?);
+            columns.push(dec(rows, each(|x| x.funding_since_open))?);
+            columns.push(dec(rows, each(|x| x.funding_since_change))?);
+        }
+        Kind::LedgerUpdates => {
+            let u = |e: &Envelope| match &e.event {
+                Event::LedgerUpdate(u) => Some(u.clone()),
+                _ => None,
+            };
+            columns.push(text(rows, |e| u(e).map(|x| x.kind)));
+            columns.push({
+                let mut b = BooleanBuilder::with_capacity(rows.len());
+                rows.iter().for_each(|e| {
+                    b.append_option(u(e).map(|x| matches!(x.effect, Effect::Known(_))))
+                });
+                Arc::new(b.finish())
+            });
+            columns.push(dec(rows, |e| match u(e).map(|x| x.effect) {
+                Some(Effect::Known(effects)) => effects.first().map(|d| d.usdc),
+                _ => None,
+            })?);
+            columns.push(text(rows, |e| {
+                u(e).and_then(|x| x.counterparty).map(|c| match c {
+                    Counterparty::Account(_) => "account".to_string(),
+                    Counterparty::Fingerprint(_) => "fingerprint".to_string(),
+                })
+            }));
+            columns.push(text(rows, |e| {
+                u(e).and_then(|x| x.counterparty).map(|c| match c {
+                    Counterparty::Account(alias) => alias.as_str().to_string(),
+                    Counterparty::Fingerprint(fp) => fp,
+                })
+            }));
+            columns.push(text(rows, |e| u(e).and_then(|x| x.token)));
+            columns.push(dec(rows, |e| u(e).and_then(|x| x.amount))?);
+            columns.push(dec(rows, |e| u(e).and_then(|x| x.fee))?);
+        }
         _ => unreachable!("only projected kinds are built"),
     }
     RecordBatch::try_new(schema, columns).map_err(|e| ProjectError::Arrow {
         kind,
         detail: e.to_string(),
     })
+}
+
+/// Ledger updates, one per dex effect: an update that moved margin on two
+/// dexes becomes two, one that moved nothing (or in a way this build does not
+/// know) stays one.
+fn per_effect(rows: &[Envelope]) -> Vec<Envelope> {
+    let mut out = Vec::new();
+    for row in rows {
+        let Event::LedgerUpdate(update) = &row.event else {
+            continue;
+        };
+        match &update.effect {
+            Effect::Known(effects) if effects.len() > 1 => {
+                for effect in effects {
+                    let mut one = row.clone();
+                    if let Event::LedgerUpdate(u) = &mut one.event {
+                        u.effect = Effect::Known(vec![effect.clone()]);
+                    }
+                    out.push(one);
+                }
+            }
+            _ => out.push(row.clone()),
+        }
+    }
+    out
 }
 
 fn scaled(value: Num) -> Result<i128, ProjectError> {
@@ -286,6 +458,7 @@ fn u64s(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<u64>) -> ArrayRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Array;
     use galata_wire::{Side, Ticker, Venue};
     use std::str::FromStr;
 
@@ -381,6 +554,232 @@ mod tests {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let err = write(root.path(), "hyperliquid", "main", &[]).unwrap_err();
         assert!(matches!(err, ProjectError::Root(_)), "{err}");
+    }
+
+    fn account_row(event: Event, recv: i64) -> Envelope {
+        Envelope::new(
+            Venue::new("hyperliquid").unwrap(),
+            Ticker::new("BTC").unwrap(),
+            Some(recv),
+            recv,
+            event,
+        )
+    }
+
+    fn margin(dex: Option<&str>, value: &str) -> Envelope {
+        account_row(
+            Event::Margin(galata_wire::Margin {
+                dex: dex.map(str::to_string),
+                mode: galata_wire::AccountMode::Default,
+                equity_not_held: None,
+                account_value: Some(Num::from_str(value).unwrap()),
+                total_notional: None,
+                total_raw_usd: None,
+                margin_used: None,
+                maintenance_margin_used: None,
+                withdrawable: None,
+            }),
+            5,
+        )
+    }
+
+    fn update(effect: Effect, counterparty: Option<Counterparty>) -> Envelope {
+        account_row(
+            Event::LedgerUpdate(galata_wire::LedgerUpdate {
+                kind: "accountClassTransfer".into(),
+                effect,
+                counterparty,
+                token: None,
+                amount: Some(Num::from_str("10").unwrap()),
+                fee: None,
+            }),
+            7,
+        )
+    }
+
+    fn read_kind(root: &Path, kind: Kind) -> RecordBatch {
+        let batches =
+            galata_segments::read_segment(&path_of(root, "hyperliquid", "main", kind)).unwrap();
+        arrow::compute::concat_batches(&schema_for(kind).unwrap(), &batches).unwrap()
+    }
+
+    fn strings(batch: &RecordBatch, name: &str) -> Vec<Option<String>> {
+        let a = batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        (0..a.len())
+            .map(|i| (!arrow::array::Array::is_null(a, i)).then(|| a.value(i).to_string()))
+            .collect()
+    }
+
+    fn decimals(batch: &RecordBatch, name: &str) -> Vec<Option<i128>> {
+        let a = batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Decimal128Array>()
+            .unwrap();
+        (0..a.len())
+            .map(|i| (!arrow::array::Array::is_null(a, i)).then(|| a.value(i)))
+            .collect()
+    }
+
+    const ONE: i128 = 1_000_000_000_000_000_000;
+
+    #[test]
+    fn margin_is_one_row_per_dex() {
+        let root = owner_only();
+        write(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &[margin(None, "0"), margin(Some("xyz"), "238.85")],
+        )
+        .unwrap();
+        let b = read_kind(root.path(), Kind::Margin);
+        assert_eq!(strings(&b, "dex"), [None, Some("xyz".into())]);
+        assert_eq!(
+            strings(&b, "mode"),
+            [Some("default".into()), Some("default".into())]
+        );
+        assert_eq!(
+            strings(&b, "ticker"),
+            [None, None],
+            "margin names no instrument"
+        );
+        assert_eq!(
+            decimals(&b, "account_value")[1],
+            Some(238_850_000_000_000_000_000)
+        );
+    }
+
+    #[test]
+    fn a_position_carries_its_figures_and_absences() {
+        let root = owner_only();
+        let position = account_row(
+            Event::Position(galata_wire::Position {
+                dex: Some("xyz".into()),
+                ticker: Ticker::new("GOLD").unwrap(),
+                size: Num::from_str("-2").unwrap(),
+                entry_price: Some(Num::from_str("4284").unwrap()),
+                mark: None,
+                position_value: None,
+                unrealised_pnl: None,
+                return_on_equity: None,
+                liquidation_price: None,
+                leverage: Some(Num::from_str("5").unwrap()),
+                leverage_type: Some("cross".into()),
+                max_leverage: Some(20),
+                margin_used: None,
+                funding_all_time: None,
+                funding_since_open: None,
+                funding_since_change: None,
+            }),
+            5,
+        );
+        write(root.path(), "hyperliquid", "main", &[position]).unwrap();
+        let b = read_kind(root.path(), Kind::Positions);
+        assert_eq!(strings(&b, "ticker"), [Some("GOLD".into())]);
+        assert_eq!(decimals(&b, "size"), [Some(-2 * ONE)], "signed");
+        assert_eq!(
+            decimals(&b, "mark"),
+            [None],
+            "not stated is null, never zero"
+        );
+    }
+
+    #[test]
+    fn a_transfer_between_dexes_is_two_rows() {
+        let root = owner_only();
+        let moved = Effect::Known(vec![
+            galata_wire::DexEffect {
+                dex: None,
+                usdc: Num::from_str("-10").unwrap(),
+            },
+            galata_wire::DexEffect {
+                dex: Some("xyz".into()),
+                usdc: Num::from_str("10").unwrap(),
+            },
+        ]);
+        write(root.path(), "hyperliquid", "main", &[update(moved, None)]).unwrap();
+        let b = read_kind(root.path(), Kind::LedgerUpdates);
+        assert_eq!(strings(&b, "dex"), [None, Some("xyz".into())]);
+        assert_eq!(
+            decimals(&b, "effect_usdc"),
+            [Some(-10 * ONE), Some(10 * ONE)]
+        );
+        assert_eq!(
+            strings(&b, "update_kind"),
+            [
+                Some("accountClassTransfer".into()),
+                Some("accountClassTransfer".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn an_update_that_moved_nothing_is_one_row() {
+        let root = owner_only();
+        write(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &[update(Effect::Known(vec![]), None)],
+        )
+        .unwrap();
+        let b = read_kind(root.path(), Kind::LedgerUpdates);
+        assert_eq!(b.num_rows(), 1);
+        assert_eq!(decimals(&b, "effect_usdc"), [None]);
+        assert_eq!(strings(&b, "dex"), [None]);
+    }
+
+    #[test]
+    fn an_unknown_effect_says_so() {
+        let root = owner_only();
+        write(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &[update(Effect::Unknown, None)],
+        )
+        .unwrap();
+        let b = read_kind(root.path(), Kind::LedgerUpdates);
+        let known = b
+            .column_by_name("effect_known")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert!(!known.value(0));
+    }
+
+    #[test]
+    fn a_counterparty_is_an_alias_or_a_fingerprint() {
+        let root = owner_only();
+        let ours = update(
+            Effect::Known(vec![]),
+            Some(Counterparty::Account(
+                crate::ledger::accounts::sub_alias(&galata_wire::Account::new("main").unwrap(), 1)
+                    .unwrap(),
+            )),
+        );
+        let theirs = update(
+            Effect::Known(vec![]),
+            Some(Counterparty::Fingerprint("fp_3a9c".into())),
+        );
+        write(root.path(), "hyperliquid", "main", &[ours, theirs]).unwrap();
+        let b = read_kind(root.path(), Kind::LedgerUpdates);
+        assert_eq!(
+            strings(&b, "counterparty_kind"),
+            [Some("account".into()), Some("fingerprint".into())]
+        );
+        assert_eq!(
+            strings(&b, "counterparty"),
+            [Some("main_s1".into()), Some("fp_3a9c".into())]
+        );
     }
 
     #[test]

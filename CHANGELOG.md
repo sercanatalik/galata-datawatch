@@ -28,8 +28,12 @@ exists so the four above take no vault dependency.
   new), and an empty kind is still a file, with zero rows. The root is held
   owner-only (`0700`, refused otherwise), never under the market tape, and no
   address names any path. Optional, and nothing is written when absent.
-  **Rebuild the ledger binary before writing the key.** Margin, positions and
-  ledger updates follow.
+  **Rebuild the ledger binary before writing the key.** It also projects
+  margin (per dex), positions and ledger updates. Ledger updates are written
+  long, one row per (update, dex it moved): an update that moved nothing is
+  one row with a null dex, one this build cannot read says
+  `effect_known = false`, and a counterparty is an alias or a fingerprint,
+  never an address.
 
 - **`walk_funding_days`: settled funding walked to a stated depth.** Declared
   per venue, it makes the funding walk ask that many days back on every boot,
