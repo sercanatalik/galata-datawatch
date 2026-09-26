@@ -47,6 +47,26 @@ if [[ "${1:-}" == --status ]]; then
         if [[ "$pid" == "-" ]]; then state="exit $status"; else state="pid $pid"; fi
         printf '%-34s %-10s %s\n' "$label" "$state" "$managed"
     done
+
+    # The service tokens: a lapsed one is a service that cannot restart, and
+    # nothing else says so before the day (warn-before-the-tokens-lapse). The
+    # verdict — ok, WARN inside 30 days, EXPIRED — is galata-vault-exec's, so
+    # the window is stated once.
+    echo
+    printf '%-34s %-10s %-5s %s\n' TOKEN EXPIRES DAYS STATE
+    exec_bin="$ROOT/target/release/galata-vault-exec"
+    for token in "$ROOT"/var/tokens/*.gvt; do
+        [[ -f "$token" ]] || { echo "(no tokens in var/tokens — scripts/mint-service-tokens.sh)"; break; }
+        name="$(basename "$token" .gvt)"
+        if [[ ! -x "$exec_bin" ]]; then
+            printf '%-34s %s\n' "$name" "unreadable: no galata-vault-exec — cargo build --release -p galata-datawatch-vault"
+        elif line="$(GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}" GV_TOKEN_FILE="$token" "$exec_bin" --expiry 2>&1)"; then
+            read -r _ date days state <<<"$line"
+            printf '%-34s %-10s %-5s %s\n' "$name" "$date" "$days" "$state"
+        else
+            printf '%-34s %s\n' "$name" "unreadable: ${line#galata-vault-exec: }"
+        fi
+    done
     exit 0
 fi
 

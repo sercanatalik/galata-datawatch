@@ -424,7 +424,7 @@ cargo build --release
 scripts/install-services.sh                        # vault, nats, capture:hyperliquid, tower, flows
 scripts/install-services.sh capture:rh-chain       # add a venue
 scripts/install-services.sh --uninstall tower      # remove one
-scripts/install-services.sh --status               # every com.galata.* agent, flagging strays
+scripts/install-services.sh --status               # every com.galata.* agent, flagging strays, and each token's expiry
 ```
 
 First-time setup on a new machine, after `scripts/install-services.sh vault`:
@@ -442,8 +442,12 @@ scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 3
 - **The recovery kit** is written to `var/galata-datawatch-recovery.gvkit`.
   It is the only way to recover the project, so move it to offline storage
   and delete that copy.
-- **Tokens expire** after 365 days, the server's maximum. Re-run
-  `mint-service-tokens.sh` and reinstall the services before then.
+- **Tokens expire** after 365 days, the server's maximum. `--status` shows
+  each one's date and days left. Inside 30 days it reads `WARN`, and every
+  start of that service logs a warning (`galata-vault-exec --expiry` asks
+  directly). Re-run `mint-service-tokens.sh` and reinstall the services
+  before then. A re-mint revokes the tokens it replaces, by the ids kept in
+  `var/tokens/<service>.id`.
 - **Stopping is clean.** Capture treats SIGTERM as a shutdown: it flushes,
   and the next start records the outage as `downtime`, not a crash.
   Installing a service twice replaces it, and a hand-started copy is stopped

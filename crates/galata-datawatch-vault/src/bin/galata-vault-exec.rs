@@ -3,6 +3,7 @@
 //!
 //! ```text
 //!   galata-vault-exec --only NAME [--only NAME ...] -- <command> [args ...]
+//!   galata-vault-exec --expiry
 //! ```
 //!
 //! **Why this exists beside `gv run`.** `gv run` is the owner's tool: it reads
@@ -18,14 +19,27 @@
 //! **`exec`**, so the command replaces this process: a service manager's
 //! SIGTERM reaches the service itself, and nothing resident holds the values.
 //!
+//! **The token's expiry is said before it bites.** Tokens are minted at the
+//! vault's 365-day maximum; one that lapses is a service that cannot restart.
+//! Inside [`TOKEN_WARNING_DAYS`] this writes one line to stderr — the
+//! service's log under launchd — and starts the service anyway: a valid token
+//! is never refused. `--expiry` prints `<unix> <YYYY-MM-DD> <days> <state>`
+//! and starts nothing, for `install-services.sh --status`.
+//!
 //! Exit codes: `2` bad arguments, `1` the vault refused a name or could not be
 //! reached, and otherwise whatever the command exits with.
 
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use galata_datawatch_vault::{TOKEN_WARNING_DAYS, TokenNotice, token_notice, utc_date};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--expiry"] {
+        return expiry();
+    }
     let Some(split) = args.iter().position(|a| a == "--") else {
         return usage();
     };
@@ -49,6 +63,16 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if let Some(expires_at) = vault.expiry().token_expires_at
+        && let TokenNotice::Soon { days } = token_notice(expires_at, now())
+    {
+        eprintln!(
+            "galata-vault-exec: WARNING this service's token expires on {} ({days} days, inside \
+             {TOKEN_WARNING_DAYS}); after that the service cannot restart. Re-mint with \
+             scripts/mint-service-tokens.sh, then scripts/install-services.sh",
+            utc_date(expires_at)
+        );
+    }
     let environment = match galata_datawatch_vault::environment_for(&vault, &names) {
         Ok(environment) => environment,
         Err(error) => {
@@ -67,7 +91,42 @@ fn main() -> ExitCode {
     ExitCode::from(1)
 }
 
+/// `--expiry`: the token's expiry as one machine line, or the vault's reason.
+fn expiry() -> ExitCode {
+    let vault = match galata_vault::Vault::from_env() {
+        Ok(vault) => vault,
+        Err(error) => {
+            eprintln!("galata-vault-exec: the vault would not open: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    // Refused by name rather than guessed: a token-opened handle always knows
+    // its expiry, so its absence means something other than a service token.
+    let Some(expires_at) = vault.expiry().token_expires_at else {
+        eprintln!("galata-vault-exec: this handle carries no token expiry — not a service token");
+        return ExitCode::from(1);
+    };
+    let notice = token_notice(expires_at, now());
+    println!(
+        "{expires_at} {} {} {}",
+        utc_date(expires_at),
+        notice.days(),
+        notice.word()
+    );
+    ExitCode::SUCCESS
+}
+
+/// The one clock this binary reads.
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 fn usage() -> ExitCode {
-    eprintln!("usage: galata-vault-exec --only NAME [--only NAME ...] -- <command> [args ...]");
+    eprintln!(
+        "usage: galata-vault-exec --only NAME [--only NAME ...] -- <command> [args ...]\n       \
+         galata-vault-exec --expiry"
+    );
     ExitCode::from(2)
 }

@@ -300,3 +300,87 @@ pub fn environment_for(
         })
         .collect()
 }
+
+/// Days before a token's expiry that a service starts saying so.
+///
+/// **30, not the vault's own 14** (`galata_vault::EXPIRY_WARNING_SECS`, which
+/// is about idle vault expiry and never fires here: no galata-vault server
+/// expires an idle vault). The remedy is by hand — the owner at this machine,
+/// `mint-service-tokens.sh`, then `install-services.sh` — and the warning is
+/// printed only when a service starts, which under launchd's `KeepAlive` can
+/// be weeks apart. The common manual-renewal practice warns at 30, 15 and 7
+/// days; this takes the widest, once, because it is seen least often.
+/// `install-services.sh --status` reads the verdict from `--expiry` rather
+/// than restating the number.
+pub const TOKEN_WARNING_DAYS: i64 = 30;
+
+const DAY_SECS: i64 = 86_400;
+
+/// What a token's expiry means now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenNotice {
+    /// More than [`TOKEN_WARNING_DAYS`] left.
+    Ok {
+        /// Whole days left.
+        days: i64,
+    },
+    /// Inside the window, not yet lapsed.
+    Soon {
+        /// Whole days left; `0` on the last day.
+        days: i64,
+    },
+    /// Lapsed. The vault refuses it; this only says so first.
+    Expired,
+}
+
+impl TokenNotice {
+    /// The state word `--expiry` prints: `ok`, `WARN` or `EXPIRED`.
+    pub fn word(&self) -> &'static str {
+        match self {
+            TokenNotice::Ok { .. } => "ok",
+            TokenNotice::Soon { .. } => "WARN",
+            TokenNotice::Expired => "EXPIRED",
+        }
+    }
+
+    /// Whole days left; `0` once lapsed, never negative.
+    pub fn days(&self) -> i64 {
+        match self {
+            TokenNotice::Ok { days } | TokenNotice::Soon { days } => *days,
+            TokenNotice::Expired => 0,
+        }
+    }
+}
+
+/// Judge a token expiring at `expires_at` against `now` (both Unix seconds).
+///
+/// **The clock is the caller's.** Only `galata-vault-exec`'s `main` reads
+/// one, so this can be asked at any instant a test names.
+pub fn token_notice(expires_at: i64, now: i64) -> TokenNotice {
+    let left = expires_at - now;
+    if left <= 0 {
+        return TokenNotice::Expired;
+    }
+    let days = left / DAY_SECS;
+    if days < TOKEN_WARNING_DAYS {
+        TokenNotice::Soon { days }
+    } else {
+        TokenNotice::Ok { days }
+    }
+}
+
+/// The UTC calendar day of a Unix instant, as `YYYY-MM-DD`.
+///
+/// Howard Hinnant's `civil_from_days`: one function, so no date crate.
+pub fn utc_date(secs: i64) -> String {
+    let z = secs.div_euclid(DAY_SECS) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
