@@ -9,6 +9,8 @@
 #   run-service.sh tower
 #   run-service.sh flows
 #   run-service.sh vault
+#   run-service.sh --check <service> [<venue>]   every precondition, then `ready`;
+#                                                starts nothing
 #
 # **Each service gets only its own secrets**, read from the deployment's vault
 # (com.galata.vault) through a token minted for that service alone
@@ -36,6 +38,23 @@ cd "$ROOT"
 
 refuse() { echo "run-service: REFUSED — $1" >&2; exit 2; }
 
+# **--check: would this service start?** Every precondition below, plus that
+# its token opens and has not expired, and then `ready` in place of the exec.
+# A restart is when a missing binary or a lapsed token is found otherwise:
+# the tower's installed copy was missing for a day while --status read
+# `pid 1770 yes` (say-a-service-cannot-restart).
+CHECK=0
+if [[ "${1:-}" == --check ]]; then CHECK=1; shift; fi
+
+# The one exec every branch ends in: the program is tested first, so a missing
+# one is refused by name rather than by bash, and under --check it is reported
+# instead of run.
+start() {
+    [[ -x "$1" ]] || refuse "no program at $1"
+    if (( CHECK )); then echo "ready: $*"; exit 0; fi
+    exec "$@"
+}
+
 # Start a command with named secrets from the vault, read through THIS
 # SERVICE'S token — the vault refuses any name the token was not minted for.
 # galata-vault-exec, not `gv run`: gv reads through the owner key, which this
@@ -51,6 +70,16 @@ from_vault() {
         || refuse "no galata-vault-exec — cargo build --release -p galata-datawatch-vault"
     export GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}"
     export GV_TOKEN_FILE="$token"
+    if (( CHECK )); then
+        local expiry
+        expiry="$("$ROOT/target/release/galata-vault-exec" --expiry 2>&1)" \
+            || refuse "$token does not open: ${expiry#galata-vault-exec: }"
+        [[ "$expiry" != *EXPIRED* ]] || refuse "$token has expired ($expiry) — scripts/mint-service-tokens.sh"
+        # The program after `--` is what galata-vault-exec would exec.
+        while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
+        shift
+        start "$@"
+    fi
     exec "$ROOT/target/release/galata-vault-exec" "$@"
 }
 
@@ -125,7 +154,7 @@ case "$service" in
         # and cannot read any of it — the binary links no decryption code.
         [[ -x "$VAULT_BIN/gv-server" ]] \
             || refuse "no gv-server at $VAULT_BIN — cargo build --release -p gv -p gv-server in galata-vault"
-        exec "$VAULT_BIN/gv-server" local
+        start "$VAULT_BIN/gv-server" local
         ;;
     flows)
         # No secret at all: the lane holds no credential, by design and by
@@ -138,9 +167,9 @@ case "$service" in
         # directory. Served from the repo root, the flows registered and every
         # run failed "No module named 'flows'" — found by the first run.
         cd "$ROOT/py"
-        exec uv run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
+        start "$(command -v uv || echo uv)" run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
         ;;
     *)
-        refuse "usage: run-service.sh vault | nats | capture <venue> | ledger <venue> | tower | flows"
+        refuse "usage: run-service.sh [--check] vault | nats | capture <venue> | ledger <venue> | tower | flows"
         ;;
 esac

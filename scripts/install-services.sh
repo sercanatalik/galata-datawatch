@@ -125,6 +125,26 @@ if [[ "${1:-}" == --status ]]; then
         printf '%-34s %-10s %s\n' "$label" "$state" "$managed"
     done
 
+    # Restart: would each loaded service start again? run-service.sh --check
+    # runs the start's own preconditions and starts nothing. A running service
+    # hides a missing binary or a lapsed token until its next restart; the
+    # tower ran a day with its installed copy missing.
+    echo
+    printf '%-34s %s\n' RESTART "WOULD IT START AGAIN"
+    launchctl list | awk '$3 ~ /^com\.galata\./ {print $3}' | sort | while read -r label; do
+        case "$label" in
+            com.galata.capture.*) args=(capture "${label#com.galata.capture.}") ;;
+            com.galata.ledger.*) args=(ledger "${label#com.galata.ledger.}") ;;
+            com.galata.vault|com.galata.nats|com.galata.tower|com.galata.flows) args=("${label#com.galata.}") ;;
+            *) continue ;;
+        esac
+        if said="$("$ROOT/scripts/run-service.sh" --check "${args[@]}" 2>&1)"; then
+            printf '%-34s %s\n' "$label" "ready"
+        else
+            printf '%-34s %s\n' "$label" "NO — ${said#run-service: REFUSED — }"
+        fi
+    done
+
     # Twins: a managed service's binary running outside launchd. A debug
     # tower ran beside the launchd one for a day with nothing saying so.
     echo
