@@ -484,6 +484,11 @@ pub struct Ledger {
     /// (venue, account, kind), rewritten by the ledger process on each fold
     /// pass. Held **owner-only** as `root` is, and never under the market
     /// tape, which the tower serves. Absent means no projection.
+    ///
+    /// Optional in the parse for the reason `events_secs` is: capture, the
+    /// tower and the lane's tools read this document too, and a binary older
+    /// than this field refuses it, so every one of them is rebuilt before the
+    /// key is written.
     #[serde(default)]
     pub tape: Option<PathBuf>,
     /// Seconds between snapshots of each account and dex.
