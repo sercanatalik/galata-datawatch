@@ -563,6 +563,7 @@ mod tests {
             Event::Funding(Funding {
                 rate,
                 next_micros: Some(DAY + 3_600_000_000),
+                premium: None,
             }),
         );
         crate::ingest::record_generated(

@@ -389,6 +389,7 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
         Kind::Funding => {
             columns.push(dec(rows, |e| funding(e).map(|f| f.rate))?);
             columns.push(int(rows, |e| funding(e).and_then(|f| f.next_micros)));
+            columns.push(dec(rows, |e| funding(e).and_then(|f| f.premium))?);
         }
         Kind::Quotes => {
             columns.push(dec(rows, |e| quote(e).and_then(|q| q.bid_px))?);
@@ -779,12 +780,53 @@ mod tests {
                 Event::Funding(galata_wire::Funding {
                     rate: Num::from_str("0.0000125").unwrap(),
                     next_micros: None,
+                    premium: None,
                 }),
             ),
         });
         let written = tape.commit().unwrap();
         assert_eq!(written.len(), 2);
         assert_eq!(crate::tape::check_layout(root.path()), Vec::new());
+    }
+
+    #[test]
+    fn the_funding_columns_end_with_premium() {
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(Row {
+            stream_seq: 2,
+            source_recv_micros: DAY,
+            envelope: Envelope::new(
+                Venue::new("hyperliquid").unwrap(),
+                Ticker::new("BTC").unwrap(),
+                Some(DAY),
+                DAY,
+                Event::Funding(galata_wire::Funding {
+                    rate: Num::from_str("0.0000125").unwrap(),
+                    next_micros: None,
+                    premium: Some(Num::from_str("-0.0000586636").unwrap()),
+                }),
+            ),
+        });
+        let written = tape.commit().unwrap();
+        let batch = galata_segments::read_segment(&written[0])
+            .unwrap()
+            .remove(0);
+        let schema = batch.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        // Appended: the columns before it keep their places.
+        assert_eq!(
+            &names[names.len() - 3..],
+            ["rate", "next_micros", "premium"]
+        );
+        let premium = batch
+            .column_by_name("premium")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Decimal128Array>()
+            .unwrap();
+        // Exactly: -0.0000586636 at scale 18.
+        assert_eq!(premium.value(0), -58_663_600_000_000);
     }
 
     #[test]

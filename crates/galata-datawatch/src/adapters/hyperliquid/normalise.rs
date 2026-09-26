@@ -89,6 +89,11 @@ pub fn normalise(
                         Event::Funding(Funding {
                             rate: row.funding_rate.require("funding rate")?,
                             next_micros: None,
+                            premium: row
+                                .premium
+                                .as_ref()
+                                .map(|t| t.require("premium"))
+                                .transpose()?,
                         }),
                     ))
                 })
@@ -286,6 +291,13 @@ fn asset_ctx(
             Event::Funding(Funding {
                 rate: rate.require("funding rate")?,
                 next_micros: None,
+                // The premium printed beside this rate: the mark carries it
+                // too, and a funding row states what its rate came from.
+                premium: ctx
+                    .premium
+                    .as_ref()
+                    .map(|t| t.require("premium"))
+                    .transpose()?,
             }),
         ));
     }

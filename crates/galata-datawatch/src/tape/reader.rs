@@ -674,6 +674,7 @@ mod tests {
                 Event::Funding(galata_wire::Funding {
                     rate: Num::from_str("0.1").unwrap(),
                     next_micros: None,
+                    premium: None,
                 }),
             ),
         });
@@ -887,6 +888,7 @@ mod tests {
                 Event::Funding(galata_wire::Funding {
                     rate: Num::from_str("0.1").unwrap(),
                     next_micros: None,
+                    premium: None,
                 }),
             ),
         }

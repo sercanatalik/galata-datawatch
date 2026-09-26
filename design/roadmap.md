@@ -259,8 +259,9 @@ different shape from the one planned here.
   (`walk-the-funding-history`): `walk_funding_days` asks a stated depth of
   settled funding every boot, as `walk_candles` does for bar widths, because
   a walk that resumes from the receipt clock reaches back only to when capture
-  began. `premium` on settled funding is still not carried
-  (`planning/walk-the-funding-history.md`).
+  began. **And the premium is carried** (`carry-the-settled-premium`): the
+  rate is the floor whenever the clamp does not bind, so it cannot say how far
+  the perp traded from its oracle, and the premium can.
 - **`bound-the-replay`**: **NOT PROPOSED.** Named 2026-09-25. `view()` is
   bounded at the durable frontier, and nothing can say *the view as it stood at
   T*, which a replay host needs. Carries forward legacy's `reader-replay` as a

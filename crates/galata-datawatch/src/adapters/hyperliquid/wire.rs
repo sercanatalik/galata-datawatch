@@ -266,10 +266,8 @@ pub struct AssetCtx {
     pub premium: Option<Token>,
 }
 
-/// One row of a funding history page: the rate that settled at `time`.
-///
-/// `premium` is on the wire and not carried — the event has no field for it,
-/// and the record keeps the bytes.
+/// One row of a funding history page: the rate that settled at `time`, and
+/// the premium it was computed from.
 #[derive(Debug, Deserialize)]
 pub struct FundingRow {
     /// The venue's own symbol.
@@ -277,6 +275,10 @@ pub struct FundingRow {
     /// The rate.
     #[serde(rename = "fundingRate")]
     pub funding_rate: Token,
+    /// The premium over the oracle, averaged over the hour. Carried: the rate
+    /// alone does not say it.
+    #[serde(default)]
+    pub premium: Option<Token>,
     /// Venue milliseconds.
     pub time: i64,
 }

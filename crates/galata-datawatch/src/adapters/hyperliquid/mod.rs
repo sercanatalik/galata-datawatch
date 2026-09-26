@@ -685,6 +685,70 @@ mod tests {
         assert_eq!(mark.oracle, Some("80753.0".parse().unwrap()));
     }
 
+    /// A walked `fundingHistory` page, as the client archives one.
+    fn funding_page(bytes: &[u8]) -> crate::record::Payload {
+        crate::record::Payload {
+            seq: 0,
+            recv_micros: 1_790_000_000_000_000,
+            address: crate::record::PayloadAddress::Venue(VENUE.into()),
+            channel: "fundingHistory".into(),
+            kind: "funding".into(),
+            symbol: Some("BTC".into()),
+            origin: galata_wire::Origin::Fetched,
+            payload: bytes.to_vec(),
+        }
+    }
+
+    fn fundings(hl: &Hyperliquid, payload: &crate::record::Payload) -> Vec<galata_wire::Funding> {
+        hl.normalise(payload)
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e.event {
+                galata_wire::Event::Funding(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_settled_row_carries_its_premium_exactly() {
+        // While the clamp does not bind the rate is the interest floor: the
+        // premium is the only thing that says how far the perp traded from
+        // its oracle, and the rate cannot give it back.
+        let hl = shipped();
+        let page = br#"[{"coin":"BTC","fundingRate":"0.0000125","premium":"-0.0000586636","time":1790395200000}]"#;
+        let f = fundings(&hl, &funding_page(page));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].rate, "0.0000125".parse().unwrap());
+        assert_eq!(f[0].premium, Some("-0.0000586636".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_row_without_premium_carries_none() {
+        let hl = shipped();
+        let page = br#"[{"coin":"BTC","fundingRate":"0.0000125","time":1790395200000}]"#;
+        assert_eq!(
+            fundings(&hl, &funding_page(page))[0].premium,
+            None,
+            "absent, not zero"
+        );
+    }
+
+    #[test]
+    fn the_live_funding_carries_the_premium_printed_beside_it() {
+        let hl = shipped();
+        let payload = hl.classify(ASSET_CTX, 1_789_938_867_857_190);
+        let f = fundings(&hl, &payload);
+        assert_eq!(f[0].premium, Some("0.0001981351".parse().unwrap()));
+    }
+
+    #[test]
+    fn an_envelope_from_before_premium_still_reads() {
+        let old = r#"{"rate":"0.0000125","next_micros":null}"#;
+        let f: galata_wire::Funding = serde_json::from_str(old).unwrap();
+        assert_eq!(f.premium, None);
+    }
+
     #[test]
     fn an_unknown_market_is_refused_by_listing_the_known() {
         let err = Market::parse("devnet").unwrap_err().to_string();

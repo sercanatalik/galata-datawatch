@@ -451,6 +451,16 @@ pub struct Funding {
     pub rate: Num,
     /// When the next funding is due, where stated.
     pub next_micros: Option<i64>,
+    /// The premium over the oracle the rate was computed from, where the venue
+    /// prints it.
+    ///
+    /// **Not recoverable from the rate.** Hyperliquid's rate is the premium
+    /// plus a clamped interest term, so while the clamp does not bind the rate
+    /// is the interest floor whatever the premium was: BTC's last 48 hours on
+    /// 2026-09-26 settled 13 distinct rates over 48 distinct premiums.
+    /// Defaulted, so an envelope serialised before it still reads.
+    #[serde(default)]
+    pub premium: Option<Num>,
 }
 
 /// Why an interval was not covered.

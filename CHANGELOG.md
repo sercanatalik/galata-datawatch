@@ -50,6 +50,18 @@ exists so the four above take no vault dependency.
 
 ### Changed
 
+- **`Funding.premium`: settled funding carries the premium it was computed
+  from.** `galata-wire`'s `Funding` gains `premium: Option<Num>`
+  (`#[serde(default)]`, so an envelope serialised before it still reads), and
+  the tape's funding dataset appends a `premium` column after `next_micros`.
+  Hyperliquid carries it as printed on `fundingHistory` rows and on the live
+  asset context. It cannot be recovered from the rate: the rate is the premium
+  plus a clamped interest term, so while the clamp does not bind the rate is
+  the floor (13 distinct rates over 48 distinct premiums in BTC's last 48 hours
+  on 2026-09-26). **A struct literal of `Funding` must add the field.** Tape
+  files written before this lack the column until a rebuild. A polars scan
+  whose first file lacks it refuses, which galata-research now tolerates.
+
 - **rh-crypto's `best_bid_ask` decoder accepts each price as a JSON string or
   a JSON number**, keeping the digits exactly (never through a float).
   Robinhood's published OpenAPI document types them as numbers, and the

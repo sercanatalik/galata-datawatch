@@ -179,6 +179,11 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
         Kind::Funding => with(vec![
             Field::new("rate", PRICE, false),
             Field::new("next_micros", DataType::Int64, true),
+            // The premium the rate was computed from, where the venue prints
+            // it: while the clamp does not bind, the rate is the interest floor
+            // and says nothing of it. Appended, so the columns before it keep
+            // their places.
+            Field::new("premium", PRICE, true),
         ]),
 
         // **The cross-venue table.** A pushed `bbo` and a polled best-bid-ask
