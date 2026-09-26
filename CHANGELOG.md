@@ -19,6 +19,16 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **`walk_funding_days`: settled funding walked to a stated depth.** Declared
+  per venue, it makes the funding walk ask that many days back on every boot,
+  paged forward to now, instead of resuming from the record's receipt clock.
+  That clock reached back only to when capture began, while Hyperliquid holds
+  BTC's settlements from 2023-05-12. Refused by name outside 1..=3,650 days,
+  or on a venue whose `funding` is not declared. Measured cost at 1,300 days:
+  about 194 pages across six instruments, 44.8 KB each, about 40 s. Optional,
+  and off when absent. **Rebuild every binary that reads the document before
+  writing it**, since each refuses a key it does not know.
+
 - **`galata_segments::ListingCache`: a quiet directory is listed once.**
   Each directory's entries are cached by its own mtime, which POSIX `rename`
   moves. A cached listing is trusted only when it is more than `RACY_MARGIN`

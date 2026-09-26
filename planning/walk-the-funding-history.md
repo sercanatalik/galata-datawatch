@@ -1,8 +1,10 @@
 # walk-the-funding-history
 
-**NOT PROPOSED.** Named 2026-09-25, from `galata-research`, whose every
-backtest has to say *funding not charged* because the record holds five
-days of settled funding.
+**BUILT 2026-09-26** (`walk-the-funding-history`): `walk_funding_days`, asked
+every boot. Carrying `premium` on settled funding is still to do, as its own
+change. Named 2026-09-25, from `galata-research`, whose every backtest has to
+say *funding not charged* because the record holds five days of settled
+funding.
 
 Tier 1, the walk. Carries forward legacy's `walk-the-funding` (paging per
 series, forward from the start) and extends it with a stated depth, as

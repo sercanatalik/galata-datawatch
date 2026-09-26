@@ -1,6 +1,6 @@
 # walk-the-coarse-candles
 
-**NOT PROPOSED.** Named 2026-09-25, from the `galata-research` planning pass,
+**BUILT 2026-09-25** (`walk-the-coarse-candles`, archived). Named 2026-09-25, from the `galata-research` planning pass,
 which asked how much history research has and found it leaving.
 
 Tier 1, the walk. Carries forward legacy's `walk_candles`.

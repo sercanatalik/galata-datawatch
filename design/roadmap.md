@@ -57,11 +57,11 @@ Tier 2 and the broker at Tier 4.
   perp margin and not its equity. **Decided 2026-09-25:** a unified account's
   equity is recorded as *not held*, with the reason, and the fold's transfers
   (Tier 13) account for the cash. No spot figure is read.
-- **Whether each HIP-3 dex keeps its own margin** (Tier 12). If
-  `clearinghouseState` answers per `dex`, a snapshot is per (account, dex) and
-  a move between dexes is a transfer. One live call on the `xyz` dex settles
-  it; the design assumes per-dex until then, because the other assumption
-  would sum two margins into one.
+- ~~**Whether each HIP-3 dex keeps its own margin** (Tier 12).~~ **Settled
+  2026-09-25, measured**: `clearinghouseState` with `"dex": "xyz"` answers
+  with its own `marginSummary`, and on 4 of 4 accounts the two dexes' answers
+  had different `accountValue`s (`design/measured.md`). A snapshot is per
+  (account, dex), as built.
 
 ---
 
@@ -255,6 +255,12 @@ different shape from the one planned here.
   on two real restarts — 2,337 payloads, 2,337 distinct sequences, zero
   collisions.
 
+- ~~**Settled funding only as deep as capture.**~~ **Done 2026-09-26**
+  (`walk-the-funding-history`): `walk_funding_days` asks a stated depth of
+  settled funding every boot, as `walk_candles` does for bar widths, because
+  a walk that resumes from the receipt clock reaches back only to when capture
+  began. `premium` on settled funding is still not carried
+  (`planning/walk-the-funding-history.md`).
 - **`bound-the-replay`**: **NOT PROPOSED.** Named 2026-09-25. `view()` is
   bounded at the durable frontier, and nothing can say *the view as it stood at
   T*, which a replay host needs. Carries forward legacy's `reader-replay` as a

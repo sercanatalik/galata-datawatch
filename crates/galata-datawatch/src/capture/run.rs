@@ -2144,6 +2144,46 @@ mod tests {
         );
     }
 
+    /// Walk funding once at `interval`, answering one short page, and return
+    /// where the first request started.
+    async fn first_funding_start(f: &mut Fixture, interval: WalkInterval) -> i64 {
+        let starts: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+        let request = WalkRequest {
+            items: vec![(Series::Funding, interval)],
+            share: 1.0,
+            cold_start_days: 7,
+            cap: 50,
+        };
+        f.capture
+            .walk(&request, |req: Fetch| {
+                starts.lock().unwrap().push(req.from_micros);
+                let page = funding_page(&req.symbol, req.from_micros / 1_000 + 3_600_000, 1);
+                async move { Ok(page) }
+            })
+            .await
+            .unwrap();
+        starts.into_inner().unwrap()[0]
+    }
+
+    #[tokio::test]
+    async fn a_declared_funding_depth_is_asked_past_where_a_resume_reaches() {
+        // A resuming walk reaches back at most to the cold start (and, once
+        // the record holds funding, to its last receipt): the record is dated
+        // by receipt. A declared depth asks for the depth, whatever it holds.
+        let mut f = walk_fixture(100 * DAY);
+        let resumed = first_funding_start(&mut f, WalkInterval::live(HOUR)).await;
+        let now = f.capture.wiring.clock.now_micros();
+        assert_eq!(
+            resumed,
+            now - 7 * DAY,
+            "a resuming walk stops at the cold start"
+        );
+
+        let deep = first_funding_start(&mut f, WalkInterval::needed(HOUR, 30 * DAY)).await;
+        let now = f.capture.wiring.clock.now_micros();
+        assert_eq!(deep, now - 30 * DAY, "the declared depth");
+    }
+
     #[tokio::test]
     async fn a_forward_walk_advances_past_the_last_row() {
         // Otherwise the venue hands back the same page forever.

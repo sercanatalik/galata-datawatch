@@ -126,6 +126,7 @@ pub fn boot(
         .collect::<Result<_, _>>()?;
     let walk_config = adapter_config.clone();
     let walk_candles: Vec<String> = venue.walk_candles.clone();
+    let walk_funding_days = venue.walk_funding_days;
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
@@ -174,6 +175,7 @@ pub fn boot(
                 &declared_series,
                 live_interval,
                 &walk_candles,
+                walk_funding_days,
             )
             .map_err(|e| format!("[venue.{venue_name}] {e}"))?
         } else {

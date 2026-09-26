@@ -423,6 +423,18 @@ pub struct VenueConfig {
     /// it cannot be. Absent means none.
     #[serde(default)]
     pub walk_candles: Vec<String>,
+    /// How many days of **settled funding** the walk asks for, on every boot.
+    ///
+    /// The funding walk otherwise resumes from the record's receipt watermark,
+    /// which reaches back only as far as capture began (or the cold start):
+    /// the record held five days of settled funding while the venue held BTC's
+    /// from 2023-05-12 (measured 2026-09-26). Asked every boot for the reason
+    /// `walk_candles` is: the record, dated by receipt, cannot say how deep its
+    /// venue-timed history reaches. Measured cost at 1,300 days: at most ~60
+    /// pages for BTC and ETH, ~194 for six instruments, 44.8 KB a page, about
+    /// 40 s at `walk_share = 0.25`. Absent means the walk resumes as before.
+    #[serde(default)]
+    pub walk_funding_days: Option<u32>,
     /// The instruments.
     pub instruments: Vec<InstrumentDecl>,
     /// The variable holding this venue's endpoint, **on a chain venue**.
@@ -769,6 +781,24 @@ impl Config {
                     venue: name.clone(),
                     known: adapters.known_names().join(", "),
                 });
+            }
+            if let Some(days) = venue.walk_funding_days {
+                if !(1..=3_650).contains(&days) {
+                    return Err(ConfigError::OutOfBounds {
+                        origin: origin.clone(),
+                        field: "walk_funding_days",
+                        value: format!("{days} in [venue.{name}]"),
+                        bound: "1..=3650 days",
+                    });
+                }
+                if !venue.series.contains(&Series::Funding) {
+                    return Err(ConfigError::OutOfBounds {
+                        origin: origin.clone(),
+                        field: "walk_funding_days",
+                        value: format!("{days} in [venue.{name}]"),
+                        bound: "a venue whose series include `funding`: there is no funding walk to deepen",
+                    });
+                }
             }
             for series in &venue.series {
                 // Refused HERE, not at connect. A process that starts and then
@@ -1311,6 +1341,53 @@ dexes = ["", "xyz"]
         assert_eq!(
             load(&text).unwrap().venue["hyperliquid"].walk_candles,
             ["1h", "4h", "1d"]
+        );
+    }
+
+    /// GOOD, with funding declared and a funding depth.
+    fn with_funding_depth(days: &str) -> String {
+        GOOD.replace(
+            "series = [\"trades\", \"quotes\", \"candles\"]",
+            "series = [\"trades\", \"quotes\", \"candles\", \"funding\"]",
+        )
+        .replace(
+            "candle = \"1m\"",
+            &format!("candle = \"1m\"\nwalk_funding_days = {days}"),
+        )
+    }
+
+    #[test]
+    fn a_funding_depth_is_accepted() {
+        let c = load(&with_funding_depth("1300")).unwrap();
+        assert_eq!(c.venue["hyperliquid"].walk_funding_days, Some(1300));
+        assert_eq!(
+            load(GOOD).unwrap().venue["hyperliquid"].walk_funding_days,
+            None,
+            "absent means none"
+        );
+    }
+
+    #[test]
+    fn a_funding_depth_out_of_range_is_refused() {
+        for days in ["0", "3651"] {
+            let err = load(&with_funding_depth(days)).unwrap_err().to_string();
+            assert!(
+                err.contains("walk_funding_days") && err.contains("[venue.hyperliquid]"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_funding_depth_without_funding_is_refused() {
+        let text = GOOD.replace(
+            "candle = \"1m\"",
+            "candle = \"1m\"\nwalk_funding_days = 1300",
+        );
+        let err = load(&text).unwrap_err().to_string();
+        assert!(
+            err.contains("walk_funding_days") && err.contains("funding"),
+            "{err}"
         );
     }
 

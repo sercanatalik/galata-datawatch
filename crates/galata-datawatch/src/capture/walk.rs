@@ -450,6 +450,13 @@ pub enum WalkWidthError {
         /// The label.
         width: String,
     },
+    /// A funding depth on a venue whose funding is not declared, or not
+    /// handed back on request: there is no funding walk to deepen.
+    #[error(
+        "walk_funding_days is declared, and funding is not among the declared series the venue \
+         hands back"
+    )]
+    NoFunding,
     /// Walk widths on a venue that does not capture candles.
     #[error("walk_candles is declared, and candles is not among the declared series")]
     NoCandles,
@@ -482,11 +489,26 @@ pub fn walk_items(
     declared: &[Series],
     live_interval_micros: i64,
     walk_candles: &[String],
+    walk_funding_days: Option<u32>,
 ) -> Result<Vec<(Series, WalkInterval)>, WalkWidthError> {
+    if walk_funding_days.is_some()
+        && !(declared.contains(&Series::Funding)
+            && declaration.serves_historically(Series::Funding))
+    {
+        return Err(WalkWidthError::NoFunding);
+    }
     let mut items: Vec<(Series, WalkInterval)> = declared
         .iter()
         .filter(|series| declaration.serves_historically(**series))
-        .map(|series| (*series, WalkInterval::live(live_interval_micros)))
+        .map(|series| match (series, walk_funding_days) {
+            // A declared depth is asked every boot: the record, dated by
+            // receipt, cannot say how deep its settled funding reaches.
+            (Series::Funding, Some(days)) => (
+                *series,
+                WalkInterval::needed(live_interval_micros, i64::from(days) * MICROS_PER_DAY),
+            ),
+            _ => (*series, WalkInterval::live(live_interval_micros)),
+        })
         .collect();
     if walk_candles.is_empty() {
         return Ok(items);
@@ -833,7 +855,15 @@ mod tests {
     #[test]
     fn declared_widths_are_asked_for_their_reach() {
         let d = declaration(None, Some(5_000));
-        let items = walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h", "4h", "1d"])).unwrap();
+        let items = walk_items(
+            &d,
+            named,
+            &DECLARED,
+            MINUTE,
+            &widths(&["1h", "4h", "1d"]),
+            None,
+        )
+        .unwrap();
         // The live width for each historical series, as before, then each walk
         // width at its whole reach: 5,000 bars of it.
         assert_eq!(
@@ -854,7 +884,7 @@ mod tests {
     #[test]
     fn absent_means_the_live_width_only() {
         let d = declaration(None, Some(5_000));
-        let items = walk_items(&d, named, &DECLARED, MINUTE, &[]).unwrap();
+        let items = walk_items(&d, named, &DECLARED, MINUTE, &[], None).unwrap();
         assert!(items.iter().all(|(_, i)| i.is_live()));
     }
 
@@ -862,7 +892,7 @@ mod tests {
     fn a_width_the_venue_cannot_name_is_refused() {
         let d = declaration(None, Some(5_000));
         assert_eq!(
-            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["7m"])),
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["7m"]), None),
             Err(WalkWidthError::Unnamed { width: "7m".into() })
         );
     }
@@ -871,7 +901,7 @@ mod tests {
     fn the_live_width_repeated_is_refused() {
         let d = declaration(None, Some(5_000));
         assert_eq!(
-            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1m"])),
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1m"]), None),
             Err(WalkWidthError::LiveRepeated { width: "1m".into() })
         );
     }
@@ -880,7 +910,7 @@ mod tests {
     fn a_width_listed_twice_is_refused() {
         let d = declaration(None, Some(5_000));
         assert_eq!(
-            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h", "1h"])),
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h", "1h"]), None),
             Err(WalkWidthError::Duplicate { width: "1h".into() })
         );
     }
@@ -889,8 +919,43 @@ mod tests {
     fn walk_widths_without_candles_are_refused() {
         let d = declaration(None, Some(5_000));
         assert_eq!(
-            walk_items(&d, named, &[Series::Trades], MINUTE, &widths(&["1h"])),
+            walk_items(&d, named, &[Series::Trades], MINUTE, &widths(&["1h"]), None),
             Err(WalkWidthError::NoCandles)
+        );
+    }
+
+    #[test]
+    fn a_declared_funding_depth_asks_that_far_back() {
+        let d = declaration(None, Some(5_000));
+        let items = walk_items(&d, named, &DECLARED, MINUTE, &[], Some(1_300)).unwrap();
+        let funding = items.iter().find(|(s, _)| *s == Series::Funding).unwrap().1;
+        assert_eq!(funding.need_micros, Some(1_300 * MICROS_PER_DAY));
+        // And nothing else moves: candles still resume from the record.
+        let candles = items.iter().find(|(s, _)| *s == Series::Candles).unwrap().1;
+        assert!(candles.is_live());
+
+        // Asked from the depth, not from what the record holds.
+        let walk = walk(&d);
+        let now = 2_000 * MICROS_PER_DAY;
+        let root = tempfile::tempdir().unwrap();
+        let archive = Archive::open(root.path());
+        let ask = walk.ask(&archive, "v", Series::Funding, funding, now);
+        assert_eq!(ask.from_micros, now - 1_300 * MICROS_PER_DAY);
+    }
+
+    #[test]
+    fn a_funding_depth_without_funding_is_refused() {
+        let d = declaration(None, Some(5_000));
+        assert_eq!(
+            walk_items(
+                &d,
+                named,
+                &[Series::Trades, Series::Candles],
+                MINUTE,
+                &[],
+                Some(30)
+            ),
+            Err(WalkWidthError::NoFunding)
         );
     }
 
@@ -898,7 +963,7 @@ mod tests {
     fn a_width_with_no_stated_reach_is_refused() {
         let d = declaration(None, None);
         assert_eq!(
-            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h"])),
+            walk_items(&d, named, &DECLARED, MINUTE, &widths(&["1h"]), None),
             Err(WalkWidthError::NoReach { width: "1h".into() })
         );
     }

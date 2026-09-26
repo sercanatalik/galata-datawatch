@@ -47,6 +47,14 @@ candle = "1m"
 # width not declared here is history leaving the venue uncaptured. Each is
 # asked for its whole reach on every boot: 18 requests across six instruments.
 walk_candles = ["1h", "4h", "1d"]
+# How many days of SETTLED funding the walk asks for, on every boot. Without it
+# the funding walk resumes from the record's receipt clock and reaches back only
+# to when capture began, while the venue holds every settlement since it began
+# (BTC and ETH from 2023-05-12, 1,233 days on 2026-09-26). At 1,300 days: at most
+# ~60 pages for BTC and ETH, ~194 for six instruments, 44.8 KB a page, ~40 s at
+# walk_share 0.25. REBUILD every binary that reads this file before enabling it:
+# each refuses a key it does not know.
+# walk_funding_days = 1300
 # `quotes` is the venue's `bbo` channel rather than `l2Book`: it carries sizes
 # (it is `l2Book` at one level a side) and it is emitted when the top of book
 # changes, where the public `l2Book` is a throttled snapshot on a timer

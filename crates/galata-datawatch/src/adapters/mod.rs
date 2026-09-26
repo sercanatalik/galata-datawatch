@@ -654,6 +654,7 @@ mod tests {
             series: vec![galata_wire::Series::Transfers],
             candle: "1m".into(),
             walk_candles: Vec::new(),
+            walk_funding_days: None,
             instruments: vec![crate::config::InstrumentDecl {
                 ticker: "NVDA".into(),
                 dex: None,
@@ -771,6 +772,7 @@ mod tests {
             series: vec![galata_wire::Series::Quotes],
             candle: "1m".into(),
             walk_candles: Vec::new(),
+            walk_funding_days: None,
             instruments: vec![crate::config::InstrumentDecl {
                 ticker: "BTC".into(),
                 dex: None,
