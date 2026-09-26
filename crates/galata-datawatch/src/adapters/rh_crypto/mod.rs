@@ -35,9 +35,11 @@ pub const REST_URL: &str = "https://trading.robinhood.com";
 /// **Repeated `?symbol=`**, which is what makes one poll cover every instrument
 /// rather than one request each.
 ///
-/// **`v1` is disputed, and kept.** apis.io's listing of this API gives `v1`; a
-/// published copy of the official Python sample builds `/api/v2/…`. Neither
-/// can be settled without credentials, which this tree has not obtained. One
-/// constant, used for both the request and its signature, so the first live
-/// run settles it in one place — and the archive will hold the answer.
+/// **`v1`, and settled.** Robinhood's published document lists `v1` and `v2`
+/// as **different products**, not two spellings of one. v1 prices come from
+/// market makers with the spread included, and they are the fields
+/// `wire` normalises. v2 prices come from partner exchanges for
+/// fee-tier accounts, and answer only `bid` and `ask`. The earlier dispute
+/// was two sources each describing a different one (`design/measured.md`).
+/// Still one constant, used for both the request and its signature.
 pub const BEST_BID_ASK_PATH: &str = "/api/v1/crypto/marketdata/best_bid_ask/";

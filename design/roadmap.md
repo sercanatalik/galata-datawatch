@@ -495,11 +495,14 @@ called**, and that is stated rather than implied.*
   Found on the way: `boot` resolved the adapter with a hard-coded
   `&EnvSecrets`, so under the vault binary a chain provider's URL came from
   the environment rather than the vault — fixed.
-- **The live endpoint.** No credentials were obtained and none should be. The
-  response shape rests on published documentation that **disagrees with itself**
-  about whether a top-level `price` exists — and, since, about whether the path
-  is `/api/v1/` or `/api/v2/`; the decoder requires no `price`, the path is one
-  constant, and the record is what will settle both.
+- **The live endpoint.** No credentials were obtained and none should be.
+  ~~Whether `price` exists, and `/api/v1/` vs `/api/v2/`~~ — **settled from the
+  published OpenAPI document** (2026-09-26, `read-the-published-quote-shape`).
+  Both paths exist, as different products. v1, the one kept, has `price` as the
+  midpoint and no `quantity`. v2 answers `bid` and `ask` only. The spreads are
+  percentages. The one open question, whether numbers arrive as strings or JSON
+  numbers, is made harmless: the decoder takes either, digits verbatim. The
+  first credentialed poll is still what verifies it.
 - ~~**The poll loop itself**~~ — **done**: `Capture::run_poll`, with every poll
   archived (including unchanged ones), consecutive failures widening **one**
   gap, and a `429` backing off where an unreachable venue does not. Exercised

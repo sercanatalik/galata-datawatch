@@ -30,6 +30,16 @@ exists so the four above take no vault dependency.
 
 ### Changed
 
+- **rh-crypto's `best_bid_ask` decoder accepts each price as a JSON string or
+  a JSON number**, keeping the digits exactly (never through a float).
+  Robinhood's published OpenAPI document types them as numbers, and the
+  decoder took strings only, so a live answer spelled that way would have been
+  archived and never normalised. Anything else is refused as a shape error
+  naming the field. The same document settles that v1, the path kept, has
+  `price` (the midpoint) and no `quantity`, and that its spreads are
+  percentages of the mid. `Quote::{bid,ask}_spread` are documented as being in
+  the venue's own unit.
+
 - A queued fill is identified by its ticker, series **and width**, so a
   settle's 1h fill does not widen its 1m fill.
 

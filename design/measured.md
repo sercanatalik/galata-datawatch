@@ -1342,6 +1342,13 @@ SELECT venue, ask_px AS pay_to_buy FROM … WHERE ticker='BTC' ORDER BY ask_px L
 The broker's ask is 21.50 higher and its bid 22.50 lower — the spread it
 states, visible as the reason rather than inferred from the numbers.
 
+> **Corrected 2026-09-26.** The `22.50` in the spread columns came from a
+> fixture that read `sell_spread`/`buy_spread` as price differences. The
+> published document defines them as *"the percent difference between the bid
+> [ask] and the mid price"*: for these prices, about `0.0277`. The prices and
+> the comparison above stand. The spread columns carry the venue's own unit,
+> which for rh-crypto is a percentage.
+
 ### A documented disagreement, carried rather than resolved
 
 One published description of `best_bid_ask` lists a top-level `price`. A bug
@@ -1357,6 +1364,38 @@ So nothing here requires `price`. The prices relied on are the two
 spread-inclusive ones, which are the **tradeable** numbers anyway — what you
 would actually pay and actually receive. A field the venue did not state is
 **absent**, never zero, because zero is a price.
+
+### Settled from the published document (2026-09-26)
+
+Robinhood's OpenAPI document is embedded in the docs page
+`https://docs.robinhood.com/crypto/trading/`, in the page chunk
+`_next/static/chunks/pages/crypto/trading-8436f0bde21c73a2dc6c.js`, read on
+2026-09-26 (`info.title` "Robinhood Crypto Trading API", no version string).
+It settles both disputes. The two secondary sources were describing
+**different endpoints**:
+
+| | `/api/v1/crypto/marketdata/best_bid_ask/` | `/api/v2/crypto/marketdata/best_bid_ask/` |
+|---|---|---|
+| prices from | "our partner market makers", spread included | "our partner exchanges", for fee-tier accounts |
+| fields | `symbol`, `price` (the midpoint), `bid_inclusive_of_sell_spread`, `sell_spread`, `ask_inclusive_of_buy_spread`, `buy_spread`, `timestamp` | `symbol`, `bid`, `ask` |
+| `symbol` | optional (absent = every pair) | required, `is_api_tradable` pairs only |
+
+v1 has no `quantity` (that belongs to `estimated_price`). The adapter keeps
+**v1**: its schema is the one the normaliser reads, and v2 is a different price
+source, not another spelling of this one.
+
+**What it did not settle: how a number is spelled.** The document types every
+price `number`/`double`. `rizome-dev/go-robinhood` parses strings on purpose.
+`Saver05/robinrust` uses a visitor that accepts either. A decoder that took
+strings only, as this one did, would archive every poll and then normalise
+none if the wire uses numbers. So the decoder now takes either spelling,
+keeping the digits verbatim through `RawValue`. `8.119e4` reads as exactly
+`81190`, because rust_decimal parses scientific notation as decimal.
+
+**Probing does not settle a path.** An unsigned request gets `400` ("missing
+required headers") and a well-formed bogus key gets `401` ("credential … not
+found") on `v1`, `v2` and a nonexistent `v9` alike. Authentication runs
+before routing, so only a credentialed request can tell the paths apart.
 
 **Unverified against the live endpoint**, which needs credentials. Until then
 the shape is a hypothesis with a test, not a measurement — a weaker claim than

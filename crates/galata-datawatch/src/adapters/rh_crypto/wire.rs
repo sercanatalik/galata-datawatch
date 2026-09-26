@@ -1,38 +1,103 @@
 //! The `best_bid_ask` response, and the fields that actually matter.
 //!
 //! ```text
-//!   results: [{
-//!     symbol, side, price, quantity,
-//!     bid_inclusive_of_sell_spread, sell_spread,
-//!     ask_inclusive_of_buy_spread,  buy_spread,
-//!     timestamp
-//!   }]
+//!   v1  results: [{
+//!         symbol, price,
+//!         bid_inclusive_of_sell_spread, sell_spread,
+//!         ask_inclusive_of_buy_spread,  buy_spread,
+//!         timestamp
+//!       }]
 //! ```
 //!
-//! # A documented disagreement, unresolved here
+//! # What the published document says
 //!
-//! One published description of this endpoint lists a top-level `price`.
-//! A bug report against a client library says the opposite — that
-//! `best_bid_ask` *structurally has no `price` field*, and that reading one
-//! yields nothing.
+//! Robinhood's OpenAPI document, embedded in `docs.robinhood.com/crypto/trading/`
+//! (read 2026-09-26, `design/measured.md`), settles what two secondary
+//! sources disputed:
 //!
-//! **This tree has been here before.** Hyperliquid's `bbo` was documented as
-//! "functionally equivalent to `l2Book` with `nLevels: 1`" — true of meaning,
-//! false of shape — and every frame failed to normalise until a live run showed
-//! the real form. The lesson taken then applies now: *the record holds what
-//! arrived, and the shape is read off disk rather than off a document.*
+//! - **v1 has `price`**, defined as the midpoint of the two spread-inclusive
+//!   prices, and **no `quantity`**. That belongs to `estimated_price`.
+//! - **v2** (`/api/v2/…`, partner exchanges, fee tiers) answers `symbol`,
+//!   `bid` and `ask` alone. A bug report that `best_bid_ask` "structurally
+//!   has no `price`" was describing that one.
+//! - `sell_spread` and `buy_spread` are **"the percent difference between the
+//!   bid (ask) and the mid price"**. They are percentages, not price
+//!   differences. The quote carries them as stated.
 //!
-//! So this reads `price` **where it is present** and never requires it. The
-//! prices it relies on are the two spread-inclusive ones, which are the
-//! tradeable numbers anyway — what you would actually pay.
+//! # What it does not settle: how a number is spelled
 //!
-//! **This has not been checked against the live endpoint**, because that needs
-//! credentials. Until it is, the shape below is a hypothesis with a test, not a
-//! measurement.
+//! The document types every price as a JSON **number**. At least one client
+//! (`rizome-dev/go-robinhood`) parses JSON **strings** on purpose. This tree
+//! has met that kind of gap before: Hyperliquid's `bbo` was documented as
+//! "functionally equivalent to `l2Book` with `nLevels: 1`", which was true of
+//! the meaning and false of the shape, and every frame failed to normalise
+//! until a live run showed the real form. So each number is read **in either
+//! spelling**, with its digits as the venue wrote them (never through a float;
+//! `check-no-float-money.sh`), and `price` and `quantity` are read where
+//! present and never required.
+//!
+//! **This has still not been checked against the live endpoint**, because
+//! that needs credentials. The record will hold the first real answer.
 
 use galata_wire::{Envelope, Event, Num, Quote, Ticker, Venue};
 
 use crate::normalise::NormaliseError;
+
+/// A number the venue wrote as a JSON string **or** a JSON number, kept as
+/// the digits it wrote.
+///
+/// Through `RawValue`, never `serde_json::Number`: without
+/// `arbitrary_precision` that holds an `f64`, and a price that has been
+/// through a double cannot say which digits it lost. Any other JSON type is
+/// a shape error naming the field.
+fn number_text<'de, D>(deserializer: D, field: &str) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de::Error;
+
+    let Some(raw) = Option::<Box<serde_json::value::RawValue>>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let text = raw.get();
+    match text.as_bytes().first() {
+        Some(b'"') => serde_json::from_str::<String>(text)
+            .map(Some)
+            .map_err(D::Error::custom),
+        Some(b'-' | b'0'..=b'9') => Ok(Some(text.to_owned())),
+        Some(b'n') if text == "null" => Ok(None),
+        _ => Err(D::Error::custom(format!(
+            "{field}: expected a number or a numeric string, got {text}"
+        ))),
+    }
+}
+
+/// One `deserialize_with` target per field, so a refusal names its field:
+/// serde hands a field's deserializer no name of its own.
+macro_rules! number_fields {
+    ($($field:ident),* $(,)?) => {
+        mod number_field {
+            $(
+                pub(super) fn $field<'de, D>(d: D) -> Result<Option<String>, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    super::number_text(d, stringify!($field))
+                }
+            )*
+        }
+    };
+}
+
+number_fields!(
+    bid_inclusive_of_sell_spread,
+    ask_inclusive_of_buy_spread,
+    sell_spread,
+    buy_spread,
+    quantity,
+    price,
+);
 
 /// One symbol's top of book.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -43,23 +108,31 @@ pub struct BestBidAsk {
     ///
     /// This rather than a raw mid or a documented `price`: a broker's quote is
     /// what you would get, and the spread is how it is paid.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "number_field::bid_inclusive_of_sell_spread"
+    )]
     pub bid_inclusive_of_sell_spread: Option<String>,
     /// The ask **a buyer would actually pay**, spread included.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "number_field::ask_inclusive_of_buy_spread"
+    )]
     pub ask_inclusive_of_buy_spread: Option<String>,
-    /// The spread taken on a sell.
-    #[serde(default)]
+    /// The spread taken on a sell: **a percent of the mid**, as the document
+    /// defines it, not a price difference.
+    #[serde(default, deserialize_with = "number_field::sell_spread")]
     pub sell_spread: Option<String>,
-    /// The spread taken on a buy.
-    #[serde(default)]
+    /// The spread taken on a buy: a percent of the mid.
+    #[serde(default, deserialize_with = "number_field::buy_spread")]
     pub buy_spread: Option<String>,
-    /// Where a quantity is stated.
-    #[serde(default)]
+    /// Where a quantity is stated. **v1's document states none**; read where
+    /// present, never required.
+    #[serde(default, deserialize_with = "number_field::quantity")]
     pub quantity: Option<String>,
-    /// **Present in one description of this endpoint and reported absent by a
-    /// client library's bug tracker.** Read where present, never required.
-    #[serde(default)]
+    /// The midpoint, in v1's document; absent from v2's. Read where present,
+    /// never required, and not used: the tradeable prices are the two above.
+    #[serde(default, deserialize_with = "number_field::price")]
     pub price: Option<String>,
     /// The venue's own clock, ISO-8601.
     #[serde(default)]
@@ -164,20 +237,48 @@ mod tests {
     use std::collections::BTreeMap;
     use std::str::FromStr;
 
-    /// The shape as documented. **Not captured from the venue** — no
-    /// credentials — so this is a hypothesis with a test rather than a
-    /// measurement, and it says so.
+    /// The v1 shape as the published document gives it, with strings, which is
+    /// how one client parses it. **Not captured from the venue** (no
+    /// credentials), so it is a hypothesis with a test, and it says so. The
+    /// spreads are percentages of the mid, as the document defines them:
+    /// (81235.50 - 81213.00) / 81213.00 is about 0.0277%.
     const RESPONSE: &str = r#"{
       "results": [{
         "symbol": "BTC-USD",
         "bid_inclusive_of_sell_spread": "81190.50",
-        "sell_spread": "22.50",
+        "sell_spread": "0.0277",
         "ask_inclusive_of_buy_spread": "81235.50",
-        "buy_spread": "22.50",
+        "buy_spread": "0.0277",
         "quantity": "0.5",
         "timestamp": "2026-09-21T10:15:30.123456Z"
       }]
     }"#;
+
+    /// The same entry as the document types it: every price a JSON number,
+    /// with `price` (the midpoint) and no `quantity`.
+    const DOCUMENTED: &str = r#"{
+      "results": [{
+        "symbol": "BTC-USD",
+        "price": 81213.00,
+        "bid_inclusive_of_sell_spread": 81190.50,
+        "sell_spread": 0.0277,
+        "ask_inclusive_of_buy_spread": 81235.50,
+        "buy_spread": 0.0277,
+        "timestamp": "2026-09-21T10:15:30.123456Z"
+      }]
+    }"#;
+
+    fn quote(bytes: &[u8]) -> Quote {
+        let parsed = response(bytes).unwrap();
+        match read(&venue(), &parsed, &tickers(), 100).remove(0).event {
+            Event::Quote(q) => q,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn n(text: &str) -> Option<Num> {
+        Some(Num::from_str(text).unwrap())
+    }
 
     fn tickers() -> BTreeMap<String, Ticker> {
         BTreeMap::from([("BTC-USD".into(), Ticker::new("BTC").unwrap())])
@@ -198,8 +299,8 @@ mod tests {
             Event::Quote(q) => {
                 assert_eq!(q.bid_px, Some(Num::from_str("81190.50").unwrap()));
                 assert_eq!(q.ask_px, Some(Num::from_str("81235.50").unwrap()));
-                assert_eq!(q.bid_spread, Some(Num::from_str("22.50").unwrap()));
-                assert_eq!(q.ask_spread, Some(Num::from_str("22.50").unwrap()));
+                assert_eq!(q.bid_spread, Some(Num::from_str("0.0277").unwrap()));
+                assert_eq!(q.ask_spread, Some(Num::from_str("0.0277").unwrap()));
             }
             other => panic!("{other:?}"),
         }
@@ -207,10 +308,9 @@ mod tests {
 
     #[test]
     fn a_missing_price_is_absent_and_never_zero() {
-        // **The documented disagreement.** One description of this endpoint
-        // lists a top-level `price`; a client library's bug tracker says it has
-        // none. So nothing here requires it, and a field the venue did not
-        // state is absent rather than zero — zero is a price.
+        // v2's answer has no `price` and v1's does, so nothing here requires
+        // it. A field the venue did not state is absent rather than zero,
+        // because zero is a price.
         let parsed =
             response(br#"{"results":[{"symbol":"BTC-USD","timestamp":"2026-09-21T10:15:30Z"}]}"#)
                 .unwrap();
@@ -252,6 +352,63 @@ mod tests {
     fn a_symbol_nobody_asked_about_is_skipped() {
         let parsed = response(br#"{"results":[{"symbol":"DOGE-USD","quantity":"1"}]}"#).unwrap();
         assert!(read(&venue(), &parsed, &tickers(), 100).is_empty());
+    }
+
+    #[test]
+    fn numbers_as_the_document_types_them_are_exact() {
+        let q = quote(DOCUMENTED.as_bytes());
+        assert_eq!(q.bid_px, n("81190.50"), "the digits, not a double's");
+        assert_eq!(q.ask_px, n("81235.50"));
+        assert_eq!(q.bid_spread, n("0.0277"));
+        // A double would have made this 0.1 + 0.2 = 0.30000000000000004.
+        let exact = quote(br#"{"results":[{"symbol":"BTC-USD","bid_inclusive_of_sell_spread":0.30000000000000000001}]}"#);
+        assert_eq!(exact.bid_px, n("0.30000000000000000001"));
+    }
+
+    #[test]
+    fn numbers_as_strings_are_exact() {
+        let q = quote(RESPONSE.as_bytes());
+        assert_eq!(q.bid_px, n("81190.50"));
+        assert_eq!(q.ask_px, n("81235.50"));
+    }
+
+    #[test]
+    fn a_value_that_is_neither_is_refused_by_name() {
+        let error = response(br#"{"results":[{"symbol":"BTC-USD","sell_spread":true}]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sell_spread"), "{error}");
+        assert!(response(br#"{"results":[{"symbol":"BTC-USD","price":{"v":1}}]}"#).is_err());
+    }
+
+    #[test]
+    fn the_documents_full_v1_entry_is_one_quote_with_no_size() {
+        let parsed = response(DOCUMENTED.as_bytes()).unwrap();
+        assert_eq!(parsed.results[0].price.as_deref(), Some("81213.00"));
+        let quotes = read(&venue(), &parsed, &tickers(), 100);
+        assert_eq!(quotes.len(), 1);
+        assert!(quotes[0].at_micros.is_some(), "the venue's own time");
+        match &quotes[0].event {
+            Event::Quote(q) => {
+                assert_eq!((q.bid_px.is_some(), q.ask_px.is_some()), (true, true));
+                assert_eq!(
+                    (q.bid_spread.is_some(), q.ask_spread.is_some()),
+                    (true, true)
+                );
+                // v1 states no quantity, so no size is claimed on either side.
+                assert_eq!((q.bid_sz, q.ask_sz), (None, None));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_exponent_is_read_exactly_and_not_through_a_float() {
+        // A JSON number may be written `8.119e4`. rust_decimal parses that
+        // spelling itself, as decimal, so it costs no digits either.
+        let q =
+            quote(br#"{"results":[{"symbol":"BTC-USD","bid_inclusive_of_sell_spread":8.119e4}]}"#);
+        assert_eq!(q.bid_px, n("81190"));
     }
 
     #[test]

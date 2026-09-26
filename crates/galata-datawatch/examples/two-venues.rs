@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let venue = Venue::new(rh_crypto::VENUE)?;
     let tickers = BTreeMap::from([("BTC-USD".to_string(), Ticker::new("BTC")?)]);
     let body = br#"{"results":[{"symbol":"BTC-USD",
-        "bid_inclusive_of_sell_spread":"81190.50","sell_spread":"22.50",
-        "ask_inclusive_of_buy_spread":"81235.50","buy_spread":"22.50",
+        "bid_inclusive_of_sell_spread":"81190.50","sell_spread":"0.0277",
+        "ask_inclusive_of_buy_spread":"81235.50","buy_spread":"0.0277",
         "quantity":"0.5","timestamp":"2026-09-21T10:33:00Z"}]}"#;
     let parsed = rh_crypto::wire::response(body)?;
     for envelope in rh_crypto::wire::read(&venue, &parsed, &tickers, at) {

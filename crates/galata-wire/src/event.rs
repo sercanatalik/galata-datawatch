@@ -361,9 +361,12 @@ pub struct Quote {
     pub bid_sz: Option<Num>,
     /// Size at the best ask, where the venue states one.
     pub ask_sz: Option<Num>,
-    /// A broker's stated spread on the sell side, where it states one.
+    /// A broker's stated spread on the sell side, where it states one, **in
+    /// the venue's own unit**. rh-crypto states a percent of the mid, not a
+    /// price difference.
     pub bid_spread: Option<Num>,
-    /// A broker's stated spread on the buy side, where it states one.
+    /// A broker's stated spread on the buy side, where it states one, in the
+    /// venue's own unit.
     pub ask_spread: Option<Num>,
 }
 
