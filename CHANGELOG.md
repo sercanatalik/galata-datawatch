@@ -19,6 +19,16 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **`galata_segments::ListingCache`: a quiet directory is listed once.**
+  Each directory's entries are cached by its own mtime, which POSIX `rename`
+  moves. A cached listing is trusted only when it is more than `RACY_MARGIN`
+  (2 s) older than the newest directory in the same walk. That is Git's
+  "racily clean" rule, on the filesystem's own times, with no clock read.
+  `LabelCache` now holds one, so `Bound::of_cached` reads no quiet partition.
+  Over 2,230 candle partitions its warm cost went from 108 ms to 19 ms. The
+  cache also answers `unwritten`, instead of a second walk, and
+  `unwritten_cached` is new.
+
 - **`capture.settle_secs`: the bars closed while running are settled.** The
   stream never sends a candle final and the walk runs at boot, so a running
   capture held forming rows and no closes (11 BTC finals in 15 live hours).

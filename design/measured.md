@@ -4025,3 +4025,52 @@ are missing from the grid entirely**: the 30m derivation over the last 14 h
 has n = 0 on every instrument, because nothing settles a live bar until the
 next boot or gap walk. `heard-at-the-close` fixes the judgement and the open
 bar; settling the live bars is the next change.
+
+## The bound scales with partitions, and a quiet one is now listed once — 2026-09-26
+
+*The re-measurement `todo.md` asked for "past 1,000 segments".* The candle
+history walk reaches back to 2020-08-19, so `var/tape/kind=candles` holds
+**4,463 segments in 2,230 date partitions**. The other kinds hold 4 to 9.
+Release build, warm page cache, the real tape:
+
+```
+  kind      segments  partitions   unwritten   list    list+stat   bound cold   bound warm
+  candles     4,463      2,230      28.2 ms   72.0 ms   76.6 ms     345.6 ms    108.4 ms
+  quotes          5          4       50 µs    91 µs     96 µs        1.0 ms      148 µs
+```
+
+**The 2026-09-24 extrapolation was 8× low.** It priced the warm bound at
+~3 µs a segment (~13 ms here). The real cost is ~24 µs a segment, because it
+scales with *partitions*: `partitions()` reads every directory to find the
+segments, `list_segments` reads each one again, and `Bound::of_cached` asked
+`unwritten` first, which walked it all a third time. The tower asks every
+second. The launchd tower had used 118 CPU-minutes in about 9 hours (~21% of
+a core).
+
+**The fix is `galata_segments::ListingCache`**: each directory's entries,
+keyed by its own mtime, which `rename` moves (POSIX: "rename() shall mark for
+update the st_ctime and st_mtime fields of the parent directory of each
+file"). Git's untracked cache rests on the same fact and meets the same
+hazard, a change in the same mtime tick ("racily clean"). The guard here is
+clock-free: a listing is trusted only if its directory is more than 2 s older
+than the newest directory seen in the same walk. Any later write is stamped
+at least that late.
+
+```
+  kind      unwritten → cached    bound cold   bound warm (before → after)   dirs re-read a warm pass
+  candles   36.6 ms → 7.5 ms       262 ms       108.4 ms → 19.3 ms            61 of 2,231
+  quotes    88 µs → 37 µs          0.7 ms       148 µs → 44 µs                2
+```
+
+**The 61 re-read directories are the rule working.** The candle tape was
+rebuilt about 44 minutes before this, all partitions within about 40 s, and
+nothing has been written since. So everything stamped within 2 s of that
+newest mtime stays racy until something newer lands. What remains of the
+19 ms is one `stat` per directory and one per segment. The per-segment `stat`
+is kept on purpose: it is what the bounded-view spec rests a replaced
+segment's label on.
+
+**Also found:** a hand-started `target/debug/galata-tower` (pid 299, started
+2026-09-25 12:05, orphaned) was still running beside the launchd one, with 340
+CPU-minutes. The installer stops a hand-started tower by the pattern
+`target/release/galata-tower$`, which a debug build does not match.

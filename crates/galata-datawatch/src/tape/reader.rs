@@ -161,13 +161,29 @@ impl Bound {
         if scopes.is_empty() {
             return Err(ReadError::NoScopes);
         }
-        let unwritten = unwritten(root, scopes);
+        // One cached walk per scope answers both questions: whether it has
+        // written anything, and how far each venue in it has. Asking
+        // `unwritten` first walked the whole scope a second time.
+        let listings: Vec<_> = scopes
+            .iter()
+            .map(|scope| {
+                (
+                    *scope,
+                    labels.listing.partitions_with_segments(&root.join(scope)),
+                )
+            })
+            .collect();
+        let unwritten: Vec<String> = listings
+            .iter()
+            .filter(|(_, partitions)| partitions.is_empty())
+            .map(|(scope, _)| (*scope).to_string())
+            .collect();
         if !unwritten.is_empty() {
             return Err(ReadError::NoFrontier { scopes: unwritten });
         }
         let mut frontiers = Vec::with_capacity(scopes.len());
-        for scope in scopes {
-            frontiers.push((*scope, venue_frontiers(&root.join(scope), labels)?));
+        for (scope, partitions) in &listings {
+            frontiers.push((*scope, venue_frontiers(partitions, labels)?));
         }
         let venues: std::collections::BTreeSet<&String> =
             frontiers.iter().flat_map(|(_, f)| f.keys()).collect();
@@ -198,17 +214,17 @@ impl Bound {
 ///
 /// Whose a segment is comes from its label, never from a column statistic.
 fn venue_frontiers(
-    scope_root: &Path,
+    partitions: &[(PathBuf, Vec<(galata_segments::Cursor, PathBuf)>)],
     labels: &LabelCache,
 ) -> Result<BTreeMap<String, i64>, ReadError> {
     let mut out: BTreeMap<String, i64> = BTreeMap::new();
-    for partition in galata_segments::partitions(scope_root) {
-        for (cursor, path) in galata_segments::list_segments(&partition) {
-            let galata_segments::Cursor::Seq { last, .. } = cursor else {
+    for (_, segments) in partitions {
+        for (cursor, path) in segments {
+            let galata_segments::Cursor::Seq { last, .. } = *cursor else {
                 return Err(ReadError::Incomparable);
             };
             let last = i64::try_from(last).map_err(|_| ReadError::Incomparable)?;
-            let venue = labels.venue(&path)?;
+            let venue = labels.venue(path)?;
             let entry = out.entry(venue).or_insert(last);
             *entry = (*entry).max(last);
         }
@@ -229,10 +245,15 @@ fn venue_frontiers(
 /// segment replaced at the same path is read again. A `stat` guards every hit.
 /// Caller-owned rather than global: a library holding state nobody asked for
 /// is state nobody can bound or drop.
+///
+/// **It caches the listing too** ([`galata_segments::ListingCache`]). With
+/// the footers cached, what remained was reading every directory, twice:
+/// 108 ms warm over 2,230 candle partitions on 2026-09-26, every second.
 #[derive(Debug, Default)]
 pub struct LabelCache {
     entries: std::sync::Mutex<BTreeMap<PathBuf, (u64, std::time::SystemTime, String)>>,
     reads: std::sync::atomic::AtomicU64,
+    listing: galata_segments::ListingCache,
 }
 
 impl LabelCache {
@@ -267,12 +288,20 @@ impl LabelCache {
         self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Forget every segment that no longer exists, so the cache holds at most
-    /// what the tape holds. Called by whoever owns it, on its own cadence.
+    /// How many directories this cache has had to read, for asserting that a
+    /// warm bound reads only what moved.
+    pub fn directory_reads(&self) -> u64 {
+        self.listing.directory_reads()
+    }
+
+    /// Forget every segment and directory that no longer exists, so the cache
+    /// holds at most what the tape holds. Called by whoever owns it, on its
+    /// own cadence.
     pub fn prune(&self) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.retain(|path, _| path.exists());
         }
+        self.listing.prune();
     }
 }
 
@@ -297,6 +326,23 @@ fn segment_venue(path: &Path) -> Result<String, ReadError> {
 /// `superseded` example began: it stated a directory to find out whether a
 /// venue had ever recorded a reorganisation, reimplementing a rule the store
 /// owns.
+pub fn unwritten_cached(root: &Path, scopes: &[&str], labels: &LabelCache) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|scope| {
+            labels
+                .listing
+                .partitions_with_segments(&root.join(scope))
+                .is_empty()
+        })
+        .map(|scope| (*scope).to_string())
+        .collect()
+}
+
+/// The declared scopes that have written nothing, walking each one afresh.
+///
+/// [`unwritten_cached`] answers the same through a cache, for a caller that
+/// asks every second.
 pub fn unwritten(root: &Path, scopes: &[&str]) -> Vec<String> {
     scopes
         .iter()
@@ -949,6 +995,83 @@ mod tests {
         let warm = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
         assert_eq!(labels.footer_reads(), 3, "a warm cache re-read a footer");
         assert_eq!(cold, warm);
+    }
+
+    /// Every directory under a scope set an hour back, and the scope's own
+    /// directory a minute back: a history nothing has touched lately.
+    fn quiet(scope_root: &Path) {
+        let set = |dir: &Path, secs: u64| {
+            std::fs::File::open(dir)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+                .unwrap();
+        };
+        for partition in galata_segments::partitions(scope_root) {
+            set(&partition, 3_600);
+        }
+        set(scope_root, 60);
+    }
+
+    #[test]
+    fn a_deep_quiet_history_reads_no_directory_warm() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        for day in 0..40_i64 {
+            tape.take(row(day as u64 + 1, "venue-a", Some((100 + day) * DAY)));
+            tape.commit().unwrap();
+        }
+        quiet(&dir.path().join("kind=quotes"));
+        let labels = LabelCache::default();
+        let cold = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        let read = labels.directory_reads();
+        assert_eq!(read, 41, "the scope and forty dates, once each");
+        let warm = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(cold, warm);
+        // The scope's own directory is the newest in the walk, so it sits in
+        // the racy margin and is read again; no quiet date is.
+        assert_eq!(labels.directory_reads() - read, 1);
+        assert_eq!(cold, Bound::of(dir.path(), &["kind=quotes"]).unwrap());
+    }
+
+    #[test]
+    fn a_new_segment_in_an_old_partition_moves_the_cached_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        for day in 0..5_i64 {
+            tape.take(row(day as u64 + 1, "venue-a", Some((100 + day) * DAY)));
+            tape.commit().unwrap();
+        }
+        quiet(&dir.path().join("kind=quotes"));
+        let labels = LabelCache::default();
+        Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        let before = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(before.of_venue("venue-a"), Some(5));
+
+        // A fill into the oldest day, as the history walk writes one.
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(99, "venue-a", Some(100 * DAY + 7)));
+        tape.commit().unwrap();
+        let after = Bound::of_cached(dir.path(), &["kind=quotes"], &labels).unwrap();
+        assert_eq!(after.of_venue("venue-a"), Some(99));
+    }
+
+    #[test]
+    fn unwritten_through_the_cache_names_what_unwritten_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(dir.path());
+        tape.take(row(1, "venue-a", Some(100 * DAY)));
+        tape.commit().unwrap();
+        std::fs::create_dir_all(dir.path().join("kind=trades/date=1970-04-11")).unwrap();
+        let scopes = ["kind=quotes", "kind=trades", "kind=funding"];
+        let labels = LabelCache::default();
+        assert_eq!(
+            unwritten_cached(dir.path(), &scopes, &labels),
+            unwritten(dir.path(), &scopes)
+        );
+        assert_eq!(
+            unwritten_cached(dir.path(), &scopes, &labels),
+            ["kind=trades", "kind=funding"]
+        );
     }
 
     #[test]

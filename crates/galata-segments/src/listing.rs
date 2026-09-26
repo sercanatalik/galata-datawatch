@@ -263,3 +263,161 @@ fn fold_cursors(dir: &Path, f: &mut impl FnMut(Cursor)) {
         }
     }
 }
+
+/// How close to the walk's newest directory mtime a cached listing may be and
+/// still be trusted: **2 s**, the coarsest mtime granularity this may meet
+/// (FAT; HFS+ is 1 s, APFS and ext4 1 ns).
+///
+/// A write in the same mtime tick as the listing that was cached leaves the
+/// directory's mtime unchanged. Git's untracked cache meets the same thing and
+/// calls it "racily clean". The reference here is the filesystem's own time:
+/// any write after a walk is stamped at least as late as the newest mtime that
+/// walk saw, so it cannot share a tick with a directory more than a margin
+/// older. No clock is read, which is what lets `galata-datawatch` use this
+/// below its loop.
+pub const RACY_MARGIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Directory listings already read, for a caller that walks the same tree
+/// again and again.
+///
+/// **Measured** (`design/measured.md`, 2026-09-26): with 2,230 date partitions
+/// under `kind=candles`, [`partitions`] plus [`list_segments`] took 72 ms
+/// warm, because they read every directory twice. A watch asks that every
+/// second, about a history that has not changed.
+///
+/// **Keyed by each directory's own mtime.** POSIX `rename()` marks the mtime
+/// of each parent directory for update, and so do creating and unlinking. A
+/// segment arrives, leaves and is replaced only by rename, so a directory whose
+/// mtime has not moved holds the entries it held. A change inside a
+/// subdirectory does not move its parent, so every directory is still
+/// `stat`ed. Only the `read_dir` is skipped, and only for a directory more than
+/// [`RACY_MARGIN`] older than the newest one in the walk that read it.
+///
+/// Caller-owned, like `galata-datawatch`'s `LabelCache`: a library holding
+/// state nobody asked for is state nobody can bound or drop.
+#[derive(Debug, Default)]
+pub struct ListingCache {
+    dirs: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Listed>>,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+struct Listed {
+    modified: std::time::SystemTime,
+    /// Older than the newest mtime of the walk that read it by more than the
+    /// margin: safe to reuse while `modified` is unchanged.
+    trusted: bool,
+    subdirs: Vec<PathBuf>,
+    segments: Vec<(Cursor, PathBuf)>,
+}
+
+impl ListingCache {
+    /// Every partition under `root` that holds a segment, with its segments
+    /// oldest first: what [`partitions`] and [`list_segments`] answer
+    /// together, in the same order, reading only directories that moved.
+    ///
+    /// **An unreadable directory is an empty listing**, as elsewhere in this
+    /// module; see [`scannable`].
+    pub fn partitions_with_segments(&self, root: &Path) -> Vec<(PathBuf, Vec<(Cursor, PathBuf)>)> {
+        let mut seen: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        let mut out = Vec::new();
+        self.walk(root, &mut seen, &mut out);
+
+        // Settle which of this walk's listings the next walk may trust.
+        if let Some(newest) = seen.iter().map(|(_, m)| *m).max()
+            && let Ok(mut dirs) = self.dirs.lock()
+        {
+            for (dir, modified) in &seen {
+                if let Some(listed) = dirs.get_mut(dir) {
+                    listed.trusted = modified
+                        .checked_add(RACY_MARGIN)
+                        .is_some_and(|edge| edge < newest);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn walk(
+        &self,
+        dir: &Path,
+        seen: &mut Vec<(PathBuf, std::time::SystemTime)>,
+        out: &mut Vec<(PathBuf, Vec<(Cursor, PathBuf)>)>,
+    ) {
+        let Ok(modified) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
+            return;
+        };
+        seen.push((dir.to_path_buf(), modified));
+        let cached = self.dirs.lock().ok().and_then(|dirs| {
+            dirs.get(dir)
+                .filter(|l| l.trusted && l.modified == modified)
+                .cloned()
+        });
+        let listed = match cached {
+            Some(listed) => listed,
+            None => {
+                let listed = self.read(dir, modified);
+                if let Ok(mut dirs) = self.dirs.lock() {
+                    dirs.insert(dir.to_path_buf(), listed.clone());
+                }
+                listed
+            }
+        };
+        if !listed.segments.is_empty() {
+            out.push((dir.to_path_buf(), listed.segments));
+        }
+        for sub in &listed.subdirs {
+            self.walk(sub, seen, out);
+        }
+    }
+
+    /// One `read_dir`: the subdirectories and the committed segments, by the
+    /// rules [`partitions`] and [`list_segments`] apply.
+    fn read(&self, dir: &Path, modified: std::time::SystemTime) -> Listed {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut subdirs = Vec::new();
+        let mut segments = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
+                    subdirs.push(path);
+                } else if (file_type.is_file() || (file_type.is_symlink() && path.is_file()))
+                    && let Some(cursor) = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(Cursor::parse)
+                {
+                    segments.push((cursor, path));
+                }
+            }
+        }
+        subdirs.sort();
+        segments.sort_by_key(|(c, _)| (c.variant(), c.sort_key()));
+        Listed {
+            modified,
+            trusted: false,
+            subdirs,
+            segments,
+        }
+    }
+
+    /// How many directories this cache has had to read, for asserting that
+    /// a warm walk reads only what moved.
+    pub fn directory_reads(&self) -> u64 {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Forget every directory that no longer exists. Called by whoever owns
+    /// the cache, on its own cadence.
+    pub fn prune(&self) {
+        if let Ok(mut dirs) = self.dirs.lock() {
+            dirs.retain(|path, _| path.exists());
+        }
+    }
+}
