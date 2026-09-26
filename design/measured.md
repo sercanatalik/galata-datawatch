@@ -3509,8 +3509,10 @@ exclusive hold beside a Python process's `flock(LOCK_EX)` on the same path.
 In the same minutes the rebuild's shared hold *was* refused by that holder,
 which rules out a wrong path. Nothing was rebuilt in between. Every one of the
 46 trials after them refused correctly, including three on a fresh copy with
-the holder's and the path's inode compared and equal. **Unexplained.** It is
-recorded rather than dropped, and the claim is now checked on every gate run
+the holder's and the path's inode compared and equal. **Unexplained.**
+*(Explained 2026-09-26: the tools began running only after the holder's fixed
+sleep had ended, delayed by macOS's launch-time assessment. See "The three lock
+trials, explained" below.)* It is recorded rather than dropped, and the claim is now checked on every gate run
 by `tests/holds.rs`, where the test binary re-runs itself as the other
 holder. The unit tests had only ever taken both holds inside one process,
 which proves the modes and not the claim.
@@ -4074,3 +4076,41 @@ segment's label on.
 2026-09-25 12:05, orphaned) was still running beside the launchd one, with 340
 CPU-minutes. The installer stops a hand-started tower by the pattern
 `target/release/galata-tower$`, which a debug build does not match.
+
+## The three lock trials, explained — 2026-09-26
+
+*The 2026-09-24 section "And three trials that did not" left three failures
+unexplained.* The session transcript has the trial scripts and the tools' own
+log lines. The holder was `fcntl.flock(f, LOCK_EX)`, then `print('held')`,
+then **`time.sleep(N)`**:
+
+```
+  trial   started     holder   the tool's own log line                            after launch
+  A       10:17:58    3 s      retain --delete  10:19:04.96  exit 3, "0 partitions"   ~60 s (its first launch since the 10:15 build)
+  B       10:19:19    3 s      retain --delete  10:21:21.19  exit 3                   ~120 s
+  C       10:21:35    4 s      compact          10:22:25.63  compacted 4,780 → 13     ~50 s
+                               retain --delete  10:22:25.64  exit 3                   5 ms after compact
+```
+
+**In every failing trial, the tool reached `flock` after the holder had let go.**
+The holder held for 3–4 s. The binary sat 50–120 s before running a line.
+Trial C's script ran `lsof` on the lock file right after the tools, still
+inside what should have been the hold, and it printed nothing: no process had
+the file open. The retain run 5 ms after compact did not stall, because its
+first-launch assessment had already happened in trial A. From 10:23 onward
+no launch stalled, and every trial refused: the 46 trials, holders of 6 s and
+1.5 s, the same binaries, the same inode.
+
+The delay is macOS assessing a freshly linked executable (`syspolicyd`, the
+process in `_dyld_start` until the verdict). The same session measured it an
+hour later, for a test binary that sat there for over five minutes. It is
+documented well beyond this machine: [mjtsai, 2025](https://mjtsai.com/blog/2025/04/30/why-some-apps-sometimes-launch-extremely-slowly/),
+[openai/codex#17447](https://github.com/openai/codex/issues/17447).
+
+**`flock` through `File::try_lock` was right every time.** What was wrong was
+a check whose holder held **for a duration**, which a slow launch can outlast.
+`tests/holds.rs` has never had that flaw: its holder holds until the parent
+closes its stdin, and the parent acts only after reading `HELD`. It is now a
+requirement (`segment-store`: *a cross-process hold is checked with a holder
+that holds until released*). The remedy for the stall itself is the P3
+Developer Tools exemption in `todo.md`.

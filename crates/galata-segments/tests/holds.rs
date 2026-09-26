@@ -8,9 +8,14 @@
 //! Written because the first cross-process check of this change, run by hand
 //! with a Python `flock` holder, saw an exclusive hold succeed beside another
 //! process's exclusive lock three times, then refuse correctly in every one of
-//! the next 46 trials. Unexplained, and recorded in `design/measured.md`. A
-//! claim observed to fail once is checked on every run of the gate from then
-//! on, rather than trusted.
+//! the next 46 trials. **Explained since** (`design/measured.md`, 2026-09-26):
+//! that holder held for a fixed 3–4 s, and each failing tool had sat 50–120 s
+//! in macOS's launch-time assessment of a new binary before it reached
+//! `flock`. By then nothing held the file.
+//!
+//! **So the other holder here holds until it is told to stop, never for a
+//! duration**, and the test acts only after reading `HELD`. A launch delay on
+//! either side then makes the test slower, never falsely green.
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
