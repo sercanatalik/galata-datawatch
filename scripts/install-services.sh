@@ -33,6 +33,83 @@ DOMAIN="gui/$(id -u)"
 refuse() { echo "install-services: REFUSED — $1" >&2; exit 1; }
 [[ "$(uname)" == Darwin ]] || refuse "launchd is macOS; elsewhere write a systemd unit running scripts/run-service.sh"
 
+# **A twin: the service's binary, running, and not launchd's.** Found by the
+# executable's basename, plus the argument that picks the instance, and never
+# by a regex over the whole command line. Those regexes drifted: they missed a
+# debug-built tower that ran for a day beside the launchd one, the tower's own
+# var/bin copy, and `galata-datawatch-vault <venue>`, which is a second writer
+# of one archive scope (know-a-twin-by-its-binary). Matching the executable
+# also cannot match the shell doing the matching. What launchd owns is the
+# job's pid and its descendants: run-service.sh and galata-vault-exec exec, so
+# the job's pid is the service itself.
+#
+#   twins_of <spec>    one "pid<TAB>command" line per twin
+label_of() {
+    case "$1" in
+        capture:*) echo "com.galata.capture.${1#capture:}" ;;
+        ledger:*) echo "com.galata.ledger.${1#ledger:}" ;;
+        *) echo "com.galata.$1" ;;
+    esac
+}
+
+owned_by_launchd() {  # the job's pid and every descendant, one per line
+    local job
+    job="$(launchctl print "$DOMAIN/$(label_of "$1")" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3; exit}')"
+    [[ -n "$job" ]] || return 0
+    ps -axo pid=,ppid= | awk -v root="$job" '
+        { parent[$1] = $2 }
+        END {
+            owned[root] = 1; print root
+            do { grew = 0
+                 for (p in parent) if (!(p in owned) && (parent[p] in owned)) { owned[p] = 1; print p; grew = 1 }
+            } while (grew)
+        }'
+}
+
+twins_of() {
+    local spec="$1" bins="" want=""
+    case "$spec" in
+        vault) bins="gv-server"; want="local" ;;
+        nats) bins="nats-server"; want="$ROOT/config/nats-authorization.conf config/nats-authorization.conf" ;;
+        capture:*) bins="galata-datawatch galata-datawatch-vault"; want="${spec#capture:}" ;;
+        ledger:*) bins="galata-ledger galata-ledger-vault"; want="${spec#ledger:}" ;;
+        tower) bins="galata-tower" ;;
+        flows) ;;
+    esac
+    local owned
+    owned=" $(owned_by_launchd "$spec" | tr '\n' ' ') "
+    # argv[0]'s basename, not `comm`: the kernel keeps 16 characters of the
+    # name (MAXCOMLEN), and `galata-datawatch-vault` is 22. `ww` so that no
+    # command line is cut to the terminal's width.
+    ps -axwwo pid=,args= | while read -r pid args; do
+        [[ "$owned" == *" $pid "* || "$pid" == "$$" ]] && continue
+        if [[ "$spec" == flows ]]; then
+            # uv and python: no basename names the lane, so its arguments do,
+            # and only a lane of THIS checkout (its path, or its working
+            # directory) counts.
+            [[ "$args" == *"cereyan serve"* ]] || continue
+            if [[ "$args" != *"$ROOT"* ]]; then
+                local cwd
+                cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+                [[ "$cwd" == "$ROOT"* ]] || continue
+            fi
+        else
+            local argv0="${args%% *}"
+            [[ " $bins " == *" ${argv0##*/} "* ]] || continue
+            if [[ -n "$want" ]]; then
+                # The instance argument, as a whole word: `hyperliquid`, not
+                # a venue that merely contains it. `want` may list spellings.
+                local found=0 word alt
+                for word in ${args#"$argv0"}; do
+                    for alt in $want; do [[ "$word" == "$alt" ]] && found=1; done
+                done
+                (( found )) || continue
+            fi
+        fi
+        printf '%s\t%s\n' "$pid" "$args"
+    done
+}
+
 # --status: every loaded com.galata.* agent, and whether this installer
 # manages it. Added when legacy's com.galata.compact.testnet was found still
 # loaded, exiting 127 on every run, reading as one of these in launchctl list
@@ -47,6 +124,29 @@ if [[ "${1:-}" == --status ]]; then
         if [[ "$pid" == "-" ]]; then state="exit $status"; else state="pid $pid"; fi
         printf '%-34s %-10s %s\n' "$label" "$state" "$managed"
     done
+
+    # Twins: a managed service's binary running outside launchd. A debug
+    # tower ran beside the launchd one for a day with nothing saying so.
+    echo
+    printf '%-34s %s\n' TWIN "PID  COMMAND"
+    twin_count=0
+    managed_specs=(vault nats tower flows)
+    for plist in "$AGENTS"/com.galata.capture.*.plist "$AGENTS"/com.galata.ledger.*.plist; do
+        [[ -f "$plist" ]] || continue
+        l="$(basename "$plist" .plist)"
+        case "$l" in
+            com.galata.capture.*) managed_specs+=("capture:${l#com.galata.capture.}") ;;
+            com.galata.ledger.*) managed_specs+=("ledger:${l#com.galata.ledger.}") ;;
+        esac
+    done
+    for spec in "${managed_specs[@]}"; do
+        while IFS=$'\t' read -r pid cmd; do
+            [[ -n "$pid" ]] || continue
+            printf '%-34s %s  %s\n' "$spec" "$pid" "${cmd:0:100}"
+            twin_count=$((twin_count + 1))
+        done < <(twins_of "$spec")
+    done
+    (( twin_count )) || echo "(none — every managed service runs only under launchd)"
 
     # The service tokens: a lapsed one is a service that cannot restart, and
     # nothing else says so before the day (warn-before-the-tokens-lapse). The
@@ -75,17 +175,6 @@ if [[ "${1:-}" == --uninstall ]]; then UNINSTALL=1; shift; fi
 services=("$@")
 (( ${#services[@]} )) || services=(vault nats capture:hyperliquid tower flows)
 
-# What a hand-started instance of each looks like, to stop it first.
-pattern_of() {
-    case "$1" in
-        nats) echo "nats-server -c $ROOT/config/nats-authorization.conf|nats-server -c config/nats-authorization.conf" ;;
-        capture:*) echo "galata-datawatch ${1#capture:}\$" ;;
-        ledger:*) echo "galata-ledger ${1#ledger:}\$" ;;
-        tower) echo "target/release/galata-tower\$" ;;
-        flows) echo "cereyan serve py|cereyan serve $ROOT/py|cereyan serve \\. " ;;
-        vault) echo "gv-server local" ;;
-    esac
-}
 
 for spec in "${services[@]}"; do
     case "$spec" in
@@ -130,20 +219,21 @@ for spec in "${services[@]}"; do
 
     # Replace, never stack — and never beside a hand-started twin.
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
-    pattern="$(pattern_of "$spec")"
-    if pids="$(pgrep -f "$pattern")" && [[ -n "$pids" ]]; then
-        echo "stopping a hand-started $spec (pid $(echo $pids | tr '\n' ' '))"
+    twin_pids() { twins_of "$spec" | cut -f1 | tr '\n' ' '; }
+    pids="$(twin_pids)"
+    if [[ -n "${pids// }" ]]; then
+        echo "stopping a hand-started $spec (pid ${pids% })"
         # SIGINT first: a capture built before SIGTERM was a clean stop still
         # stops cleanly on it. Then SIGTERM, because a process started with
         # `nohup … &` from a non-interactive shell inherits SIGINT IGNORED —
         # found when the tower, which installs no handler, would not stop.
         kill -INT $pids 2>/dev/null
-        for _ in $(seq 1 10); do pgrep -f "$pattern" >/dev/null || break; sleep 1; done
-        if pgrep -f "$pattern" >/dev/null; then
-            kill -TERM $(pgrep -f "$pattern") 2>/dev/null
-            for _ in $(seq 1 20); do pgrep -f "$pattern" >/dev/null || break; sleep 1; done
+        for _ in $(seq 1 10); do [[ -z "$(twin_pids | tr -d ' ')" ]] && break; sleep 1; done
+        if [[ -n "$(twin_pids | tr -d ' ')" ]]; then
+            kill -TERM $(twin_pids) 2>/dev/null
+            for _ in $(seq 1 20); do [[ -z "$(twin_pids | tr -d ' ')" ]] && break; sleep 1; done
         fi
-        pgrep -f "$pattern" >/dev/null && refuse "a hand-started $spec would not stop"
+        [[ -z "$(twin_pids | tr -d ' ')" ]] || refuse "a hand-started $spec would not stop"
     fi
     # The tower runs a copy, taken here and only here: installing is the
     # deploy, and building the tower checkout is not. Copied while stopped,

@@ -424,7 +424,7 @@ cargo build --release
 scripts/install-services.sh                        # vault, nats, capture:hyperliquid, tower, flows
 scripts/install-services.sh capture:rh-chain       # add a venue
 scripts/install-services.sh --uninstall tower      # remove one
-scripts/install-services.sh --status               # every com.galata.* agent, flagging strays, and each token's expiry
+scripts/install-services.sh --status               # every com.galata.* agent, hand-started twins, each token's expiry
 ```
 
 First-time setup on a new machine, after `scripts/install-services.sh vault`:
