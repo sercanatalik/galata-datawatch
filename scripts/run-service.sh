@@ -29,7 +29,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
 VAULT_BIN="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}/target/release"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin"
 export NO_COLOR=1
@@ -62,6 +61,17 @@ password_var() {
     printf 'GALATA_BROKER_PASSWORD_%s' "$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]')"
 }
 
+# This machine's broker block lives in the local configuration, which is the
+# committed one plus [broker]; without it, capture archives and publishes
+# nothing. Every service that reads the document reads the same one.
+use_config() {
+    if [[ -f "$ROOT/var/datawatch.local.toml" ]]; then
+        export GALATA_CONFIG="$ROOT/var/datawatch.local.toml"
+    else
+        export GALATA_CONFIG="$ROOT/config/datawatch.toml"
+    fi
+}
+
 service="${1:-}"
 case "$service" in
     nats)
@@ -75,25 +85,14 @@ case "$service" in
     capture)
         venue="${2:-}"
         [[ -n "$venue" ]] || refuse "usage: run-service.sh capture <venue> [--import <dir>]"
-        # This machine's broker block lives in the local configuration, which
-        # is the committed one plus [broker]; without it, capture archives and
-        # publishes nothing.
-        if [[ -f "$ROOT/var/datawatch.local.toml" ]]; then
-            export GALATA_CONFIG="$ROOT/var/datawatch.local.toml"
-        else
-            export GALATA_CONFIG="$ROOT/config/datawatch.toml"
-        fi
+        use_config
         from_vault "capture-$venue" --only "$(password_var "datawatch-$venue")" -- \
             "$ROOT/target/release/galata-datawatch" "$venue" "${@:3}"
         ;;
     ledger)
         venue="${2:-}"
         [[ -n "$venue" ]] || refuse "usage: run-service.sh ledger <venue>"
-        if [[ -f "$ROOT/var/datawatch.local.toml" ]]; then
-            export GALATA_CONFIG="$ROOT/var/datawatch.local.toml"
-        else
-            export GALATA_CONFIG="$ROOT/config/datawatch.toml"
-        fi
+        use_config
         [[ -x "$ROOT/target/release/galata-ledger" ]] \
             || refuse "no galata-ledger — cargo build --release first"
         names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$GALATA_CONFIG" "$venue")" \
@@ -103,14 +102,22 @@ case "$service" in
         from_vault "ledger-$venue" "${only[@]}" -- "$ROOT/target/release/galata-ledger" "$venue"
         ;;
     tower)
-        [[ -x "$TOWER/target/release/galata-tower" ]] \
-            || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT"
+        # The copy install-services.sh put in var/bin, never the tower
+        # checkout's target/: a build there is not a deploy, and a restart
+        # must not make it one. On 2026-09-25 a stray SIGTERM restarted this
+        # service onto a build nobody had chosen to ship.
+        bin="$ROOT/var/bin/galata-tower"
+        [[ -x "$bin" ]] || refuse "no installed tower at $bin — scripts/install-services.sh tower"
+        # Every path absolute. The tower's defaults are relative to its own
+        # checkout, and from here its config/datawatch.toml does not exist:
+        # the same day, latest prices went out empty for want of GALATA_CONFIG.
         export GALATA_ARCHIVE="$ROOT/var/archive"
         export GALATA_TAPE="$ROOT/var/tape"
+        export GALATA_STATUS="$ROOT/var/status"
+        use_config
         export GALATA_TOWER_LISTEN="${GALATA_TOWER_LISTEN:-127.0.0.1:8777}"
         export GALATA_BROKER="${GALATA_BROKER:-127.0.0.1:4222}"
-        cd "$TOWER"
-        from_vault tower --only "$(password_var reader)" -- "$TOWER/target/release/galata-tower"
+        from_vault tower --only "$(password_var reader)" -- "$bin"
         ;;
     vault)
         # The deployment's secret store: loopback only, data in

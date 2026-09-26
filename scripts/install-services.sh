@@ -25,6 +25,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
 TEMPLATE="$ROOT/deploy/launchd/com.galata.service.plist.in"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
@@ -88,6 +89,8 @@ for spec in "${services[@]}"; do
         capture) [[ -x "$ROOT/target/release/galata-datawatch" ]] || refuse "no release binary — cargo build --release first" ;;
         ledger) [[ -x "$ROOT/target/release/galata-ledger" ]] || refuse "no galata-ledger — cargo build --release first" ;;
         flows) [[ -x "$ROOT/target/release/galata-compact" ]] || refuse "the flows run release binaries — cargo build --release first" ;;
+        tower) [[ -x "$TOWER/target/release/galata-tower" ]] \
+                   || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT" ;;
     esac
 
     # The four that hold a secret read it through their own vault token.
@@ -121,6 +124,17 @@ for spec in "${services[@]}"; do
             for _ in $(seq 1 20); do pgrep -f "$pattern" >/dev/null || break; sleep 1; done
         fi
         pgrep -f "$pattern" >/dev/null && refuse "a hand-started $spec would not stop"
+    fi
+    # The tower runs a copy, taken here and only here: installing is the
+    # deploy, and building the tower checkout is not. Copied while stopped,
+    # through a rename, so no reader ever sees half a binary.
+    if [[ "$service" == tower ]]; then
+        mkdir -p "$ROOT/var/bin"
+        cp "$TOWER/target/release/galata-tower" "$ROOT/var/bin/.galata-tower.new"
+        mv -f "$ROOT/var/bin/.galata-tower.new" "$ROOT/var/bin/galata-tower"
+        at="$(git -C "$TOWER" describe --always --dirty 2>/dev/null || echo unknown)"
+        echo "$at" > "$ROOT/var/bin/galata-tower.source"
+        echo "installed the tower, its checkout at $at"
     fi
     launchctl bootstrap "$DOMAIN" "$plist" || refuse "launchctl bootstrap failed for $plist"
     launchctl print "$DOMAIN/$label" >/dev/null 2>&1 || refuse "$label did not load"
