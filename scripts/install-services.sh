@@ -26,6 +26,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
+VAULT_ROOT="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}"
 TEMPLATE="$ROOT/deploy/launchd/com.galata.service.plist.in"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
@@ -108,6 +109,52 @@ twins_of() {
         fi
         printf '%s\t%s\n' "$pid" "$args"
     done
+}
+
+# **Vet before the restart.** A freshly built binary's first launch waits
+# while macOS assesses it (syspolicyd; the process sits in _dyld_start). On
+# 2026-09-26 that kept the tower down about four minutes after its install,
+# because launchd had already stopped the old one. So each program the start
+# will exec that this workspace built is launched once, first, with an
+# argument measured to exit before the program does any work, while the old
+# instance still serves (vet-before-the-restart).
+#
+#   galata-vault-exec --help        usage line, exit 2
+#   galata-datawatch|ledger --help  refused as a venue, before connecting
+#   gv-server --help                usage line
+#   galata-tower --version          version, exit 0 (--help would SERVE)
+vet() {  # vet <label> <program>...
+    local label="$1" program arg s took; shift
+    for program in "$@"; do
+        [[ -x "$program" ]] || continue
+        case "$program" in
+            "$ROOT"/*|"$TOWER"/*|"$VAULT_ROOT"/*) ;;
+            *) continue ;;   # uv, Homebrew's nats-server: vetted long ago
+        esac
+        case "${program##*/}" in
+            galata-tower|.galata-tower.new) arg=--version ;;
+            *) arg=--help ;;
+        esac
+        s=$SECONDS
+        "$program" "$arg" >/dev/null 2>&1 </dev/null || true
+        took=$((SECONDS - s))
+        (( took >= 5 )) && echo "vetted ${program##*/} in ${took}s while $label kept running"
+    done
+    return 0
+}
+
+vet_programs() {  # the programs a service's start would exec
+    local spec="$1" said=""
+    case "$spec" in
+        vault|nats|tower|flows) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
+        capture:*) said="$("$ROOT/scripts/run-service.sh" --check capture "${spec#capture:}" 2>/dev/null)" ;;
+        ledger:*) said="$("$ROOT/scripts/run-service.sh" --check ledger "${spec#ledger:}" 2>/dev/null)" ;;
+    esac
+    if [[ "$said" == ready:* ]]; then set -- $said; echo "$2"; fi
+    case "$spec" in
+        nats|tower|capture:*|ledger:*) echo "$ROOT/target/release/galata-vault-exec" ;;
+    esac
+    return 0
 }
 
 # --status: every loaded com.galata.* agent, and whether this installer
@@ -237,6 +284,19 @@ for spec in "${services[@]}"; do
     [[ -z "$arg" ]] && sed -i '' '/<string><\/string>/d' "$plist"
     plutil -lint "$plist" >/dev/null || refuse "rendered plist does not parse: $plist"
 
+    # The tower runs a copy, taken here and only here: installing is the
+    # deploy, and building the tower checkout is not. Staged under a
+    # temporary name and vetted while the old tower serves; renamed into
+    # place once it has stopped, so the file that runs is the one assessed.
+    if [[ "$service" == tower ]]; then
+        mkdir -p "$ROOT/var/bin"
+        cp "$TOWER/target/release/galata-tower" "$ROOT/var/bin/.galata-tower.new"
+    fi
+    programs=()
+    while IFS= read -r program; do [[ -n "$program" ]] && programs+=("$program"); done < <(vet_programs "$spec")
+    [[ "$service" == tower ]] && programs+=("$ROOT/var/bin/.galata-tower.new")
+    (( ${#programs[@]} )) && vet "$label" "${programs[@]}"
+
     # Replace, never stack — and never beside a hand-started twin.
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
     twin_pids() { twins_of "$spec" | cut -f1 | tr '\n' ' '; }
@@ -255,12 +315,9 @@ for spec in "${services[@]}"; do
         fi
         [[ -z "$(twin_pids | tr -d ' ')" ]] || refuse "a hand-started $spec would not stop"
     fi
-    # The tower runs a copy, taken here and only here: installing is the
-    # deploy, and building the tower checkout is not. Copied while stopped,
-    # through a rename, so no reader ever sees half a binary.
+    # The staged, vetted copy takes the installed name now the old tower has
+    # stopped: a rename, so no reader ever sees half a binary.
     if [[ "$service" == tower ]]; then
-        mkdir -p "$ROOT/var/bin"
-        cp "$TOWER/target/release/galata-tower" "$ROOT/var/bin/.galata-tower.new"
         mv -f "$ROOT/var/bin/.galata-tower.new" "$ROOT/var/bin/galata-tower"
         at="$(git -C "$TOWER" describe --always --dirty 2>/dev/null || echo unknown)"
         echo "$at" > "$ROOT/var/bin/galata-tower.source"
