@@ -31,6 +31,10 @@ impl Adapters for Resolver {
 }
 
 fn main() -> std::process::ExitCode {
+    // Before anything else: `--check-config` judges a document and exits.
+    if let Some(code) = galata_datawatch::config::check_requested(&Resolver) {
+        return code;
+    }
     match boot::boot_ledger(
         &match FileSource::from_env("config/datawatch.toml") {
             Ok(source) => source,

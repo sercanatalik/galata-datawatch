@@ -39,6 +39,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> std::process::ExitCode {
+    // Before anything else: `--check-config` judges a document and exits.
+    if let Some(code) = galata_datawatch::config::check_requested(&Resolver) {
+        return code;
+    }
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

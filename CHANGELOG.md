@@ -19,6 +19,16 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **`--check-config [path]` on every binary that reads the document**, and
+  `scripts/check-config.sh` to ask them all. Each binary judges the document
+  with its own rules and prints `ok` or `refused: <reason>` before doing
+  anything else. The document is parsed strictly, so a key a newer build added
+  is refused by every older one. The script asks every deployed binary about a
+  candidate before it is written. A build that predates the flag is reported
+  as unable to tell, never as accepting. The tower is asked only when its
+  `--version` lists the flag, because an older tower ignores arguments and
+  serves.
+
 - **`ledger.tape`: the ledger, projected into typed datasets.** When
   declared, the ledger process writes each polled account's fills and funding
   payments on every fold pass, from the rows the fold already reads

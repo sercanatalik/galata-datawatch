@@ -1235,7 +1235,10 @@ mod tests {
         assert_eq!(rows(Kind::FundingPayments), 0, "none, and a file saying so");
         for kind in crate::ledger::project::PROJECTED {
             let path = crate::ledger::project::path_of(&tape, "hyperliquid", "main", kind);
-            assert!(path.exists(), "every kind the fold reads is projected: {kind}");
+            assert!(
+                path.exists(),
+                "every kind the fold reads is projected: {kind}"
+            );
         }
         let everything = projected_paths(&tape);
         assert!(

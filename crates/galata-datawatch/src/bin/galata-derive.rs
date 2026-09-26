@@ -51,6 +51,10 @@ fn time(spelled: &str) -> Option<i64> {
 }
 
 fn main() -> std::process::ExitCode {
+    // Before anything else: `--check-config` judges a document and exits.
+    if let Some(code) = galata_datawatch::config::check_requested(&Resolver) {
+        return code;
+    }
     match run() {
         Ok(code) => std::process::ExitCode::from(code),
         Err(error) => {

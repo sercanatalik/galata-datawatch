@@ -59,6 +59,10 @@ impl Adapters for Resolver {
 }
 
 fn main() -> std::process::ExitCode {
+    // Before anything else: `--check-config` judges a document and exits.
+    if let Some(code) = galata_datawatch::config::check_requested(&Resolver) {
+        return code;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

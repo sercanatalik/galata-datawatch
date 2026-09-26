@@ -426,6 +426,7 @@ scripts/install-services.sh capture:rh-chain       # add a venue
 scripts/install-services.sh --uninstall tower      # remove one
 scripts/install-services.sh --status               # every com.galata.* agent, whether it would restart, twins, token expiry
 scripts/run-service.sh --check tower               # a start's preconditions, token included; starts nothing
+scripts/check-config.sh new.toml                   # would every deployed binary accept this document? ask first
 ```
 
 First-time setup on a new machine, after `scripts/install-services.sh vault`:

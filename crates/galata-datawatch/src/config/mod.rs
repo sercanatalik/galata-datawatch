@@ -658,6 +658,63 @@ pub trait Adapters {
     }
 }
 
+/// `--check-config [path]`: judge a document with this binary's own rules,
+/// and do nothing else.
+///
+/// **Called first in every binary that reads the document.** The document is
+/// parsed strictly, so a key a newer build added is refused by every older
+/// one, and on 2026-09-26 writing one before rebuilding them all would have
+/// stopped the lane. `scripts/check-config.sh` asks each deployed binary this
+/// before a document is written. `None` when the flag was not given, so
+/// `main` goes on as before; otherwise the verdict is printed and the exit
+/// code returned: 0 accepted, 1 refused.
+///
+/// The path is the argument, else `GALATA_CONFIG`, else
+/// `config/datawatch.toml`, as the load itself resolves it.
+pub fn check_requested(adapters: &dyn Adapters) -> Option<std::process::ExitCode> {
+    let mut args = std::env::args();
+    let binary = args
+        .next()
+        .map(|a| {
+            Path::new(&a)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(a)
+        })
+        .unwrap_or_default();
+    if args.next().as_deref() != Some("--check-config") {
+        return None;
+    }
+    let path = args
+        .next()
+        .or_else(|| std::env::var(source::CONFIG_PATH_VAR).ok())
+        .unwrap_or_else(|| "config/datawatch.toml".to_string());
+    Some(match check(Path::new(&path), adapters) {
+        Ok(()) => {
+            println!("ok: {path} ({binary} {})", env!("CARGO_PKG_VERSION"));
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            // One line: the error names its own file, and a caller reading
+            // the first line gets the reason with it (TOML errors span
+            // several).
+            let text = error.to_string();
+            let flat: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.chars().all(|c| "|^ 0123456789".contains(c)))
+                .collect::<Vec<_>>();
+            println!("refused: {}", flat.join(" "));
+            std::process::ExitCode::FAILURE
+        }
+    })
+}
+
+/// Whether this build accepts the document at `path`.
+pub fn check(path: &Path, adapters: &dyn Adapters) -> Result<(), ConfigError> {
+    Config::load_from(path, adapters).map(|_| ())
+}
+
 impl Config {
     /// Load from a source.
     ///
@@ -1400,6 +1457,29 @@ dexes = ["", "xyz"]
             err.contains("walk_funding_days") && err.contains("funding"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_check_accepts_a_good_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        std::fs::write(&path, GOOD).unwrap();
+        check(&path, &Fake).unwrap();
+    }
+
+    #[test]
+    fn a_check_refuses_an_unknown_key_by_name() {
+        // The case it exists for: a key this build predates, in a block every
+        // binary parses strictly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        std::fs::write(
+            &path,
+            GOOD.replace("flush_secs = 2", "flush_secs = 2\nfrom_the_future = 1"),
+        )
+        .unwrap();
+        let err = check(&path, &Fake).unwrap_err().to_string();
+        assert!(err.contains("from_the_future"), "{err}");
     }
 
     #[test]
