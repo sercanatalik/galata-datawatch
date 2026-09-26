@@ -210,6 +210,8 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
     reached: BTreeSet<(Account, Kind)>,
     /// Where the fold's report goes, and the tolerances it checks at.
     fold: Option<(StatusFile, crate::ledger::fold::Tolerances)>,
+    /// Where each fold pass projects the rows it read, if anywhere.
+    projection: Option<std::path::PathBuf>,
 }
 
 /// What one pass over the accounts' histories did.
@@ -280,6 +282,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             loaded: BTreeSet::new(),
             reached: BTreeSet::new(),
             fold: None,
+            projection: None,
         }
     }
 
@@ -291,6 +294,12 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         tolerances: crate::ledger::fold::Tolerances,
     ) -> LedgerRun<V, C> {
         self.fold = Some((file, tolerances));
+        self
+    }
+
+    /// Project the rows each fold pass reads into `root` (`ledger.tape`).
+    pub fn with_projection(mut self, root: Option<std::path::PathBuf>) -> LedgerRun<V, C> {
+        self.projection = root;
         self
     }
 
@@ -319,6 +328,19 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 self.venue.normaliser(),
                 &ours,
             )?;
+            // The same rows, projected. Best effort, as the report's own write
+            // is: a projection that cannot be written must not stop the ledger
+            // recording, which is what it projects.
+            if let Some(root) = &self.projection
+                && let Err(error) = crate::ledger::project::write(
+                    root,
+                    account.venue.as_str(),
+                    account.alias.as_str(),
+                    &rows,
+                )
+            {
+                tracing::warn!(account = account.alias.as_str(), %error, "the ledger was not projected");
+            }
             report.accounts.insert(
                 account.alias.to_string(),
                 crate::ledger::fold::fold(&rows, &tolerances),
@@ -1176,6 +1198,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fold_pass_projects_what_it_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, root) = ledger(dir.path());
+        let tape = dir.path().join("ledger-tape");
+        let file = StatusFile::named(&root.join("status"), "ledger-fold-hyperliquid");
+        let mut run = run
+            .with_fold(
+                file,
+                crate::ledger::fold::Tolerances {
+                    position: "0".parse().unwrap(),
+                    relative: "0.00002".parse().unwrap(),
+                },
+            )
+            .with_projection(Some(tape.clone()));
+        // One fill, archived twice: the record keeps both pages.
+        run.venue.pages(
+            MAIN,
+            Kind::Fills,
+            &[&page(&[fill(1, 1, 1000)]), &page(&[fill(1, 1, 1000)])],
+        );
+        run.events_all().await.unwrap();
+        run.events_all().await.unwrap();
+        run.fold_all().unwrap();
+
+        let rows = |kind: Kind| -> usize {
+            // Under the alias: an address never names a projected path.
+            let path = crate::ledger::project::path_of(&tape, "hyperliquid", "main", kind);
+            galata_segments::read_segment(&path)
+                .unwrap()
+                .iter()
+                .map(|b| b.num_rows())
+                .sum()
+        };
+        assert_eq!(rows(Kind::Fills), 1, "one fill, however often archived");
+        assert_eq!(rows(Kind::FundingPayments), 0, "none, and a file saying so");
+        let everything = projected_paths(&tape);
+        assert!(
+            everything.iter().all(|p| !p.contains(MAIN)),
+            "no address in any projected path: {everything:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&tape).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "held as the ledger is");
+        }
+    }
+
+    fn projected_paths(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            out.push(path.display().to_string());
+            if path.is_dir() {
+                out.extend(projected_paths(&path));
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn without_a_projection_root_nothing_is_projected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, root) = ledger(dir.path());
+        let file = StatusFile::named(&root.join("status"), "ledger-fold-hyperliquid");
+        let mut run = run.with_fold(
+            file,
+            crate::ledger::fold::Tolerances {
+                position: "0".parse().unwrap(),
+                relative: "0.00002".parse().unwrap(),
+            },
+        );
+        run.venue
+            .pages(MAIN, Kind::Fills, &[&page(&[fill(1, 1, 1000)])]);
+        run.events_all().await.unwrap();
+        run.fold_all().unwrap();
+        assert!(!dir.path().join("ledger-tape").exists());
+    }
+
+    #[tokio::test]
     async fn two_passes_over_one_record_write_one_report() {
         let dir = tempfile::tempdir().unwrap();
         let (run, root) = ledger(dir.path());
@@ -1437,6 +1539,7 @@ mod tests {
     fn ledger(root: &std::path::Path) -> (LedgerRun<Scripted, TestClock>, std::path::PathBuf) {
         let config = crate::config::Ledger {
             root: root.to_path_buf(),
+            tape: None,
             snapshot_secs: 10,
             discover_secs: 600,
             events_secs: Some(300),

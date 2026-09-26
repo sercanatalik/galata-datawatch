@@ -429,9 +429,98 @@ pub fn write_segment_labelled(
     writer.finish()
 }
 
+/// Write one batch as the whole of the file at `path`, replacing it.
+///
+/// For a dataset rewritten whole each time (the ledger's projection) rather
+/// than extended by segments: written to a temporary name in the same
+/// directory, made durable, then renamed over `path`, so a reader sees the
+/// previous file or this one, never a partial one and never both. **Zero rows
+/// is allowed**, unlike a segment: a file saying *there are none* is a
+/// statement a reader can find, where a missing file is an absence to guess
+/// at.
+pub fn write_file(path: &Path, batch: &RecordBatch, codec: Codec) -> Result<(), SegmentError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|source| SegmentError::CreateDir {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let file = File::create(&temp).map_err(|source| SegmentError::Write {
+            path: temp.clone(),
+            source,
+        })?;
+        let mut writer =
+            ArrowWriter::try_new(file, batch.schema(), Some(properties(codec, &[], &[]))).map_err(
+                |source| SegmentError::Parquet {
+                    path: temp.clone(),
+                    source,
+                },
+            )?;
+        writer
+            .write(batch)
+            .map_err(|source| SegmentError::Parquet {
+                path: temp.clone(),
+                source,
+            })?;
+        let file = writer
+            .into_inner()
+            .map_err(|source| SegmentError::Parquet {
+                path: temp.clone(),
+                source,
+            })?;
+        // Durable before visible, as a segment is.
+        file.sync_all().map_err(|source| SegmentError::Write {
+            path: temp.clone(),
+            source,
+        })?;
+        std::fs::rename(&temp, path).map_err(|source| SegmentError::Commit {
+            from: temp.clone(),
+            to: path.to_path_buf(),
+            source,
+        })?;
+        if let Ok(handle) = File::open(dir) {
+            let _ = handle.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_is_replaced_whole() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let batch = |v: Vec<i64>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(v))]).unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kind=x").join("rows.parquet");
+        write_file(&path, &batch(vec![1, 2, 3]), Codec::Zstd).unwrap();
+        write_file(&path, &batch(vec![4]), Codec::Zstd).unwrap();
+        let read = crate::read_segment(&path).unwrap();
+        let rows: usize = read.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1, "replaced, not appended");
+        // Nothing else left beside it: no temporary survives a commit.
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["rows.parquet"]);
+        // And zero rows is a file, not an absence.
+        write_file(&path, &batch(vec![]), Codec::Zstd).unwrap();
+        assert!(path.exists());
+    }
 
     #[test]
     fn statistics_are_written_for_the_named_columns_and_no_others() {

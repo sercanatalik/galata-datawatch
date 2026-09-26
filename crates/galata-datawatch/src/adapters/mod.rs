@@ -172,6 +172,8 @@ pub struct LedgerParts {
     pub status: crate::capture::StatusFile,
     /// Where the fold's report is written, and its tolerances.
     pub fold: (crate::capture::StatusFile, crate::ledger::fold::Tolerances),
+    /// Where the ledger is projected, if anywhere (`ledger.tape`).
+    pub projection: Option<std::path::PathBuf>,
 }
 
 /// Run a venue's ledger until cancelled.
@@ -205,7 +207,8 @@ pub async fn run_ledger(
                 parts.bindings,
             )
             .with_status_file(parts.status)
-            .with_fold(parts.fold.0, parts.fold.1);
+            .with_fold(parts.fold.0, parts.fold.1)
+            .with_projection(parts.projection);
             run.run(shutdown).await?;
             Ok(())
         }

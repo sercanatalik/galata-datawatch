@@ -718,6 +718,12 @@ fills the fold ran in 0.4 ms with no break and no skew at 2×10⁻⁵.*
   2026-09-25; the fold's own cadence is Tier 14's to decide. The lane passes
   no credential, and needs none: the fold reads the record, not the venue.
 
+- **The ledger, projected** (`project-the-ledger`, 2026-09-26): `ledger.tape`
+  makes each fold pass write the rows it read, fills and funding payments
+  first, as typed Parquet under an owner-only root of its own, so a reader
+  needs neither the fingerprint key nor a second decoder. It is rewritten
+  whole per pass because the ledger is hundreds of rows, not millions.
+
 ### Tier 15 — derived statistics
 
 *Built 2026-09-25 (`derive-statistics`) as a library and `galata-derive`,

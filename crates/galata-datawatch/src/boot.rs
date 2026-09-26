@@ -533,6 +533,7 @@ pub fn boot_ledger(
             ),
             fold_tolerances,
         ),
+        projection: ledger.tape.clone(),
     };
 
     let runtime = tokio::runtime::Runtime::new()?;

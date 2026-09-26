@@ -19,6 +19,18 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **`ledger.tape`: the ledger, projected into typed datasets.** When
+  declared, the ledger process writes each polled account's fills and funding
+  payments on every fold pass, from the rows the fold already reads
+  (normalised, one per identity, our own counterparties aliased), to
+  `<tape>/venue=<v>/account=<alias>/kind=<kind>/rows.parquet`. Each file is
+  rewritten whole and committed by rename (`galata_segments::write_file`,
+  new), and an empty kind is still a file, with zero rows. The root is held
+  owner-only (`0700`, refused otherwise), never under the market tape, and no
+  address names any path. Optional, and nothing is written when absent.
+  **Rebuild the ledger binary before writing the key.** Margin, positions and
+  ledger updates follow.
+
 - **`walk_funding_days`: settled funding walked to a stated depth.** Declared
   per venue, it makes the funding walk ask that many days back on every boot,
   paged forward to now, instead of resuming from the record's receipt clock.

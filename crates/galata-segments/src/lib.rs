@@ -32,6 +32,6 @@ pub use listing::{
 };
 pub use reader::{label, read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{
-    Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_segment, write_segment_labelled,
-    write_segment_pruned,
+    Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_file, write_segment,
+    write_segment_labelled, write_segment_pruned,
 };

@@ -480,6 +480,12 @@ pub struct Ledger {
     /// Its own root, beside the archive and the tape, **readable by its owner
     /// only**: its raw answers carry sub-account addresses.
     pub root: PathBuf,
+    /// Where the ledger is projected into typed datasets, one file per
+    /// (venue, account, kind), rewritten by the ledger process on each fold
+    /// pass. Held **owner-only** as `root` is, and never under the market
+    /// tape, which the tower serves. Absent means no projection.
+    #[serde(default)]
+    pub tape: Option<PathBuf>,
     /// Seconds between snapshots of each account and dex.
     pub snapshot_secs: u64,
     /// Seconds between discovery runs.

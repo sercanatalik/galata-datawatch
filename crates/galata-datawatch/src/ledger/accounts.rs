@@ -547,6 +547,7 @@ mod tests {
     fn ledger(root: &Path) -> Ledger {
         Ledger {
             root: root.to_path_buf(),
+            tape: None,
             snapshot_secs: 10,
             discover_secs: 600,
             events_secs: Some(300),
