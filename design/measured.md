@@ -4138,3 +4138,36 @@ of each width (90,027, 57,831 and 18,021 bars).
 The deletion code had not changed. The writers around it had, and nothing made
 anyone look again. `scripts/check-deletion-paths.sh` now fails on any deletion
 not listed with its reason.
+
+## The settled bars, recovered by import — 2026-09-27
+
+*After `recover-the-settled-bars`.* The pages compaction deleted could not come
+back from a restart. The live width resumes from the record's receipt
+watermark, which was today, so the restart's walk asked 1m only from
+there. Bars removed from inside the durable span are invisible to a
+receipt watermark. Only the declared coarse widths re-ask their whole reach.
+
+They came back through the rescue path instead: one `candleSnapshot` 1m page
+per coin, `startTime` 0, into `var/rescue/2026-09-27-settled-1m/` with a
+manifest, taken in by one `--import` capture boot (`pages=6`):
+
+| coin | bars | first bar (UTC) | last bar |
+|---|---|---|---|
+| BTC | 5,151 | 09-23 15:50 | 09-27 05:40 |
+| ETH | 5,148 | 09-23 15:53 | 09-27 05:40 |
+| HYPE | 5,009 | 09-23 18:12 | 09-27 05:40 |
+| xyz:CL | 5,080 | 09-23 17:00 | 09-27 05:39 |
+| xyz:GOLD | 5,146 | 09-23 15:55 | 09-27 05:40 |
+| xyz:XYZ100 | 5,151 | 09-23 15:50 | 09-27 05:40 |
+
+The venue returned 5,009–5,151 1m bars per coin, reaching back about 3.5
+days; the first bar differs by coin. So settled 1m bars older than 09-23 15:50 that
+compaction removed are beyond reach. Each earlier day's finals now exist only
+as far as its surviving pages hold them. The pages carry today's receipts under
+the venue's own sequence, so the hourly tape projection picks them up with
+today's receipt day. Two restart gaps (the mistaken restart and the import
+boot, about a minute each) are in the record as downtime. The live stream
+covered both, and the imported pages cover their bars.
+
+`fundingHistory` pages lost the same way need no rescue: funding is forward-paged
+from any start, so a walk with `walk_funding_days` fetches them again whenever it is declared.
