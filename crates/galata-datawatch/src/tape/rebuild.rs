@@ -261,6 +261,7 @@ pub fn rebuild_with(
         }
     }
 
+    let mut doomed = Vec::new();
     if replace == Replace::SourceDays {
         // **Only what this run re-derives: this run's venues, and the receipt
         // days it read.** A partition is `kind=/date=` by the venue's time, so
@@ -277,7 +278,6 @@ pub fn rebuild_with(
         // **Planned in full, then removed.** A refusal therefore means the
         // tape was not touched, never that it was half-replaced.
         let ours = tape.pending_venues();
-        let mut doomed = Vec::new();
         for partition in galata_segments::partitions(tape_root) {
             for (_, segment) in galata_segments::list_segments(&partition) {
                 let Some(venue) = galata_segments::label(&segment, crate::tape::VENUE_LABEL)?
@@ -297,16 +297,33 @@ pub fn rebuild_with(
                 }
             }
         }
-        for segment in doomed {
-            std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {
-                path: segment.clone(),
-                source,
-            })?;
-            report.replaced += 1;
-        }
     }
 
-    report.segments = tape.commit()?.len();
+    // **Written first, removed after.** No reader of the tape takes the shared
+    // hold, so the exclusive one keeps nobody out: removing first left the
+    // tape without four receipt days for 67 s of every hourly run, and
+    // without them until the next run when the write failed (measured
+    // 2026-09-27, a-replacement-never-leaves-a-hole). Now a failed commit
+    // removes nothing, and a reader sees at worst both copies for as long as
+    // the unlinks take, never neither.
+    //
+    // **Never a path this run wrote.** The rebuild is deterministic, so an
+    // unchanged receipt day comes back under the same name, renamed
+    // atomically over the old file. That path is now the new segment.
+    let written = tape.commit()?;
+    report.segments = written.len();
+    let written: std::collections::HashSet<_> = written.into_iter().collect();
+    for segment in doomed {
+        // Replaced all the same, in place.
+        report.replaced += 1;
+        if written.contains(&segment) {
+            continue;
+        }
+        std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {
+            path: segment.clone(),
+            source,
+        })?;
+    }
     Ok(report)
 }
 
@@ -699,6 +716,130 @@ mod tests {
             crate::tape::check_layout(&tape),
             Vec::new(),
             "an overlap survived replacement"
+        );
+    }
+
+    fn segment_bytes(tape: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = galata_segments::partitions(tape)
+            .iter()
+            .flat_map(|p| galata_segments::list_segments(p))
+            .map(|(_, path)| {
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                (name, std::fs::read(&path).unwrap())
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn an_unchanged_day_rebuilt_with_replacement_keeps_its_segments() {
+        // The hourly case: most days have not changed since the last run, so
+        // their segments come back under the same names. Written first, those
+        // names are the NEW segments, and removing the planned ones blindly
+        // would delete the run's own output.
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+        let replace = || {
+            rebuild_with(
+                &root,
+                &tape,
+                &hl,
+                None,
+                i64::MIN,
+                i64::MAX,
+                Replace::SourceDays,
+            )
+            .unwrap()
+        };
+
+        replace();
+        let first = segment_bytes(&tape);
+        assert!(!first.is_empty());
+        let report = replace();
+
+        assert_eq!(
+            segment_bytes(&tape),
+            first,
+            "an unchanged day lost or changed a segment"
+        );
+        assert_eq!(
+            report.replaced,
+            first.len(),
+            "a same-named segment is replaced, in place"
+        );
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_write_removes_nothing() {
+        // Removing first left the tape without the day until the next run
+        // whenever the write failed. The write is made to fail where the
+        // removal would still succeed: a directory stands at the name the new
+        // segment is renamed to, and the partition stays writable.
+        let (dir, hl) = growing_archive();
+        let root = dir.path().join("archive");
+        let tape = dir.path().join("tape");
+        let replace = |root: &Path, tape: &Path| {
+            rebuild_with(
+                root,
+                tape,
+                &hl,
+                None,
+                i64::MIN,
+                i64::MAX,
+                Replace::SourceDays,
+            )
+        };
+        replace(&root, &tape).unwrap();
+        grow(dir.path(), &hl, 100);
+        let before = segment_bytes(&tape);
+
+        // Learn the names the next run writes, on a copy.
+        let rehearsal = tempfile::tempdir().unwrap();
+        copy_tree(dir.path(), rehearsal.path());
+        replace(
+            &rehearsal.path().join("archive"),
+            &rehearsal.path().join("tape"),
+        )
+        .unwrap();
+        let rehearsed = rehearsal.path().join("tape");
+        let mut blockers = Vec::new();
+        for partition in galata_segments::partitions(&rehearsed) {
+            for (_, path) in galata_segments::list_segments(&partition) {
+                let name = path.strip_prefix(&rehearsed).unwrap();
+                if !tape.join(name).exists() {
+                    let blocker = tape.join(name);
+                    std::fs::create_dir_all(blocker.join("in-the-way")).unwrap();
+                    blockers.push(blocker);
+                }
+            }
+        }
+        assert!(!blockers.is_empty(), "the grown archive writes no new name");
+
+        let result = replace(&root, &tape);
+        for blocker in &blockers {
+            std::fs::remove_dir_all(blocker).unwrap();
+        }
+
+        assert!(result.is_err(), "the write was meant to fail");
+        assert_eq!(
+            segment_bytes(&tape),
+            before,
+            "a failed write removed segments"
         );
     }
 

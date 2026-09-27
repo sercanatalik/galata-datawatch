@@ -4125,7 +4125,7 @@ file, and each is safe once compaction proves duplicates:
 | `galata-segments/src/compact.rs` `remove` | compaction's originals; proven leftovers | originals only after the merged replacement is durable; a contained segment only when every row is in its container |
 | `galata-segments/src/writer.rs` (two) | a writer's own temporary files | never a committed name |
 | `galata-datawatch/src/record/mod.rs` | the clean-shutdown marker | holds no rows |
-| `galata-datawatch/src/tape/rebuild.rs` | this venue's tape segments of the receipt days rewritten | the tape is a rebuildable cache; exact footer labels |
+| `galata-datawatch/src/tape/rebuild.rs` | this venue's tape segments of the receipt days rewritten | the tape is a rebuildable cache; exact footer labels; after the new segments are committed (since `a-replacement-never-leaves-a-hole`) |
 | `galata-datawatch/src/bin/galata-retain.rs` | whole partitions past a horizon | only with `--delete`, only past a declared horizon (none is declared here) |
 
 **Only the archive is compacted** (`galata-compact` reads `paths.archive`; the
@@ -4213,3 +4213,37 @@ now `vet-config.sh`, and the read goes through `FileSource::from_env`. So
 `--check-config` refuses both variables set, as the load does. It also refuses
 a document variable alone: it used to judge the default file instead of the
 document named.
+
+## The hourly hole in the tape — 2026-09-27
+
+*After `a-replacement-never-leaves-a-hole`.* The tower logged, once an hour
+for as far back as its log goes, "the tape's bound went backwards; the store
+was replaced", for every kind, with the bound falling to 09-22 07:30. That is
+the newest segment in `date=2026-09-22`. A replacing rebuild removed the
+segments it planned to replace before writing their replacements. No reader of
+the tape takes the shared hold (the tower, `tape::reader`, research's scans),
+so the rebuild's exclusive hold kept nobody out.
+
+Measured on a copy of the real record, running the lane's own call
+(`--replace hyperliquid 2026-09-24 2026-09-28`) with the tape sampled every
+50 ms:
+
+| order | run | segments listed (baseline 6,729) | bound below its start |
+|---|---|---|---|
+| remove, then write (deployed release build) | 97 s | **16** at the lowest | **67.3 s** |
+| write, then remove (debug build) | 445 s | 6,729 at the lowest, 6,733 at the highest | never |
+
+For two-thirds of every hourly run, four receipt days were missing for
+anything that read the tape. A write failing after the removal would have left
+them missing until the next run. Now the run commits first, then removes what
+it planned, skipping every path it just wrote. An unchanged day comes back
+under the same name, renamed atomically over the old file, and without the
+skip the reorder would delete the run's own output (the new test catches that,
+as does the existing convergence test). The cost is a moment where both copies
+are listed (at most 4 extra segments measured), and the next run removes any
+duplicate a crash leaves.
+
+The deletion guard had a gap, found when this change's test used
+`remove_dir_all`. It read each file up to a literal `#[cfg(test)]`, and three
+test modules open with `#[cfg(all(test, feature = ...))]`. It now stops there
+too, but not at `any(test, ...)`, which compiles outside tests.

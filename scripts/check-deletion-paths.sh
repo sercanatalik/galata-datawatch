@@ -16,8 +16,8 @@
 # entry below, file and line text, each with the reason it is safe. A new one
 # fails this guard until someone writes down why it cannot delete the record.
 #
-# Each file is read only as far as its first `#[cfg(test)]`: tests delete
-# their own fixtures.
+# Each file is read only as far as its first `#[cfg(test)]` or
+# `#[cfg(all(test, ...))]`: tests delete their own fixtures.
 #
 # Usage: check-deletion-paths.sh [check|plant] [root]
 
@@ -49,12 +49,14 @@ crates/galata-segments/src/compact.rs	std::fs::remove_file(path).map_err(|source
 crates/galata-segments/src/writer.rs	let _ = std::fs::remove_file(&self.temp_path);	a segment writer's own temporary file, dropped unfinished; never a committed name
 crates/galata-segments/src/writer.rs	let _ = std::fs::remove_file(&temp);	write_file's own temporary, after a failed write; never the committed file
 crates/galata-datawatch/src/record/mod.rs	let _ = std::fs::remove_file(self.scope_path().join(CLEAN_SHUTDOWN));	the clean-shutdown marker, cleared at boot; holds no rows
-crates/galata-datawatch/src/tape/rebuild.rs	std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {	the tape, a rebuildable cache: this venue's segments of the receipt days this run rewrites, by label
+crates/galata-datawatch/src/tape/rebuild.rs	std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {	the tape, a rebuildable cache: this venue's segments of the receipt days this run rewrites, by label, only after the run's own segments are committed, and never a path it wrote (a-replacement-never-leaves-a-hole)
 crates/galata-datawatch/src/bin/galata-retain.rs	match std::fs::remove_dir_all(&candidate.path) {	retention: only with --delete, only partitions past a horizon the operator declared, holding both stores
 LIST
 
 non_test() {
-    awk '/#\[cfg\(test\)\]/{exit} {print}' "$1"
+    # `test` alone or first in an `all(...)`: code only a test build
+    # compiles. Never `any(test, ...)` or `not(test)`, which ship.
+    awk '/#\[cfg\((all\()?test[,)]/{exit} {print}' "$1"
 }
 
 failures=()

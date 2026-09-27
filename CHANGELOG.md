@@ -19,6 +19,14 @@ exists so the four above take no vault dependency.
 
 ### Fixed
 
+- **A replacing tape rebuild no longer removes before it writes.** The hourly
+  projection's `--replace` deleted four receipt days' segments and wrote their
+  replacements after, so for 67 s of each run the tape listed 16 segments
+  instead of 6,729 (measured on a copy of the real record). Readers take no
+  hold, so they saw the hole: the tower logged it hourly as its bound going
+  backwards. A failed write would have left the days missing until the next
+  run. The run now commits first and removes the planned segments after,
+  never one it just wrote.
 - **Compaction no longer deletes fetched pages it took for leftovers.** It
   removed every segment another contained by range, unmerged, on the premise
   that only an interrupted compaction nests ranges. A page fetched while a
