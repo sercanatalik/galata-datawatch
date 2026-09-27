@@ -4268,7 +4268,10 @@ in. On a copy of the live archive at 19:20:
 | a frontier-equivalent listing | 416 ms | 9.2 ms |
 | `galata-watch` | | nothing to report |
 
-The 2,299 left are 110 hour merges and the open hour's flushes. The lane now
+The 2,299 left are 110 hour merges and the open hour's flushes. Deployed the same evening. The first hand-run on
+the live archive at 20:06 took today from 136,661 segments to 988 in 33 s
+(release build), `galata-watch` reported nothing, and the tower's CPU fell
+from a steady 14% to 4.3% over the next minute. The lane now
 compacts hourly at :20. Each run still folds every closed day, so the 00:20 run
 does last night's work.
 
