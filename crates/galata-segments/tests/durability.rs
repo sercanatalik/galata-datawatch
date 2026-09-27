@@ -565,14 +565,14 @@ fn a_narrow_segment_before_its_container_is_still_found() {
         Codec::Zstd,
     )
     .unwrap();
-    // The replacement an interrupted compaction had already written.
-    write_segment(
-        dir.path(),
-        time(100, 299, 9),
-        &batch(100, 4, 1),
-        Codec::Zstd,
+    // The replacement an interrupted compaction had already written: it holds
+    // every row of what it replaced, which is what makes it a replacement.
+    let replaced = arrow::compute::concat_batches(
+        &batch(100, 2, 1).schema(),
+        &[batch(100, 2, 1), batch(200, 2, 1)],
     )
     .unwrap();
+    write_segment(dir.path(), time(100, 299, 9), &replaced, Codec::Zstd).unwrap();
 
     // BOTH narrow segments, not just the one that sorts after the container.
     assert_eq!(galata_segments::nested(dir.path()).len(), 2);
@@ -592,6 +592,46 @@ fn a_narrow_segment_before_its_container_is_still_found() {
     assert_eq!(
         rows, 4,
         "a resumed compaction must not double the partition"
+    );
+}
+
+/// **Containment by range is not duplication.** A page fetched while a live
+/// writer's segment spans its time sits inside that segment's range and holds
+/// rows of its own (measured 2026-09-27: 200 `candleSnapshot` pages in one
+/// day's candles). Compaction merges it; it does not remove it.
+#[test]
+fn a_contained_segment_with_rows_of_its_own_is_merged_not_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    // The live writer's segment, and a fetched page inside its range.
+    write_segment(
+        dir.path(),
+        time(100, 299, 1),
+        &batch(100, 4, 50),
+        Codec::Zstd,
+    )
+    .unwrap();
+    write_segment(
+        dir.path(),
+        time(180, 180, 1),
+        &batch(180, 1, 1),
+        Codec::Zstd,
+    )
+    .unwrap();
+    assert!(
+        galata_segments::nested(dir.path()).is_empty(),
+        "a page with rows of its own is not left over from a compaction"
+    );
+
+    compact_partition(dir.path(), Codec::Zstd).unwrap();
+    let mut rows = Vec::new();
+    for (_, path) in list_segments(dir.path()) {
+        rows.extend(micros_of(&read_segment(&path).unwrap()));
+    }
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        [100, 150, 180, 200, 250],
+        "the fetched page's row survived"
     );
 }
 

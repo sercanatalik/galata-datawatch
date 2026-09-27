@@ -194,12 +194,84 @@ pub fn nested(dir: &Path) -> Vec<PathBuf> {
     superseded(&list_segments(dir))
 }
 
-/// Segments a wider segment in the same partition already holds.
+/// Of the segments a wider one contains by range, the ones whose **every row
+/// is in that wider segment**: what an interrupted compaction leaves.
+///
+/// **Containment by range is not duplication.** Measured 2026-09-27: 200 of a
+/// live candle partition's 8,668 segments sat inside a wider segment's range,
+/// each one `candleSnapshot` page the settle fetched mid-stream, sharing no
+/// sequence with the live `candle` segment around it. Removing contained
+/// segments on range alone deleted all 200 unmerged on every nightly
+/// compaction: a copy of that partition compacted from 402 fetched pages to
+/// 202. So a contained segment is removed only when its rows are proven to be
+/// in its container, compared whole (arrow's row format), and merged
+/// otherwise. A segment that cannot be read is kept: failing to spot a
+/// duplicate costs a duplicate read; deleting an unmerged segment costs the
+/// rows.
+fn proven_duplicates(pairs: Vec<(PathBuf, PathBuf)>) -> Vec<PathBuf> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut by_container: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    for (contained, container) in pairs {
+        by_container.entry(container).or_default().push(contained);
+    }
+    let mut proven = Vec::new();
+    for (container, contained) in by_container {
+        let Ok(held) = read_segment(&container) else {
+            continue;
+        };
+        let Some(schema) = held.first().map(|b| b.schema()) else {
+            continue;
+        };
+        let fields: Vec<arrow::row::SortField> = schema
+            .fields()
+            .iter()
+            .map(|f| arrow::row::SortField::new(f.data_type().clone()))
+            .collect();
+        let Ok(converter) = arrow::row::RowConverter::new(fields) else {
+            continue;
+        };
+        let mut rows: HashSet<Vec<u8>> = HashSet::new();
+        let mut readable = true;
+        for batch in &held {
+            match converter.convert_columns(batch.columns()) {
+                Ok(converted) => rows.extend(converted.iter().map(|r| r.as_ref().to_vec())),
+                Err(_) => readable = false,
+            }
+        }
+        if !readable {
+            continue;
+        }
+        for path in contained {
+            let Ok(batches) = read_segment(&path) else {
+                continue;
+            };
+            let all_held = batches.iter().all(|batch| {
+                batch.schema() == schema
+                    && converter
+                        .convert_columns(batch.columns())
+                        .is_ok_and(|converted| converted.iter().all(|r| rows.contains(r.as_ref())))
+            });
+            if all_held {
+                proven.push(path);
+            }
+        }
+    }
+    proven
+}
+
+/// Segments a wider segment in the same partition already holds: contained by
+/// range, **and** every row proven present in the container
+/// ([`proven_duplicates`]).
+fn superseded(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
+    proven_duplicates(contained_by_range(listed))
+}
+
+/// Each segment a wider one contains by range, with that container.
 ///
 /// An ordered sweep rather than a cross-product: comparing every segment
 /// against every other has billions of steps at a day-partition's segment
 /// count.
-fn superseded(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
+fn contained_by_range(listed: &[(Cursor, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
     // **A container must be seen before what it contains**, or the sweep walks
     // past the narrow one and only catches what follows the wide one.
     //
@@ -245,7 +317,7 @@ fn superseded(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
                         || w.last_position() > cursor.last_position())
                     && w_path != path =>
             {
-                doomed.push(path.clone());
+                doomed.push((path.clone(), w_path.clone()));
             }
             _ => widest = Some((*cursor, path.clone())),
         }

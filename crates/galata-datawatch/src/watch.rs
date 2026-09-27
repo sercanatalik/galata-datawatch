@@ -289,20 +289,43 @@ mod tests {
 
     #[test]
     fn a_segment_inside_another_is_reported() {
-        // Containment cannot come from concurrent flushes — a writer flushes
-        // in receipt order, so segments abut. This is a compaction that wrote
-        // its replacement and died before removing what it replaced.
+        // A compaction that wrote its replacement and died before removing
+        // what it replaced: contained by range AND every row held. (Range alone
+        // is not enough: a fetched page inside a live segment is its own rows.)
         let archive = tempfile::tempdir().unwrap();
         let tape = tempfile::tempdir().unwrap();
-        segments(
-            archive.path(),
-            "venue=hyperliquid/kind=trades/date=2026-09-20",
-            &[
-                "t-100_299_4711_9.parquet",
-                "t-100_199_4711_1.parquet",
-                "t-200_299_4711_2.parquet",
-            ],
-        );
+        // Real segments, not names: a leftover is proven by its rows being in
+        // the replacement, and an empty file proves nothing.
+        let dir = archive
+            .path()
+            .join("venue=hyperliquid/kind=trades/date=2026-09-20");
+        let rows = |micros: &[i64]| {
+            use std::sync::Arc;
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new(
+                    "recv_micros",
+                    arrow::datatypes::DataType::Int64,
+                    false,
+                ),
+            ]));
+            arrow::record_batch::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(arrow::array::Int64Array::from(micros.to_vec()))],
+            )
+            .unwrap()
+        };
+        let at = |first, last, seq| galata_segments::Cursor::Time {
+            first_micros: first,
+            last_micros: last,
+            pid: 4711,
+            seq,
+        };
+        let codec = galata_segments::Codec::Zstd;
+        galata_segments::write_segment(&dir, at(100, 199, 1), &rows(&[100, 199]), codec).unwrap();
+        galata_segments::write_segment(&dir, at(200, 299, 2), &rows(&[200, 299]), codec).unwrap();
+        // The replacement, holding every row of both.
+        galata_segments::write_segment(&dir, at(100, 299, 9), &rows(&[100, 199, 200, 299]), codec)
+            .unwrap();
         let report = watch(
             archive.path(),
             tape.path(),

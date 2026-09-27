@@ -17,6 +17,20 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Compaction no longer deletes fetched pages it took for leftovers.** It
+  removed every segment another contained by range, unmerged, on the premise
+  that only an interrupted compaction nests ranges. A page fetched while a
+  live segment spans its time (the settle's `candleSnapshot`, a walk's
+  `fundingHistory`) sits inside that range and holds rows of its own. A copy
+  of one day's candles compacted from 402 fetched pages to 202. A contained
+  segment is now removed only when every row is proven to be in its
+  container, and merged otherwise. `galata-watch` stops reporting those pages
+  as an interrupted compaction. **Rebuild `galata-compact` before the next
+  nightly run.** Pages already lost can be walked again where the venue still
+  serves them.
+
 ### Added
 
 - **`--check-config [path]` on every binary that reads the document**, and
