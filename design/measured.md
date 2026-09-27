@@ -4169,6 +4169,9 @@ today's receipt day. Two restart gaps (the mistaken restart and the import
 boot, about a minute each) are in the record as downtime. The live stream
 covered both, and the imported pages cover their bars.
 
+After the 07:40 projection the tape held a final 1m bar for every minute of
+09-23 to 09-26 (1,440 distinct minutes a day, all six tickers present).
+
 `fundingHistory` pages lost the same way need no rescue: funding is forward-paged
 from any start, so a walk with `walk_funding_days` fetches them again whenever it is declared.
 
