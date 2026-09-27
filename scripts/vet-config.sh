@@ -3,7 +3,7 @@
 # Ask every deployed binary whether it accepts a configuration document,
 # BEFORE the document is written where they read it.
 #
-#   check-config.sh [--bin-dir DIR] <candidate.toml>
+#   vet-config.sh [--bin-dir DIR] <candidate.toml>
 #
 # The document is parsed strictly (`deny_unknown_fields`) by capture, the
 # ledger, the lane's tools and the tower, so a key a newer build added is
@@ -30,7 +30,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
 if [[ "${1:-}" == --bin-dir ]]; then BIN="$(cd "$2" && pwd)"; shift 2; fi
 candidate="${1:-}"
-[[ -f "$candidate" ]] || { echo "usage: check-config.sh [--bin-dir DIR] <candidate.toml>" >&2; exit 2; }
+[[ -f "$candidate" ]] || { echo "usage: vet-config.sh [--bin-dir DIR] <candidate.toml>" >&2; exit 2; }
 candidate="$(cd "$(dirname "$candidate")" && pwd)/$(basename "$candidate")"
 
 TOOLS=(galata-datawatch galata-ledger galata-compact galata-tape-rebuild galata-retain galata-watch galata-derive)

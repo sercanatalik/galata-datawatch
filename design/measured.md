@@ -4171,3 +4171,42 @@ covered both, and the imported pages cover their bars.
 
 `fundingHistory` pages lost the same way need no rescue: funding is forward-paged
 from any start, so a walk with `walk_funding_days` fetches them again whenever it is declared.
+
+## A judge on the old rule — 2026-09-27
+
+*After `say-which-binaries-are-stale`.* The compaction fix was deployed by
+rebuilding `galata-compact` alone. The release `galata-watch`, built 09-26
+15:42, still counted a segment inside another's range as an interrupted
+compaction. From the 07:05 run on, `judge-the-record` failed with 235 findings
+in today's candles. On the same record, the watcher built from current source
+reported *nothing to report* (34 partitions). All ten workspace binaries were
+rebuilt at 07:13, and the release watcher now agrees.
+
+`install-services.sh --status` now has a BUILD section. Each deployed binary
+is listed as current or as STALE, naming the first commit after its build that
+touched its sources. It was proved on `galata-watch`'s mtime:
+
+| build time | first source commit after | reads |
+|---|---|---|
+| 05:00 | `4ef6bbb` touched only a test, so skipped; `66c64d5` | STALE, `66c64d5` |
+| 06:00 | `66c64d5` (the fix) | STALE, `66c64d5` |
+| 06:10 | none (`78f2125` scripts, `a5dbab3` docs) | current |
+
+On its first run it read the deployed tower copy (09-26 22:24:20) as STALE,
+naming `8544ce1`. That is a near miss: the copy was built from the dirty tree
+that became `8544ce1` seconds later (`galata-tower.source` says
+`c428cc5-dirty`), so it likely holds `--version`. What it certainly lacks is
+`d3d3a8e` (22:59, `--check-config`), the same fact RESTART reports as "this
+tower predates --check-config". A build from uncommitted work reads stale
+until it is rebuilt from the commit, which errs the safe way. The installer
+copies the tower with `cp -p` from now on, so the copy keeps its build time.
+
+The gate had stopped passing, and running it found that. Since `71c8a1c` it
+had failed twice over. `check-config.sh` was named like a guard, so the gate
+ran it with no argument, and it exited 2 on its usage line. That failure also
+stopped the gate before `check-secret-reach`, which refuses the
+`GALATA_CONFIG` read the same commit added to `config/mod.rs`. The script is
+now `vet-config.sh`, and the read goes through `FileSource::from_env`. So
+`--check-config` refuses both variables set, as the load does. It also refuses
+a document variable alone: it used to judge the default file instead of the
+document named.

@@ -236,6 +236,44 @@ if [[ "${1:-}" == --status ]]; then
             printf '%-34s %s\n' "$name" "unreadable: ${line#galata-vault-exec: }"
         fi
     done
+
+    # Builds: a deployed binary built before a commit to its sources runs the
+    # old code. A fix deployed by rebuilding galata-compact alone left
+    # galata-watch judging by the old rule, and the only symptom was a false
+    # finding (say-which-binaries-are-stale). Sources are what is compiled —
+    # a docs, test or script commit makes nothing stale — and a binary is
+    # named with the first source commit after its build.
+    echo
+    printf '%-34s %-16s %s\n' BUILD BUILT STATE
+    build_row() {  # build_row <name> <file> <repo> <remedy> <source path>...
+        local name="$1" file="$2" repo="$3" remedy="$4"; shift 4
+        if [[ ! -f "$file" ]]; then
+            printf '%-34s %-16s %s\n' "$name" "-" "missing — $remedy"
+            return
+        fi
+        local built first
+        built="$(stat -f %m "$file")"
+        first="$(git -C "$repo" log --reverse --since="@$((built + 1))" --format='%h %s' -- "$@" 2>/dev/null | head -1)"
+        if [[ -n "$first" ]]; then
+            printf '%-34s %-16s %s\n' "$name" "$(date -r "$built" '+%Y-%m-%d %H:%M')" "STALE — built before $first; $remedy"
+        else
+            printf '%-34s %-16s %s\n' "$name" "$(date -r "$built" '+%Y-%m-%d %H:%M')" "current"
+        fi
+    }
+    ws_sources=(':(glob)crates/*/src/**' ':(glob)crates/*/Cargo.toml' Cargo.toml Cargo.lock)
+    if bins="$(cargo metadata --no-deps --offline --format-version 1 --manifest-path "$ROOT/Cargo.toml" 2>/dev/null \
+            | jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name' | sort)"; then
+        while read -r bin; do
+            [[ -n "$bin" ]] || continue
+            build_row "$bin" "$ROOT/target/release/$bin" "$ROOT" \
+                "cargo build --release --workspace --bins" "${ws_sources[@]}"
+        done <<<"$bins"
+    else
+        echo "(the workspace's binaries are unlisted: cargo metadata failed)"
+    fi
+    build_row "galata-tower (var/bin)" "$ROOT/var/bin/galata-tower" "$TOWER" \
+        "cargo build --release in $TOWER, then install-services.sh tower" \
+        "${ws_sources[@]}" ui/src
     exit 0
 fi
 
@@ -292,7 +330,8 @@ for spec in "${services[@]}"; do
     # place once it has stopped, so the file that runs is the one assessed.
     if [[ "$service" == tower ]]; then
         mkdir -p "$ROOT/var/bin"
-        cp "$TOWER/target/release/galata-tower" "$ROOT/var/bin/.galata-tower.new"
+        # -p: the copy keeps its build time, which --status's BUILD compares.
+        cp -p "$TOWER/target/release/galata-tower" "$ROOT/var/bin/.galata-tower.new"
     fi
     programs=()
     while IFS= read -r program; do [[ -n "$program" ]] && programs+=("$program"); done < <(vet_programs "$spec")

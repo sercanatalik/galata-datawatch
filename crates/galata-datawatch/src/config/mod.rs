@@ -664,7 +664,7 @@ pub trait Adapters {
 /// **Called first in every binary that reads the document.** The document is
 /// parsed strictly, so a key a newer build added is refused by every older
 /// one, and on 2026-09-26 writing one before rebuilding them all would have
-/// stopped the lane. `scripts/check-config.sh` asks each deployed binary this
+/// stopped the lane. `scripts/vet-config.sh` asks each deployed binary this
 /// before a document is written. `None` when the flag was not given, so
 /// `main` goes on as before; otherwise the verdict is printed and the exit
 /// code returned: 0 accepted, 1 refused.
@@ -685,10 +685,18 @@ pub fn check_requested(adapters: &dyn Adapters) -> Option<std::process::ExitCode
     if args.next().as_deref() != Some("--check-config") {
         return None;
     }
-    let path = args
-        .next()
-        .or_else(|| std::env::var(source::CONFIG_PATH_VAR).ok())
-        .unwrap_or_else(|| "config/datawatch.toml".to_string());
+    // The environment through the one reader of it, which also refuses
+    // both variables set: the check resolves the path as the load does.
+    let path = match args.next() {
+        Some(path) => path,
+        None => match source::FileSource::from_env("config/datawatch.toml") {
+            Ok(source) => source.path.to_string_lossy().into_owned(),
+            Err(error) => {
+                println!("refused: {error}");
+                return Some(std::process::ExitCode::FAILURE);
+            }
+        },
+    };
     Some(match check(Path::new(&path), adapters) {
         Ok(()) => {
             println!("ok: {path} ({binary} {})", env!("CARGO_PKG_VERSION"));

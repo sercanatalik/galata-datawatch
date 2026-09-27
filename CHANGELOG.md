@@ -27,14 +27,22 @@ exists so the four above take no vault dependency.
   of one day's candles compacted from 402 fetched pages to 202. A contained
   segment is now removed only when every row is proven to be in its
   container, and merged otherwise. `galata-watch` stops reporting those pages
-  as an interrupted compaction. **Rebuild `galata-compact` before the next
-  nightly run.** Pages already lost can be walked again where the venue still
+  as an interrupted compaction. **Rebuild every binary before the next
+  nightly run** (`cargo build --release --workspace --bins`): `galata-watch`
+  carries the same rule, and the one left behind failed each hourly judge on
+  the pages the fix keeps. Pages already lost can be walked again where the venue still
   serves them.
 
 ### Added
 
+- **A BUILD section in `install-services.sh --status`**: each workspace
+  binary, and the tower's installed copy, is listed as current or as STALE,
+  naming the first commit after its build that touched its sources. A commit
+  to docs, tests or scripts makes nothing stale. The installer now copies the
+  tower with `cp -p`, so the copy keeps its build time.
 - **`--check-config [path]` on every binary that reads the document**, and
-  `scripts/check-config.sh` to ask them all. Each binary judges the document
+  `scripts/vet-config.sh` to ask them all (named `check-config.sh` until
+  the gate took it for a guard and failed on its usage line). Each binary judges the document
   with its own rules and prints `ok` or `refused: <reason>` before doing
   anything else. The document is parsed strictly, so a key a newer build added
   is refused by every older one. The script asks every deployed binary about a

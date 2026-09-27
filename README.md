@@ -419,14 +419,14 @@ rendered from one tracked template and restarted whenever they exit.
 | `flows` (cereyan) | `127.0.0.1:4200` | nothing |
 
 ```sh
-cargo build --release
+cargo build --release --workspace --bins           # every binary, never one: the lane runs them in place
 (cd ../galata-tower && cargo build --release)
 scripts/install-services.sh                        # vault, nats, capture:hyperliquid, tower, flows
 scripts/install-services.sh capture:rh-chain       # add a venue
 scripts/install-services.sh --uninstall tower      # remove one
-scripts/install-services.sh --status               # every com.galata.* agent, whether it would restart, twins, token expiry
+scripts/install-services.sh --status               # every com.galata.* agent, whether it would restart, twins, token expiry, stale builds
 scripts/run-service.sh --check tower               # a start's preconditions, token included; starts nothing
-scripts/check-config.sh new.toml                   # would every deployed binary accept this document? ask first
+scripts/vet-config.sh new.toml                   # would every deployed binary accept this document? ask first
 ```
 
 First-time setup on a new machine, after `scripts/install-services.sh vault`:
@@ -450,6 +450,12 @@ scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 3
   directly). Re-run `mint-service-tokens.sh` and reinstall the services
   before then. A re-mint revokes the tokens it replaces, by the ids kept in
   `var/tokens/<service>.id`.
+- **A deploy rebuilds every binary.** The lane and the services run
+  `target/release` in place, so a binary nobody rebuilt keeps running the old
+  code. Rebuilding only `galata-compact` for a fix left `galata-watch` judging
+  by the old rule, and every hourly judge failed on the pages the fix kept.
+  `--status`'s BUILD section names each binary built before a commit to its
+  sources, and names that commit.
 - **Stopping is clean.** Capture treats SIGTERM as a shutdown: it flushes,
   and the next start records the outage as `downtime`, not a crash.
   Installing a service twice replaces it, and a hand-started copy is stopped
