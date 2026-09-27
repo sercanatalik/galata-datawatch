@@ -4114,3 +4114,27 @@ closes its stdin, and the parent acts only after reading `HELD`. It is now a
 requirement (`segment-store`: *a cross-process hold is checked with a holder
 that holds until released*). The remedy for the stall itself is the P3
 Developer Tools exemption in `todo.md`.
+
+## Every deletion, audited after the compaction loss — 2026-09-27
+
+*After `a-contained-page-is-not-a-duplicate`.* Six calls outside tests delete a
+file, and each is safe once compaction proves duplicates:
+
+| where | deletes | why it cannot lose the record |
+|---|---|---|
+| `galata-segments/src/compact.rs` `remove` | compaction's originals; proven leftovers | originals only after the merged replacement is durable; a contained segment only when every row is in its container |
+| `galata-segments/src/writer.rs` (two) | a writer's own temporary files | never a committed name |
+| `galata-datawatch/src/record/mod.rs` | the clean-shutdown marker | holds no rows |
+| `galata-datawatch/src/tape/rebuild.rs` | this venue's tape segments of the receipt days rewritten | the tape is a rebuildable cache; exact footer labels |
+| `galata-datawatch/src/bin/galata-retain.rs` | whole partitions past a horizon | only with `--delete`, only past a declared horizon (none is declared here) |
+
+**Only the archive is compacted** (`galata-compact` reads `paths.archive`; the
+tape and the ledger never are), so the loss was the archive's alone. It was
+confined to 1m `candleSnapshot` pages the settle fetched mid-stream. The coarse
+history the boot walk fetches (1h, 4h, 1d) survived, because it is written
+before live segments open, so it is never contained: 09-25 still holds 18 pages
+of each width (90,027, 57,831 and 18,021 bars).
+
+The deletion code had not changed. The writers around it had, and nothing made
+anyone look again. `scripts/check-deletion-paths.sh` now fails on any deletion
+not listed with its reason.

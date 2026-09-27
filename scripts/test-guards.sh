@@ -171,6 +171,12 @@ prove "check-venue-boundary (a venue named outside the adapters tree)" \
       ./scripts/check-venue-boundary.sh \
       crates/galata-datawatch/src/sink.rs own
 
+# Every deletion is listed with why it is safe. Plants for itself: an unlisted
+# remove_file before the first #[cfg(test)].
+prove "check-deletion-paths (an unlisted deletion)" \
+      ./scripts/check-deletion-paths.sh \
+      crates/galata-datawatch/src/calendar.rs own
+
 # Nothing below the loop reads a clock. Plants for itself.
 prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
