@@ -67,6 +67,20 @@ owned_by_launchd() {  # the job's pid and every descendant, one per line
         }'
 }
 
+wait_unloaded() {  # wait_unloaded <label>: until launchd no longer has it, or refuse
+    # `bootout` can return while the job's process is still exiting, and a
+    # `bootstrap` over a label still registered fails `5: Input/output error`
+    # with the service left unloaded. Found reinstalling the lane twice on
+    # 2026-09-27 (a-reinstall-waits-for-launchd). 30 s is launchd's default
+    # exit timeout, 20 s, which no template overrides, plus margin.
+    local i
+    for i in $(seq 1 60); do
+        launchctl print "$DOMAIN/$1" >/dev/null 2>&1 || return 0
+        sleep 0.5
+    done
+    refuse "$1 was still loaded 30 s after bootout"
+}
+
 twins_of() {
     local spec="$1" bins="" want=""
     case "$spec" in
@@ -340,6 +354,7 @@ for spec in "${services[@]}"; do
 
     # Replace, never stack — and never beside a hand-started twin.
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+    wait_unloaded "$label"
     twin_pids() { twins_of "$spec" | cut -f1 | tr '\n' ' '; }
     pids="$(twin_pids)"
     if [[ -n "${pids// }" ]]; then

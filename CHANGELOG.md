@@ -19,6 +19,10 @@ exists so the four above take no vault dependency.
 
 ### Fixed
 
+- **`install-services.sh` waits for launchd to unload the old job** before
+  loading the new one. `bootout` can return while the process is still
+  exiting, and the `bootstrap` that followed failed with `5: Input/output
+  error`, leaving the service unloaded (twice on 2026-09-27, both on the lane).
 - **`galata-watch` holds both stores shared while it judges**, waiting up to
   50 minutes for a writer. Without the hold, it could judge a compaction or a
   replacing rebuild mid-run and report an interrupted compaction that was

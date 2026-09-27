@@ -4285,3 +4285,21 @@ compaction made the moment hourly, and a slow projection (31 min, 09-26)
 reaches the :05 judge. The judge now holds both stores shared and waits up to
 50 minutes. Proved on the live archive: with the archive held exclusively for
 4 s, the judge logged that it was waiting, then reported nothing, 5.5 s in all.
+
+## A reinstall raced launchd — 2026-09-27
+
+*After `a-reinstall-waits-for-launchd`.* Reinstalling the lane failed twice
+today with `Bootstrap failed: 5: Input/output error`, leaving it unloaded until
+a retry. `launchctl bootout` returns before launchd has finished unloading a
+job whose process is still exiting (the lane's server stops its engines
+first), and `bootstrap` over a label still registered fails. Reproduced on a
+throwaway agent that exits 5 s after SIGTERM:
+
+| sequence | result |
+|---|---|
+| `bootout`, then `bootstrap` at once | `Bootstrap failed: 5`, exit 5, first try |
+| `bootout`, wait until `launchctl print` fails, `bootstrap` | waited 5.2 s, exit 0, three rounds of three |
+
+The installer now waits up to 30 s (launchd's default 20 s exit timeout, plus
+margin) and refuses by name past that. The proof ran the installer's own
+`wait_unloaded`, extracted from the script, not a copy.
