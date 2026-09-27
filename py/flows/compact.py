@@ -1,8 +1,8 @@
-"""Fold every closed archive partition. Nightly.
+"""Fold every closed archive partition, and today's closed hours. Hourly.
 
 **No retries, and that is the rule rather than an omission.**
 ``galata-compact`` folds *every* closed partition, not yesterday's, so a run
-that fails tonight is repaired by tomorrow's compacting two. For work that
+that fails is repaired by the next hour's. For work that
 catches up by construction, the next scheduled run is the retry.
 
 Two runs at once are refused by the binary's own exclusive hold; the
@@ -16,14 +16,18 @@ from cereyan import Cron, flow, task
 
 from . import _runner
 
-# 00:10 UTC: the archive's day closes at midnight and this clears the
-# writer's last flush. The time legacy's launchd agent used from 2026-09-06.
-SCHEDULE = Cron("10 0 * * *", timezone="UTC")
+# :20 UTC hourly, with ``--closed-hours``: each run folds every closed day
+# (the 00:20 run folds yesterday) and today's hours that ended at least five
+# minutes ago. Nightly left today's partitions at ~43,000 two-second flushes
+# per kind by midnight, and every reader of today listed them
+# (``compact-closed-hours``). Clear of the projection at :40 and the judge at
+# :05; the ``galata-record`` resource and the binary's hold order the rest.
+SCHEDULE = Cron("20 * * * *", timezone="UTC")
 
 
 @task(retries=0)
 def compact(config: str) -> str:
-    return _runner.run("galata-compact", [], config)
+    return _runner.run("galata-compact", ["--closed-hours"], config)
 
 
 @flow(

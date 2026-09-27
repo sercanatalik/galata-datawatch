@@ -4,6 +4,9 @@
 //!   galata-watch
 //! ```
 //!
+//! Holds both stores shared while it looks, so a compaction or a replacing
+//! rebuild in progress is waited out rather than judged half-done.
+//!
 //! **Watches the record, not the scheduler.** A missed run shows up as a
 //! partition that did not get compacted, which is a fact on disk; watching the
 //! scheduler as well would be two witnesses to one event and an argument about
@@ -94,6 +97,16 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     galata_segments::scannable(&config.paths.archive)?;
     galata_segments::scannable(&config.paths.tape)?;
 
+    // **Both stores held shared, in the rebuild's order, before a listing.**
+    // The nesting and layout checks open and compare segments, and both
+    // writers leave a moment where a replacement sits beside what it
+    // replaces: compaction before its removals, a replacing rebuild before
+    // its own (`a-replacement-never-leaves-a-hole`). Judged in that moment,
+    // an unfinished run reads as an interrupted one. Hourly compaction made
+    // the moment hourly (`compact-closed-hours`), so the judge waits it out.
+    let _archive = hold_or_wait(&config.paths.archive)?;
+    let _tape = hold_or_wait(&config.paths.tape)?;
+
     // Judged per declared venue: each is its own capture process, and one
     // stopping must not hide behind another still writing.
     let venues: Vec<&str> = config.venue.keys().map(String::as_str).collect();
@@ -132,3 +145,21 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
 }
 
 use galata_datawatch::capture::Clock;
+
+/// How long the judge waits for a writer's exclusive hold. A projection has
+/// taken 31 minutes under load (2026-09-26); the judge runs hourly and skips
+/// an overlapping run, so it may wait up to most of an hour.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(50 * 60);
+
+fn hold_or_wait(
+    root: &std::path::Path,
+) -> Result<galata_segments::Hold, galata_segments::SegmentError> {
+    use galata_segments::Mode;
+    match galata_segments::wait(root, Mode::Shared, std::time::Duration::ZERO) {
+        Err(galata_segments::SegmentError::Held { .. }) => {
+            tracing::info!(root = %root.display(), "a writer holds this root; waiting");
+            galata_segments::wait(root, Mode::Shared, PATIENCE)
+        }
+        taken => taken,
+    }
+}

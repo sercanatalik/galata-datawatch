@@ -1,12 +1,15 @@
 //! Merge a partition's many small segments into one.
 //!
 //! ```text
-//!   galata-compact              compact every closed partition
-//!   galata-compact --report     say which are overdue, and compact nothing
+//!   galata-compact                  compact every closed partition
+//!   galata-compact --closed-hours   and today's closed hours
+//!   galata-compact --report         say which are overdue, and compact nothing
 //! ```
 //!
-//! **Never today.** A partition still being written to is not closed, and
-//! compacting one would race the writer. **One at a time**: the run takes an
+//! **Never the open hour.** Without `--closed-hours`, never today: a partition
+//! still being written to is not closed. With it, today's hours that ended at
+//! least [`GRACE_MICROS`] ago are, because capture only ever writes new
+//! segments at its own receipt clock's now (`compact-closed-hours`). **One at a time**: the run takes an
 //! exclusive hold, so two compactions cannot each rewrite what the other is
 //! reading.
 //!
@@ -17,7 +20,9 @@
 
 use galata_datawatch::adapters;
 use galata_datawatch::config::{Adapters, Config, FileSource};
-use galata_segments::{Codec, compact_closed, hold, overdue_closed};
+use galata_segments::{
+    Codec, HOUR_MICROS, compact_closed, compact_closed_hours, hold, overdue_closed,
+};
 
 const DONE: u8 = 0;
 const BROKEN: u8 = 1;
@@ -30,6 +35,16 @@ const NOTHING: u8 = 3;
 /// than it saves: three hours of one venue is 21,439 segments across a handful
 /// of partitions, so anything left in the tens is already compacted.
 const OVERDUE_ABOVE: usize = 64;
+
+/// How long after an hour ends before it counts as closed: 150 two-second
+/// flushes, so the writer's last flush of the hour is on disk long before.
+const GRACE_MICROS: i64 = 5 * 60 * 1_000_000;
+
+/// The start of the latest hour that ended at least [`GRACE_MICROS`] before
+/// `now`: every segment ending before it is in a closed hour.
+fn closed_hours_cutoff(now_micros: i64) -> i64 {
+    (now_micros - GRACE_MICROS).div_euclid(HOUR_MICROS) * HOUR_MICROS
+}
 
 struct Resolver;
 
@@ -67,11 +82,15 @@ fn main() -> std::process::ExitCode {
 fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut report_only = false;
+    let mut closed_hours = false;
     for arg in &args {
         match arg.as_str() {
             "--report" => report_only = true,
+            "--closed-hours" => closed_hours = true,
             other => {
-                eprintln!("unknown argument {other:?}\nusage: galata-compact [--report]");
+                eprintln!(
+                    "unknown argument {other:?}\nusage: galata-compact [--closed-hours] [--report]"
+                );
                 return Ok(BAD_ARGUMENT);
             }
         }
@@ -85,8 +104,8 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     // Today by OUR clock, and the store's own calendar — the same pair the
     // partition names were written with, so "closed" means the same thing to
     // both.
-    let today =
-        galata_datawatch::calendar::date_of(galata_datawatch::capture::SystemClock.now_micros());
+    let now = galata_datawatch::capture::SystemClock.now_micros();
+    let today = galata_datawatch::calendar::date_of(now);
 
     // **A root that cannot be read is a refusal, and this must come before
     // `hold`.**
@@ -117,9 +136,22 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     // would each rewrite what the other is reading.
     let _held = hold(&config.paths.archive)?;
 
-    let compacted = compact_closed(&config.paths.archive, &today, Codec::Zstd)?;
+    let mut compacted = compact_closed(&config.paths.archive, &today, Codec::Zstd)?;
+    if closed_hours {
+        let cutoff = closed_hours_cutoff(now);
+        let hours = compact_closed_hours(&config.paths.archive, &today, cutoff, Codec::Zstd)?;
+        tracing::info!(
+            before = cutoff,
+            segments_before = hours.segments_before,
+            segments_after = hours.segments_after,
+            "today's closed hours"
+        );
+        compacted.segments_before += hours.segments_before;
+        compacted.segments_after += hours.segments_after;
+        compacted.rows += hours.rows;
+    }
     if compacted.segments_before == 0 {
-        tracing::info!(today, "no closed partition needed compacting");
+        tracing::info!(today, closed_hours, "nothing needed compacting");
         return Ok(NOTHING);
     }
     tracing::info!(
@@ -132,3 +164,20 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
 }
 
 use galata_datawatch::capture::Clock;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const H: i64 = HOUR_MICROS;
+
+    #[test]
+    fn the_cutoff_is_the_latest_hour_ended_five_minutes_ago() {
+        // At 13:20 the hour 12:00–13:00 ended twenty minutes ago: closed.
+        assert_eq!(closed_hours_cutoff(13 * H + 20 * 60_000_000), 13 * H);
+        // At 13:04 it ended four minutes ago: not yet.
+        assert_eq!(closed_hours_cutoff(13 * H + 4 * 60_000_000), 12 * H);
+        // At exactly 13:05 it has.
+        assert_eq!(closed_hours_cutoff(13 * H + GRACE_MICROS), 13 * H);
+    }
+}

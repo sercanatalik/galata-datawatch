@@ -4247,3 +4247,38 @@ The deletion guard had a gap, found when this change's test used
 `remove_dir_all`. It read each file up to a literal `#[cfg(test)]`, and three
 test modules open with `#[cfg(all(test, feature = ...))]`. It now stops there
 too, but not at `any(test, ...)`, which compiles outside tests.
+
+## Today's closed hours, compacted — 2026-09-27
+
+*After `compact-closed-hours`.* Capture flushes every 2 s (legacy's measured
+choice: a longer flush is a larger crash gap), so today's partitions held
+**130,906** segments by 19:20. Every reader of today listed them: the tower's
+once-a-second frontier (a steady 14% CPU, 41% at a peak), each hourly
+projection, `fseventsd` and Spotlight (70–130% CPU during the soak).
+Compaction touched only closed days.
+
+`galata-compact --closed-hours` also merges each of today's hours that ended
+at least 5 minutes before the run, grouped by the hour a segment's range ends
+in. On a copy of the live archive at 19:20:
+
+| | before | after |
+|---|---:|---:|
+| today's segments | 130,906 | 2,299 |
+| today's rows | 1,624,821 | 1,624,821 |
+| a frontier-equivalent listing | 416 ms | 9.2 ms |
+| `galata-watch` | | nothing to report |
+
+The 2,299 left are 110 hour merges and the open hour's flushes. The lane now
+compacts hourly at :20. Each run still folds every closed day, so the 00:20 run
+does last night's work.
+
+**Found on the way: the judge judged writers mid-run.** `galata-watch` opens
+segments to prove nesting and checks the tape's sequence ranges, but it took
+no hold. Both writers leave a moment where a replacement sits beside what it
+replaces: compaction before its removals, and the replacing rebuild before its
+own since `a-replacement-never-leaves-a-hole` (this morning). A judge in that
+moment would report an unfinished run as an interrupted one. Hourly
+compaction made the moment hourly, and a slow projection (31 min, 09-26)
+reaches the :05 judge. The judge now holds both stores shared and waits up to
+50 minutes. Proved on the live archive: with the archive held exclusively for
+4 s, the judge logged that it was waiting, then reported nothing, 5.5 s in all.

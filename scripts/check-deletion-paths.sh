@@ -45,7 +45,7 @@ fi
 
 # file <TAB> the line, trimmed <TAB> why it cannot delete the record
 IFS= read -r -d '' ALLOWED <<'LIST' || true
-crates/galata-segments/src/compact.rs	std::fs::remove_file(path).map_err(|source| SegmentError::Write {	compaction: an original after the merged replacement holding it is durable, or a contained segment whose every row is proven in its container (proven_duplicates)
+crates/galata-segments/src/compact.rs	std::fs::remove_file(path).map_err(|source| SegmentError::Write {	compaction: an original after the merged replacement holding it is durable, or a contained segment whose every row is proven in its container (proven_duplicates); a closed day, or with --closed-hours one of today's hours that ended 5 min before the run, never a segment ending after that cutoff (compact-closed-hours)
 crates/galata-segments/src/writer.rs	let _ = std::fs::remove_file(&self.temp_path);	a segment writer's own temporary file, dropped unfinished; never a committed name
 crates/galata-segments/src/writer.rs	let _ = std::fs::remove_file(&temp);	write_file's own temporary, after a failed write; never the committed file
 crates/galata-datawatch/src/record/mod.rs	let _ = std::fs::remove_file(self.scope_path().join(CLEAN_SHUTDOWN));	the clean-shutdown marker, cleared at boot; holds no rows

@@ -22,7 +22,10 @@ pub mod listing;
 pub mod reader;
 pub mod writer;
 
-pub use compact::{Compacted, compact_closed, compact_partition, nested, overdue_closed};
+pub use compact::{
+    Compacted, HOUR_MICROS, compact_closed, compact_closed_hours, compact_partition, nested,
+    overdue_closed,
+};
 pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;
 pub use hold::{HOLD_FILE, Hold, Mode, hold, hold_shared, wait};

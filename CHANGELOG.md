@@ -19,6 +19,10 @@ exists so the four above take no vault dependency.
 
 ### Fixed
 
+- **`galata-watch` holds both stores shared while it judges**, waiting up to
+  50 minutes for a writer. Without the hold, it could judge a compaction or a
+  replacing rebuild mid-run and report an interrupted compaction that was
+  only an unfinished one.
 - **A replacing tape rebuild no longer removes before it writes.** The hourly
   projection's `--replace` deleted four receipt days' segments and wrote their
   replacements after, so for 67 s of each run the tape listed 16 segments
@@ -43,6 +47,11 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **`galata-compact --closed-hours`**, which the lane now runs hourly at :20:
+  today's hours that ended at least 5 minutes ago are compacted as closed days
+  are. On a copy of the live archive, today's partitions went from 130,906
+  segments to 2,299 with every row kept, and a frontier listing from 416 ms to
+  9 ms. The open hour is never read.
 - **A BUILD section in `install-services.sh --status`**: each workspace
   binary, and the tower's installed copy, is listed as current or as STALE,
   naming the first commit after its build that touched its sources. A commit

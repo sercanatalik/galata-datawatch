@@ -22,6 +22,13 @@ def a_scheduler_credential_never_reaches_a_job(tools, config, monkeypatch):
     }
 
 
+def the_compaction_asks_for_todays_closed_hours(tools, config):
+    tools.exits("galata-compact", 0)
+    compact_the_archive(str(config))
+    [call] = tools.calls("galata-compact")
+    assert call["argv"] == ["--closed-hours"]
+
+
 def the_job_runs_from_the_repository_root(tools, config):
     tools.exits("galata-compact", 0)
     compact_the_archive(str(config))

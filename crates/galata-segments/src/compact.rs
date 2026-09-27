@@ -54,7 +54,26 @@ pub fn compact_partition(dir: &Path, codec: Codec) -> Result<Compacted, SegmentE
 
     let listed = list_segments(dir);
     let started_with = listed.len();
+    let rows = compact_set(dir, listed, codec)?.1;
 
+    // Counted rather than computed. Subtracting removals from the previous
+    // count forgets the segment just written, which is exactly the kind of
+    // arithmetic that reads as obviously right and is not.
+    Ok(Compacted {
+        segments_before: started_with,
+        segments_after: list_segments(dir).len(),
+        rows,
+    })
+}
+
+/// Compact one set of a partition's segments into one: a whole closed day,
+/// or one closed hour of today. Returns the segments the set now holds and
+/// the rows written.
+fn compact_set(
+    dir: &Path,
+    listed: Vec<(Cursor, PathBuf)>,
+    codec: Codec,
+) -> Result<(usize, usize), SegmentError> {
     // An interrupted compaction left the range on disk twice. Finishing it is
     // removing what the replacement already holds — NOT merging the duplicate
     // in again, which would make every resumed compaction double the partition
@@ -69,21 +88,13 @@ pub fn compact_partition(dir: &Path, codec: Codec) -> Result<Compacted, SegmentE
         .collect();
 
     if existing.len() <= 1 {
-        return Ok(Compacted {
-            segments_before: started_with,
-            segments_after: existing.len(),
-            rows: 0,
-        });
+        return Ok((existing.len(), 0));
     }
 
     // Written and synced **before** anything is removed. An interruption here
     // leaves both, which the names make visible.
     let Some((new_path, rows)) = merge(dir, &existing, codec)? else {
-        return Ok(Compacted {
-            segments_before: started_with,
-            segments_after: existing.len(),
-            rows: 0,
-        });
+        return Ok((existing.len(), 0));
     };
 
     // One at a time, so an interruption is a partition holding the replacement
@@ -93,15 +104,71 @@ pub fn compact_partition(dir: &Path, codec: Codec) -> Result<Compacted, SegmentE
             remove(path)?;
         }
     }
+    Ok((1, rows))
+}
 
-    // Counted rather than computed. Subtracting removals from the previous
-    // count forgets the segment just written, which is exactly the kind of
-    // arithmetic that reads as obviously right and is not.
-    Ok(Compacted {
-        segments_before: started_with,
-        segments_after: list_segments(dir).len(),
-        rows,
-    })
+/// One hour, in micros.
+pub const HOUR_MICROS: i64 = 3_600_000_000;
+
+/// Compact **today's closed hours**: in each partition dated `today`, the
+/// time-cursor segments whose range ends before `cutoff_micros`, grouped by
+/// the hour their range ends in, each group of more than one merged into one.
+///
+/// **Why a closed hour is as safe as a closed day.** Capture writes only new
+/// segments, named by its own receipt clock's now, and never modifies one; so
+/// once an hour has ended, nothing will be written into it, and a compaction
+/// that lists once touches only what it listed. The caller picks a cutoff with
+/// room for the last flush (the binary: the start of the latest hour that
+/// ended five minutes ago).
+///
+/// **Grouped by the hour the range ends in**, so consecutive hours' merges
+/// abut — a flush straddling the boundary joins the later hour — and never
+/// contain one another: [`nested`] stays a signal. A group of one is skipped,
+/// so a re-run costs a listing. Everything else is [`compact_partition`]'s
+/// rules, through the same routine: a late segment in a merged hour is merged
+/// in, and an interrupted hour is finished rather than doubled.
+///
+/// Measured 2026-09-27: 2-second flushes put 128,691 segments in today's
+/// partitions by 18:10, which every reader of today listed
+/// (`compact-closed-hours`).
+pub fn compact_closed_hours(
+    root: &Path,
+    today: &str,
+    cutoff_micros: i64,
+    codec: Codec,
+) -> Result<Compacted, SegmentError> {
+    use std::collections::BTreeMap;
+    let mut total = Compacted::default();
+    let day = format!("date={today}");
+    for dir in partitions(root) {
+        if !dir
+            .components()
+            .any(|c| c.as_os_str().to_str() == Some(day.as_str()))
+        {
+            continue;
+        }
+        let mut hours: BTreeMap<i64, Vec<(Cursor, PathBuf)>> = BTreeMap::new();
+        for (cursor, path) in list_segments(&dir) {
+            if let Cursor::Time { last_micros, .. } = cursor
+                && last_micros < cutoff_micros
+            {
+                hours
+                    .entry(last_micros.div_euclid(HOUR_MICROS))
+                    .or_default()
+                    .push((cursor, path));
+            }
+        }
+        for (_, set) in hours {
+            if set.len() <= 1 {
+                continue;
+            }
+            total.segments_before += set.len();
+            let (after, rows) = compact_set(&dir, set, codec)?;
+            total.segments_after += after;
+            total.rows += rows;
+        }
+    }
+    Ok(total)
 }
 
 /// Compact every partition under a root whose `date=` level is strictly before

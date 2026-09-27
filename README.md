@@ -195,7 +195,7 @@ published crates link none of it.
 | `galata-datawatch` | capture one venue, with configuration from a file |
 | `galata-datawatch-vault` | the same, with configuration and secrets fetched from galata-vault at boot |
 | `galata-tape-rebuild` | project the archive into the tape; `--replace` rebuilds a venue's range |
-| `galata-compact` | merge the small segments of closed days (never today) |
+| `galata-compact` | merge the small segments of closed days, and with `--closed-hours` of today's closed hours (never the open hour) |
 | `galata-watch` | judge the record's freshness and completeness, per venue |
 | `galata-retain` | report, and optionally delete, what a retention horizon would expire |
 
@@ -370,7 +370,7 @@ whose flows only call the release binaries as subprocesses.
 
 | Flow | Runs | When (UTC) |
 |---|---|---|
-| `compact-the-archive` | `galata-compact` | daily 00:10 |
+| `compact-the-archive` | `galata-compact --closed-hours` | hourly at :20 |
 | `project-the-recent-days` | `galata-tape-rebuild --replace`, the last 3 closed days and today so far, per declared venue | hourly at :40 |
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
