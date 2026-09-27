@@ -51,8 +51,39 @@ if [[ "${1:-}" == --check ]]; then CHECK=1; shift; fi
 # instead of run.
 start() {
     [[ -x "$1" ]] || refuse "no program at $1"
-    if (( CHECK )); then echo "ready: $*"; exit 0; fi
+    if (( CHECK )); then
+        local note
+        note="$(config_verdict "$1")"
+        echo "ready: $*${note:+ ($note)}"
+        exit 0
+    fi
     exec "$@"
+}
+
+# **Would this binary accept the configuration it will be handed?** The
+# document is parsed strictly, so a key the deployed build predates makes the
+# restart fail, and nothing said so before 2026-09-26's near-miss
+# (a-restart-checks-the-config). Asked only of programs that read the
+# document, and only under --check. A build older than --check-config is
+# already running on this config, so "cannot tell" is said, not refused.
+config_verdict() {  # prints a note, or refuses
+    local program="$1" answer
+    [[ -n "${GALATA_CONFIG:-}" ]] || return 0
+    case "${program##*/}" in
+        galata-datawatch|galata-ledger) ;;
+        galata-tower)
+            # An older tower ignores its arguments and serves: ask only one
+            # whose --version says it understands the flag.
+            "$program" --version 2>/dev/null </dev/null | grep -q '^understands:.*--check-config' \
+                || { echo "config not checked: this tower predates --check-config"; return 0; } ;;
+        *) return 0 ;;
+    esac
+    answer="$("$program" --check-config "$GALATA_CONFIG" 2>/dev/null </dev/null | head -1)"
+    case "$answer" in
+        ok:*) ;;
+        refused:*) refuse "${program##*/} refuses $GALATA_CONFIG: ${answer#refused: }" ;;
+        *) echo "config not checked: this build predates --check-config" ;;
+    esac
 }
 
 # Start a command with named secrets from the vault, read through THIS

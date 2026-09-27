@@ -186,7 +186,9 @@ if [[ "${1:-}" == --status ]]; then
             *) continue ;;
         esac
         if said="$("$ROOT/scripts/run-service.sh" --check "${args[@]}" 2>&1)"; then
-            printf '%-34s %s\n' "$label" "ready"
+            note=""
+            [[ "$said" == *"(config not checked"* ]] && note=" (${said##*\(}"
+            printf '%-34s %s\n' "$label" "ready$note"
         else
             printf '%-34s %s\n' "$label" "NO — ${said#run-service: REFUSED — }"
         fi
