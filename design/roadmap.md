@@ -928,6 +928,14 @@ outside the underlying's hours (trade.xyz docs), so its premium has no
 history to be unusual against. For the hour to 17:00: BTC −1.7 bps, GOLD
 +5.3, CL −4.5 with open interest up 17% in the hour.
 
+**The order flow — 2026-09-28** (`derive-the-order-flow`). `galata-signals
+flow`, each closed hour, per instrument: Cont, Kukanov and Stoikov's
+order-flow imbalance over 10-s buckets (galata-research `liquidity.ofi`), its
+slope and R² on the mid's return (`liquidity.impact`), the trade imbalance and
+its R², and the queue imbalance, time-weighted. For the hour to 18:00 the
+book's flow explained 35–65% of the 10-s moves and the trades' 2–18%, as in
+equities (Cont et al. 2014) rather than on BitMEX in 2017 (Silantyev 2019).
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
