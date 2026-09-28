@@ -903,6 +903,21 @@ daily level (Scaillet et al. 2020), and finds a 1% rule permissive. Read the
 counts as flags, not as jump days; FDR is the alternative when that matters.
 GOLD's 24-hour figures are absent: 121 traded 5m bars a day, under 259.
 
+**Liquidity — 2026-09-28** (`derive-the-liquidity`). `galata-signals
+liquidity`, per closed hour and instrument:
+- the time-weighted quoted spread and touch depth (median and 10th
+  percentile), with crossed and locked states dropped and 48 valid minutes
+  required;
+- the effective spread, volume- and equal-weighted, and the price impact at
+  5 s, never reading past the asof;
+- Amihud over 24 hours;
+- a robust z of the log spread against the signal's own stored week, which
+  builds for three days before it has a figure.
+
+On the record (06:00 hour): BTC quoted 0.134 bps (the library measured 0.12),
+effective 1.2–6.3 bps across the six, BTC touch depth $125k median and $242 at
+the 10th percentile. That completes the signals this tier listed.
+
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
