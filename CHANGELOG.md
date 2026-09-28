@@ -19,6 +19,12 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **Forced closures inferred every hour** (`galata-signals cascade`,
+  Tier 16). Per instrument, from the marks' 1-minute open interest and price:
+  long liquidations (price and open interest both falling, robust z ≤ −4)
+  and short squeezes (price up, open interest down), clustered into events
+  that each close at least 1% of open interest, sized as an upper bound.
+  `derive-the-signals` runs it after `moments`.
 - **Realized skewness and kurtosis every day** (`galata-signals moments`,
   Tier 16). Per instrument, from 5-minute log returns once a UTC day has
   closed: Amaya, Christoffersen, Jacobs and Vasquez's daily realized

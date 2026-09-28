@@ -32,7 +32,7 @@ def code() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="galata-signals")
-    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments"])
+    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade"])
     parser.add_argument("--var", required=True, type=Path, help="the record's root, holding tape/")
     parser.add_argument("--out", required=True, type=Path, help="the Arrow IPC file to hand to galata-signals-commit")
     parser.add_argument("--config", type=Path, default=HERE / "signals.toml")
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["GALATA_VAR"] = str(args.var.resolve())
     from . import schema, varcov
 
-    from . import basis, carry, flow, jumps, liquidity, moments
+    from . import basis, carry, cascade, flow, jumps, liquidity, moments
 
     try:
         with args.config.open("rb") as fh:
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
             horizons = [varcov.Horizon.declared(name, table) for name, table in document.get("varcov", {}).items()]
             if not horizons:
                 raise ValueError("declares no [varcov.*] horizon")
-        elif args.signal in ("carry", "basis"):
+        elif args.signal in ("carry", "basis", "cascade"):
             declared = carry.Declared.declared(document.get("carry", {}))
     except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f"{args.config}: {error}", file=sys.stderr)
@@ -81,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
             flow.compute(tape, run)
         elif args.signal == "moments":
             moments.compute(tape, run)
+        elif args.signal == "cascade":
+            cascade.compute(declared, tape, run)
         else:
             liquidity.compute(tape, run)
     except Exception as error:  # the tool's own failure, reported as broken
