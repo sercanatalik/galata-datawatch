@@ -205,6 +205,30 @@ def a_fitted_horizon_states_whether_its_correlation_stayed_constant(served, tmp_
     assert rows[0]["n_eff"] == 180  # 30 days of 4h bars
 
 
+def a_fitted_horizon_is_monitored_over_its_epoch(served, tmp_path, monkeypatch):
+    monkeypatch.setitem(varcov.MONITOR_EPOCH_DAYS, "4h", 100)  # 600 bars an epoch, over the 500 floor
+    served["4h"] = _bars(n=1400, width=timedelta(hours=4))
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "ccc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "monitor"]
+    universe = {r["measure"]: r for r in rows if r["ticker_i"] == "*"}
+    assert set(universe) == {"wied_galeano_ratio", "wied_galeano_alarm"}
+    assert universe["wied_galeano_alarm"]["value"] in (0.0, 1.0)
+    assert (universe["wied_galeano_ratio"]["value"] >= 1) == (universe["wied_galeano_alarm"]["value"] == 1.0)
+    pairs = [r for r in rows if r["ticker_i"] != "*"]
+    assert len(pairs) == 3 and all(r["measure"] == "wied_galeano_ratio" for r in pairs)
+    params = json.loads(universe["wied_galeano_ratio"]["params"])
+    assert params["m"] == 600 and params["epoch_days"] == 100 and 0 < params["k"] <= 900
+    assert (params["alpha"], params["gamma"], params["T"]) == (0.05, 0.25, 1.5)
+
+
+def a_short_baseline_is_an_absent_monitor(served, tmp_path, monkeypatch):
+    monkeypatch.setitem(varcov.MONITOR_EPOCH_DAYS, "4h", 60)  # at most 360 bars an epoch, under the 500 floor
+    served["4h"] = _bars(n=700, width=timedelta(hours=4))
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "ccc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "monitor"]
+    assert len(rows) == 2 and all(r["value"] is None and "too short" in r["absent"] for r in rows)
+
+
 def no_constancy_where_nothing_is_fitted(served, tmp_path):
     served["1h"] = _bars()
     assert not [r for r in varcov.compute([_ewma()], tmp_path, _run()).rows if r["signal"] == "constancy"]

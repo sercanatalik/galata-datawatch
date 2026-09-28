@@ -408,7 +408,9 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   `constancy`, Engle and Sheppard's test that its correlation has stayed
   constant over the last 30 days: a small p is CCC failing. The tower shows
   it, and `galata-watch` flags two consecutive windows below
-  `[watch] max_constancy_p` as a correlation regime flag. A fitted horizon
+  `[watch] max_constancy_p` as a correlation regime flag. `monitor` is the
+  sequential alternative, Wied and Galeano's monitor over calendar epochs,
+  whose false-alarm chance is bounded per epoch. A fitted horizon
   also stores `correlation_target`, the R̄ its model reverts to (under CCC,
   its correlation), and `galata-watch` reconciles it against `derive`'s equal-weight ρ over
   the same window when `[watch] max_correlation_target_gap` is declared: a

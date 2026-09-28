@@ -19,6 +19,16 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **A sequential correlation monitor** (`monitor`, Tier 16). Each fitted horizon
+  writes Wied and Galeano's (2013) monitor of every pair's correlation over
+  calendar epochs (5m 7 days, 1h 30, 4h 90), with the epoch before as the
+  baseline. It uses galata-research `corr.monitor` (Bonferroni over the 15
+  pairs, α 0.05, γ 0.25). The measures are `wied_galeano_ratio` (≥ 1 is an
+  alarm) and `wied_galeano_alarm`, which bound the chance of any false alarm
+  per epoch where the half-hourly `constancy` test cannot.
+
+### Added
+
 - **A correlation regime flag** (`flag-the-correlation-regime`).
   `galata-watch` reports a fitted horizon whose two newest `constancy` windows
   both have an Engle–Sheppard p-value below the new, optional

@@ -279,7 +279,7 @@ wheels = [
 [[package]]
 name = "galata-research"
 version = "0.1.0"
-source = { git = "file:///Users/sercan/codebase/trading-works/galata-research?rev=3b5e2612e4254fa25bc92bca1ec6c3f4ccfcf6f2#3b5e2612e4254fa25bc92bca1ec6c3f4ccfcf6f2" }
+source = { git = "file:///Users/sercan/codebase/trading-works/galata-research?rev=f6663374fcb1528c0cdb54ec5a2e60e3087bc2e6#f6663374fcb1528c0cdb54ec5a2e60e3087bc2e6" }
 dependencies = [
     { name = "altair" },
     { name = "duckdb" },
@@ -312,7 +312,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "galata-research", extras = ["models"], git = "file:///Users/sercan/codebase/trading-works/galata-research?rev=3b5e2612e4254fa25bc92bca1ec6c3f4ccfcf6f2" },
+    { name = "galata-research", extras = ["models"], git = "file:///Users/sercan/codebase/trading-works/galata-research?rev=f6663374fcb1528c0cdb54ec5a2e60e3087bc2e6" },
     { name = "polars", specifier = ">=1.30" },
     { name = "pyarrow", specifier = ">=17" },
 ]
