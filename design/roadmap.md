@@ -945,6 +945,15 @@ closed hours and reopening jump do not enter. For Sunday 2026-09-27: crypto
 skew −0.2 to −0.6, XYZ100 −3.95 with a kurtosis of 45 while its oracle
 followed the venue's own book, GOLD absent with 31 whole bars.
 
+**The cascades — 2026-09-29** (`derive-the-cascades`, the operator's next
+signals). `galata-signals cascade`, each closed hour, per instrument: minutes
+whose mark return and open-interest change are both extreme (robust z ≤ −4
+against the day before; up-move for a short squeeze), clustered into events
+that each close 1% of open interest, sized as an upper bound. Hyperliquid
+flags liquidations only per address, so, as the cascade studies do, it
+observes their consequences. Over 09-25 to 09-28: 5 events, all on the xyz
+perps, none on BTC, ETH or HYPE.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
