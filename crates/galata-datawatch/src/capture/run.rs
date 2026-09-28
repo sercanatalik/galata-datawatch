@@ -593,6 +593,31 @@ impl Capture {
         self.held.declare(declared);
     }
 
+    /// Subscriptions were just sent on a fresh session: close the tail of any
+    /// gap still open for them, up to now.
+    ///
+    /// A restart's gap is published before the walk, and the walk runs before
+    /// this. A lost session's gap ends when the loss is noticed, and the
+    /// reconnect runs after it. Until now the stream was not asked, so neither
+    /// span was covered, and a first frame cannot say so without inferring
+    /// from silence.
+    pub fn asked_again(&mut self, subscriptions: &[crate::venue::Subscription], now_micros: i64) {
+        let pairs: Vec<(Ticker, Series)> = subscriptions
+            .iter()
+            .map(|s| (s.ticker.clone(), s.series))
+            .collect();
+        let tails = self.coverage.asked_again(&pairs, now_micros);
+        if !tails.is_empty() {
+            tracing::info!(
+                gaps = tails.len(),
+                "published the time the stream was not yet asked again"
+            );
+        }
+        for (ticker, gap) in tails {
+            self.emit_gap(&ticker, gap);
+        }
+    }
+
     /// The session stopped delivering. Each pair's gap begins at **its own**
     /// last covered moment, not at the moment the loss was observed.
     pub fn session_lost(&mut self, now_micros: i64) {
@@ -793,6 +818,7 @@ impl Capture {
                 // being acknowledged is delivering.
                 self.held.mark_sent(subscription);
             }
+            self.asked_again(&convergence.to_subscribe, self.wiring.clock.now_micros());
 
             loop {
                 if shutdown.is_cancelled() {
@@ -1863,6 +1889,125 @@ mod tests {
             "each pair's gap begins at its own last coverage, not at one shared instant"
         );
         assert!(gaps.iter().all(|g| g.cause == GapCause::SessionLost));
+    }
+
+    /// The same record, clock and sink, as a process started again.
+    fn restarted(f: &Fixture) -> Capture {
+        Capture::new(Wiring {
+            adapter: adapter(),
+            sink: f.sink.clone(),
+            clock: f.clock.clone(),
+            archive_root: f._root.path().join("archive"),
+            status_dir: f._root.path().join("status"),
+            flush_secs: 2,
+            status_secs: 1,
+            declared: declared(),
+            clipped: Clipped::Continuous,
+            config_hash: "test".into(),
+        })
+    }
+
+    fn gaps_emitted(f: &Fixture) -> Vec<Gap> {
+        f.sink
+            .emitted()
+            .into_iter()
+            .filter_map(|e| match e.event {
+                Event::Gap(g) => Some(g),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_walks_minute_before_the_subscription_is_a_gap() {
+        // Measured 2026-09-28: 2.7 s of downtime published, then a minute of
+        // walk before the subscription, with no quotes and no gap row.
+        let mut f = fixture(1_000 * SEC);
+        f.capture.report_restart_gap();
+        f.capture.take_frame(&bbo("BTC", 1_000_000)).unwrap();
+        f.capture.take_frame(&bbo("ETH", 1_000_000)).unwrap();
+        f.capture.shutdown().unwrap();
+
+        f.clock.advance_secs(3);
+        f.capture = restarted(&f);
+        f.capture.report_restart_gap();
+        let restart_end = f.clock.now_micros();
+        let first: Vec<Gap> = gaps_emitted(&f);
+        assert_eq!(first.len(), 2, "the restart gap, one per pair");
+        assert!(first.iter().all(|g| g.to_micros == restart_end));
+
+        // The walk: a minute, and nothing asked of the stream.
+        f.clock.advance_secs(60);
+        let sent = f.clock.now_micros();
+        f.capture.asked_again(&declared(), sent);
+
+        let all = gaps_emitted(&f);
+        let tails: Vec<&Gap> = all
+            .iter()
+            .filter(|g| g.from_micros == restart_end)
+            .collect();
+        assert_eq!(tails.len(), 2, "each pair's minute: {all:?}");
+        for tail in tails {
+            assert_eq!(tail.to_micros, sent);
+            assert_eq!(tail.cause, GapCause::Downtime, "the restart's own cause");
+        }
+
+        // Asked again once is asked again: a second send adds nothing.
+        f.capture.asked_again(&declared(), sent + SEC);
+        assert_eq!(gaps_emitted(&f).len(), 4);
+    }
+
+    #[test]
+    fn a_reconnects_wait_is_a_gap_and_the_two_do_not_overlap() {
+        let mut f = fixture(1_000 * SEC);
+        f.capture.report_restart_gap();
+        f.capture.take_frame(&bbo("BTC", 1_000_000)).unwrap();
+        f.clock.advance_secs(10);
+        let lost = f.clock.now_micros();
+        f.capture.session_lost(lost);
+
+        // Backoff and reconnect.
+        f.clock.advance_secs(30);
+        let sent = f.clock.now_micros();
+        f.capture.asked_again(&declared(), sent);
+
+        let btc: Vec<Gap> = f
+            .sink
+            .emitted()
+            .into_iter()
+            .filter_map(|e| match e.event {
+                Event::Gap(g) if e.ticker().is_some_and(|t| t.as_str() == "BTC") => Some(g),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(btc.len(), 2, "{btc:?}");
+        assert_eq!(btc[0].to_micros, lost);
+        assert_eq!(
+            btc[1].from_micros, lost,
+            "the tail starts where the loss ended"
+        );
+        assert_eq!(btc[1].to_micros, sent);
+        assert!(btc.iter().all(|g| g.cause == GapCause::SessionLost));
+    }
+
+    #[test]
+    fn a_pair_that_delivered_since_its_gap_has_no_tail() {
+        // A handover or a frame after the gap is coverage, and coverage is
+        // where the gap ended.
+        let mut f = fixture(1_000 * SEC);
+        f.capture.report_restart_gap();
+        f.capture.take_frame(&bbo("BTC", 1_000_000)).unwrap();
+        f.capture.take_frame(&bbo("ETH", 1_000_000)).unwrap();
+        f.clock.advance_secs(10);
+        f.capture.session_lost(f.clock.now_micros());
+        f.clock.advance_secs(1);
+        f.capture.take_frame(&bbo("BTC", 1_011_000)).unwrap();
+
+        let before = gaps_emitted(&f).len();
+        f.capture
+            .asked_again(&declared(), f.clock.now_micros() + SEC);
+        let after = gaps_emitted(&f);
+        assert_eq!(after.len(), before + 1, "ETH only: {after:?}");
     }
 
     #[test]
