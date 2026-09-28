@@ -78,6 +78,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         max_record_age_secs: config.watch.max_record_age_secs,
         max_correlation_target_gap: config.watch.max_correlation_target_gap,
         max_constancy_p: config.watch.max_constancy_p,
+        monitor_alarms: config.watch.monitor_alarms,
     };
 
     if thresholds.is_empty() {

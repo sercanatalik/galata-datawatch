@@ -318,6 +318,9 @@ pub struct Watch {
     /// Below this p-value, in two consecutive windows, a fitted horizon's
     /// constant correlation is reported as a regime flag.
     pub max_constancy_p: Option<f64>,
+    /// Whether the sequential correlation monitor's raised alarms are
+    /// reported. Its false alarms are bounded where it is computed.
+    pub monitor_alarms: Option<bool>,
 }
 
 /// Where events go, if anywhere.

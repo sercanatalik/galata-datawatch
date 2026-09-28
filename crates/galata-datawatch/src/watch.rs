@@ -73,6 +73,9 @@ pub struct Thresholds {
     /// Below this, in two consecutive windows, a fitted horizon's constant
     /// correlation is flagged ([`crate::regime`]). `None` checks nothing.
     pub max_constancy_p: Option<f64>,
+    /// Whether the sequential monitor's raised alarms are findings
+    /// ([`crate::regime::alarms`]). `None` or false checks nothing.
+    pub monitor_alarms: Option<bool>,
 }
 
 impl Thresholds {
@@ -82,6 +85,7 @@ impl Thresholds {
             && self.max_record_age_secs.is_none()
             && self.max_correlation_target_gap.is_none()
             && self.max_constancy_p.is_none()
+            && self.monitor_alarms.is_none()
     }
 }
 
@@ -229,6 +233,11 @@ pub fn watch(
         ));
     }
 
+    if thresholds.monitor_alarms == Some(true) {
+        report
+            .findings
+            .extend(crate::regime::alarms(tape_root, now_micros));
+    }
     if let Some(bound) = thresholds.max_constancy_p {
         report
             .findings
@@ -480,6 +489,7 @@ mod tests {
             max_record_age_secs: Some(30),
             max_correlation_target_gap: None,
             max_constancy_p: None,
+            monitor_alarms: None,
         };
         // Sixty seconds later: stale.
         let report = watch(
@@ -522,6 +532,7 @@ mod tests {
             max_record_age_secs: None,
             max_correlation_target_gap: None,
             max_constancy_p: None,
+            monitor_alarms: None,
         };
         assert!(watch(root.path(), root.path(), "2026-09-21", &thresholds, 0, &[]).is_clean());
     }
@@ -589,6 +600,7 @@ mod tests {
             max_record_age_secs: Some(300),
             max_correlation_target_gap: None,
             max_constancy_p: None,
+            monitor_alarms: None,
         }
     }
 

@@ -19,6 +19,13 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **The monitor's alarm reaches the operator** (`surface-the-monitor`). When
+  `[watch] monitor_alarms = true`, `galata-watch` reports a horizon whose
+  newest `monitor` run alarmed, naming the pair and the bar its correlation
+  changed at: Wied and Galeano's change-point estimate, now stored in the
+  monitor's params as `change` and `change_at`. The tower's Signals panel
+  shows the monitor per horizon. `watch::Thresholds` and `config::Watch` gain
+  the switch.
 - **A sequential correlation monitor** (`monitor`, Tier 16). Each fitted horizon
   writes Wied and Galeano's (2013) monitor of every pair's correlation over
   calendar epochs (5m 7 days, 1h 30, 4h 90), with the epoch before as the
