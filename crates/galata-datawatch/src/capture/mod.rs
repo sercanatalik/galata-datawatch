@@ -37,4 +37,6 @@ pub use run::{Capture, CaptureError, Fetch, WalkRequest, Wiring};
 pub use session::{Act, Session};
 pub use status::{Connection, PairState, PairStatus, Status, StatusFile};
 pub use subscriptions::{Held, Outcome};
-pub use walk::{Ask, Step, Walk, WalkInterval, WalkOutcome, WalkWidthError, walk_items};
+pub use walk::{
+    Ask, FailedFetch, Step, Walk, WalkInterval, WalkOutcome, WalkWidthError, walk_items,
+};

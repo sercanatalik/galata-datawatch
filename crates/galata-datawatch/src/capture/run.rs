@@ -1003,9 +1003,12 @@ impl Capture {
                 PageDirection::MostRecent => {
                     let steps =
                         planner.plan(series, ask.from_micros, now, interval.interval_micros);
-                    self.walk_steps(&steps, &instruments, &label, &ask, now, pace, &fetch)
+                    let failed = self
+                        .walk_steps(&steps, &instruments, &label, &ask, now, pace, &fetch)
                         .await?;
-                    planner.outcome(series, &steps, &ask, now, instruments.len())
+                    planner
+                        .outcome(series, &steps, &ask, now, instruments.len())
+                        .with_failures(failed)
                 }
                 PageDirection::ForwardFromStart => {
                     self.walk_forward(
@@ -1022,7 +1025,14 @@ impl Capture {
                     .await?
                 }
             };
-            tracing::info!(venue, "{}", outcome.report());
+            // **A walk that came back short is an error to read**, though not a
+            // failed unit: the venue refused it, and a restart would ask again
+            // into the same refusal.
+            if outcome.came_back_short() {
+                tracing::error!(venue, "{}", outcome.report());
+            } else {
+                tracing::info!(venue, "{}", outcome.report());
+            }
             outcomes.push(outcome);
         }
 
@@ -1072,27 +1082,37 @@ impl Capture {
         to_micros: i64,
         pace: std::time::Duration,
         fetch: &F,
-    ) -> Result<(), CaptureError>
+    ) -> Result<Vec<crate::capture::FailedFetch>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
         Fut: std::future::Future<Output = Result<Payload, String>>,
     {
         let mut made = 0u32;
+        let mut failed = Vec::new();
         for step in steps {
             for (ticker, symbol) in instruments {
-                self.one_fetch(
-                    fetch,
-                    Fetch {
-                        series: step.series,
+                if let Err(error) = self
+                    .one_fetch(
+                        fetch,
+                        Fetch {
+                            series: step.series,
+                            ticker: ticker.clone(),
+                            symbol: symbol.clone(),
+                            interval_micros: step.interval_micros,
+                            interval_label: label.clone(),
+                            from_micros: step.from_micros,
+                            to_micros: step.to_micros,
+                        },
+                    )
+                    .await?
+                {
+                    failed.push(crate::capture::FailedFetch {
                         ticker: ticker.clone(),
-                        symbol: symbol.clone(),
-                        interval_micros: step.interval_micros,
-                        interval_label: label.clone(),
                         from_micros: step.from_micros,
                         to_micros: step.to_micros,
-                    },
-                )
-                .await?;
+                        error,
+                    });
+                }
                 made += 1;
                 self.walking = Some(WalkStatus {
                     series: step.series,
@@ -1105,7 +1125,7 @@ impl Capture {
                 self.tick_while_walking(pace).await?;
             }
         }
-        Ok(())
+        Ok(failed)
     }
 
     /// The forward shape: page from the start, advancing past the last row's
@@ -1133,6 +1153,7 @@ impl Capture {
         let page_rows = planner.page_rows(series);
         let mut made = 0u32;
         let mut capped = false;
+        let mut failed = Vec::new();
         // The point EVERY instrument reached: the minimum. A maximum would
         // claim coverage the slowest of them does not have.
         let mut reached: Option<i64> = None;
@@ -1163,10 +1184,26 @@ impl Capture {
                 pages += 1;
                 made += 1;
 
+                // **A page that never came is not coverage**, and there is no
+                // paging past it: where the next page starts is read from this
+                // one. The instrument stops here, at where it asked from.
+                let payload = match payload {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        failed.push(crate::capture::FailedFetch {
+                            ticker: ticker.clone(),
+                            from_micros: from,
+                            to_micros,
+                            error,
+                        });
+                        here = from;
+                        break;
+                    }
+                };
                 // Where the page ended is the ADAPTER's reading: the loop does
                 // not parse a venue's payload. `None` stops the walk rather
                 // than paging forever from a time it invented.
-                let Some(end) = payload.and_then(|p| self.wiring.adapter.page_end(&p)) else {
+                let Some(end) = self.wiring.adapter.page_end(&payload) else {
                     here = to_micros;
                     break;
                 };
@@ -1207,19 +1244,22 @@ impl Capture {
             capped,
             requests_made: made,
             forward: true,
-        })
+            failed: Vec::new(),
+        }
+        .with_failures(failed))
     }
 
     /// One fetch, through the one path.
     ///
-    /// A fetch that **fails** is logged and skipped rather than fatal: a venue
-    /// refusing one range is not a reason to abandon the rest, and the outcome
-    /// reports what was reached either way.
+    /// A fetch that **fails** is logged and handed back rather than fatal: a
+    /// venue refusing one range is not a reason to abandon the rest. The outer
+    /// error is ours (the archive); the inner one is the venue's, and the
+    /// caller records its range as not covered.
     async fn one_fetch<F, Fut>(
         &mut self,
         fetch: &F,
         request: Fetch,
-    ) -> Result<Option<Payload>, CaptureError>
+    ) -> Result<Result<Payload, String>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
         Fut: std::future::Future<Output = Result<Payload, String>>,
@@ -1228,7 +1268,7 @@ impl Capture {
             Ok(payload) => {
                 let copy = payload.clone();
                 self.take(payload)?;
-                Ok(Some(copy))
+                Ok(Ok(copy))
             }
             Err(error) => {
                 tracing::warn!(
@@ -1238,7 +1278,7 @@ impl Capture {
                     to = request.to_micros,
                     "a historical fetch failed; the rest of the walk continues"
                 );
-                Ok(None)
+                Ok(Err(error))
             }
         }
     }
@@ -2339,6 +2379,74 @@ mod tests {
             "the walk continued past the refusal"
         );
         assert_eq!(outcomes.len(), 1);
+        // **And the refused range is not claimed.** The test's name said this
+        // before it was true: until 2026-09-28 the outcome counted the refused
+        // step as covered.
+        let outcome = &outcomes[0];
+        assert!(outcome.came_back_short(), "{}", outcome.report());
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.reached_micros, outcome.failed[0].from_micros);
+        assert!(outcome.reached_micros < outcome.requested_to_micros);
+        assert_eq!(outcome.exit_code(), 0, "the venue refused it; not our cap");
+    }
+
+    #[tokio::test]
+    async fn a_failed_forward_page_stops_that_instrument_and_the_coverage() {
+        // The next page's start is read from this one, so there is no paging
+        // past a page that never came. The other instrument walks on.
+        let mut f = walk_fixture(100 * DAY);
+        let asked: std::sync::Mutex<Vec<(String, i64)>> = std::sync::Mutex::new(Vec::new());
+        let request = WalkRequest {
+            items: vec![(Series::Funding, WalkInterval::live(HOUR))],
+            share: 1.0,
+            cold_start_days: 7,
+            cap: 50,
+        };
+
+        let outcomes = f
+            .capture
+            .walk(&request, |req: Fetch| {
+                let mut asked = asked.lock().unwrap();
+                let nth_for_symbol = asked.iter().filter(|(s, _)| *s == req.symbol).count();
+                asked.push((req.symbol.clone(), req.from_micros));
+                // ETH's second page is refused; everything else is two full
+                // pages and a short one.
+                let refuse = req.symbol == "ETH" && nth_for_symbol == 1;
+                let rows = if nth_for_symbol == 2 { 4 } else { 500 };
+                let page = funding_page(&req.symbol, req.from_micros / 1_000 + 3_600_000, rows);
+                async move {
+                    if refuse {
+                        Err("hyperliquid /info: the venue answered 429".to_string())
+                    } else {
+                        Ok(page)
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        let asked = asked.into_inner().unwrap();
+        let eth: Vec<i64> = asked
+            .iter()
+            .filter(|(s, _)| s == "ETH")
+            .map(|(_, from)| *from)
+            .collect();
+        assert_eq!(
+            eth.len(),
+            2,
+            "no third ETH page after the refusal: {asked:?}"
+        );
+        assert_eq!(asked.iter().filter(|(s, _)| s == "BTC").count(), 3);
+
+        let outcome = &outcomes[0];
+        assert!(outcome.came_back_short(), "{}", outcome.report());
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].ticker.as_str(), "ETH");
+        assert_eq!(
+            outcome.reached_micros, eth[1],
+            "where the refused page asked from"
+        );
+        assert!(outcome.report().contains("429"), "{}", outcome.report());
     }
 
     #[tokio::test]

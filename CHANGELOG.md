@@ -19,6 +19,16 @@ exists so the four above take no vault dependency.
 
 ### Fixed
 
+- **A walk request that failed is no longer reported as covered.** On
+  2026-09-28 the funding walk met 429 on every instrument and its outcome read
+  `covered 1300d`, and the refused 1h, 4h and 1d candle pages read their
+  whole reach. `WalkOutcome` now carries `failed` (`FailedFetch`: ticker,
+  range, the venue's error). `reached` stops at the earliest failed start. A
+  forward walk stops the failing instrument at that page. The report says
+  `came back short` and is logged at error. The exit code stays zero: the
+  venue refused it, and under `KeepAlive` a restart would ask again into the
+  same refusal. **API:** `WalkOutcome` gains a public field, and
+  `FailedFetch` is new.
 - **`install-services.sh` waits for launchd to unload the old job** before
   loading the new one. `bootout` can return while the process is still
   exiting, and the `bootstrap` that followed failed with `5: Input/output

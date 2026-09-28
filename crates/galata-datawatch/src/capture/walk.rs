@@ -32,7 +32,7 @@
 //! Nothing here reads a clock and nothing here fetches. It plans; the loop
 //! executes and pays for the requests.
 
-use galata_wire::Series;
+use galata_wire::{Series, Ticker};
 
 use crate::record::Archive;
 use crate::venue::{Declaration, PageDirection};
@@ -150,9 +150,51 @@ pub struct WalkOutcome {
     pub requests_made: u32,
     /// Paged forward from the start rather than by spans of recent rows.
     pub forward: bool,
+    /// Every request the venue refused or that never came back. Empty on a
+    /// walk that took all it asked for.
+    pub failed: Vec<FailedFetch>,
+}
+
+/// One walk request that did not come back with a page.
+///
+/// **Not coverage.** A refused range reported as covered is the hole nobody
+/// looks for: on 2026-09-28 every funding instrument met 429 and the outcome
+/// read "covered 1300d".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedFetch {
+    /// Which instrument.
+    pub ticker: Ticker,
+    /// Where the request began.
+    pub from_micros: i64,
+    /// Where it was to end.
+    pub to_micros: i64,
+    /// The venue's words, or the transport's.
+    pub error: String,
 }
 
 impl WalkOutcome {
+    /// The outcome with the requests that failed: `reached` stops at the
+    /// earliest failed start.
+    ///
+    /// **Coverage is contiguous from where the plan began**, across every
+    /// instrument, as a forward walk's minimum already is. A page that arrived
+    /// after a failed one is in the record all the same; it is not counted,
+    /// because "covered X" with a hole inside it is not what an operator reads.
+    pub fn with_failures(mut self, failed: Vec<FailedFetch>) -> WalkOutcome {
+        if let Some(earliest) = failed.iter().map(|f| f.from_micros).min() {
+            self.reached_micros = self
+                .reached_micros
+                .min(earliest.max(self.requested_from_micros));
+        }
+        self.failed = failed;
+        self
+    }
+
+    /// Whether any request failed, so the walk covered less than it asked.
+    pub fn came_back_short(&self) -> bool {
+        !self.failed.is_empty()
+    }
+
     /// Whether the venue's reach cut the ask short.
     pub fn clipped_by_reach(&self) -> bool {
         self.venue_reach_micros
@@ -174,6 +216,35 @@ impl WalkOutcome {
             None => "no stated bound".to_string(),
         };
         let covered = span(self.reached_micros - self.requested_from_micros);
+        if self.came_back_short() {
+            let failed: Vec<String> = self
+                .failed
+                .iter()
+                .map(|f| {
+                    format!(
+                        "{} {}..{} ({})",
+                        f.ticker.as_str(),
+                        f.from_micros,
+                        f.to_micros,
+                        f.error
+                    )
+                })
+                .collect();
+            let cap = if self.capped {
+                " and truncated by its cap"
+            } else {
+                ""
+            };
+            return format!(
+                "walk of {what} came back short{cap}: asked {asked}, the venue holds {holds}, \
+                 covered {covered} ({}..{}) in {} requests; {} failed: {}",
+                self.requested_from_micros,
+                self.reached_micros,
+                self.requests_made,
+                self.failed.len(),
+                failed.join("; ")
+            );
+        }
         if self.capped {
             format!(
                 "walk of {what} truncated by its cap: asked {asked}, the venue holds {holds}, \
@@ -190,6 +261,11 @@ impl WalkOutcome {
     }
 
     /// Zero unless **our own** cap stopped it short.
+    ///
+    /// **A request the venue refused is not that either.** It is reported,
+    /// at error, and exits zero: under launchd's `KeepAlive` a non-zero exit is
+    /// a restart, and restarting into a rate limit is a loop that hammers the
+    /// venue.
     ///
     /// A run that silently covered less than asked is the shape of a hole
     /// nobody looks for, so an operator sees a failed unit. A bound the venue
@@ -418,6 +494,7 @@ impl<'a> Walk<'a> {
             capped: reached < to_micros,
             requests_made: (steps.len() * instruments) as u32,
             forward: self.direction(series) == PageDirection::ForwardFromStart,
+            failed: Vec::new(),
         }
     }
 }
@@ -776,6 +853,66 @@ mod tests {
             "{}",
             outcome.report()
         );
+    }
+
+    fn failed(ticker: &str, from_micros: i64) -> FailedFetch {
+        FailedFetch {
+            ticker: Ticker::new(ticker).unwrap(),
+            from_micros,
+            to_micros: from_micros + HOUR,
+            error: "hyperliquid /info: the venue answered 429".into(),
+        }
+    }
+
+    fn a_whole_outcome(d: &Declaration) -> WalkOutcome {
+        let ask = Ask {
+            interval_micros: HOUR,
+            asked_from_micros: 0,
+            venue_reach_micros: None,
+            from_micros: 0,
+        };
+        let steps = walk(d).plan(Series::Candles, 0, 10 * DAY, HOUR);
+        walk(d).outcome(Series::Candles, &steps, &ask, 10 * DAY, 2)
+    }
+
+    #[test]
+    fn a_failed_request_ends_the_coverage_at_its_start() {
+        // Measured 2026-09-28: every funding instrument met 429 and the
+        // outcome read "covered 1300d". The earliest failure bounds it.
+        let d = declaration(None, None);
+        let whole = a_whole_outcome(&d);
+        assert_eq!(whole.reached_micros, 10 * DAY);
+        assert!(!whole.came_back_short());
+
+        let short = whole.with_failures(vec![failed("ETH", 6 * DAY), failed("BTC", 2 * DAY)]);
+        assert_eq!(
+            short.reached_micros,
+            2 * DAY,
+            "the earliest failure, of any instrument"
+        );
+        assert!(short.came_back_short());
+        let report = short.report();
+        assert!(report.contains("came back short"), "{report}");
+        assert!(report.contains("2 failed"), "{report}");
+        assert!(report.contains("BTC") && report.contains("ETH"), "{report}");
+        assert!(report.contains("429"), "the venue's own words: {report}");
+    }
+
+    #[test]
+    fn a_short_walk_the_venue_refused_exits_zero() {
+        // Under KeepAlive a non-zero exit restarts straight back into the rate
+        // limit. Only our own cap fails the unit.
+        let d = declaration(None, None);
+        let short = a_whole_outcome(&d).with_failures(vec![failed("BTC", DAY)]);
+        assert!(!short.capped);
+        assert_eq!(short.exit_code(), 0);
+    }
+
+    #[test]
+    fn no_failures_changes_nothing() {
+        let d = declaration(None, None);
+        let whole = a_whole_outcome(&d);
+        assert_eq!(whole.clone().with_failures(Vec::new()), whole);
     }
 
     #[test]
