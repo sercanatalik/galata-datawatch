@@ -19,6 +19,12 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **Realized skewness and kurtosis every day** (`galata-signals moments`,
+  Tier 16). Per instrument, from 5-minute log returns once a UTC day has
+  closed: Amaya, Christoffersen, Jacobs and Vasquez's daily realized
+  volatility, skewness and kurtosis, and their 7-day means. galata-research
+  gains `timeseries.realized_moments`. `derive-the-signals` runs it after
+  `flow`.
 - **The order flow every hour** (`galata-signals flow`, Tier 16). Per
   instrument: Cont, Kukanov and Stoikov's order-flow imbalance over 10-s
   buckets, normalised by depth, with its price-impact slope and R²; the
