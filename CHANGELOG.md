@@ -17,6 +17,15 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **A correlation regime flag** (`flag-the-correlation-regime`).
+  `galata-watch` reports a fitted horizon whose two newest `constancy` windows
+  both have an Engle–Sheppard p-value below the new, optional
+  `[watch] max_constancy_p` (the config suggests 0.001: a test repeated every
+  half hour on overlapping windows alarms far more often than its nominal
+  level). `watch::Thresholds` and `config::Watch` gain the field.
+
 ### Changed
 
 - **`galata-segments`: a segment already present byte for byte is left

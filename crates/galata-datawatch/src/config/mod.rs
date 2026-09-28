@@ -315,6 +315,9 @@ pub struct Watch {
     /// How far, in Fisher z, the var-covar signal's R̄ may sit from `derive`'s
     /// ρ over the same window before it is reported (Tier 16's cross-check).
     pub max_correlation_target_gap: Option<f64>,
+    /// Below this p-value, in two consecutive windows, a fitted horizon's
+    /// constant correlation is reported as a regime flag.
+    pub max_constancy_p: Option<f64>,
 }
 
 /// Where events go, if anywhere.
