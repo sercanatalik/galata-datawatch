@@ -406,7 +406,9 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   The fitted horizons (5m, 1h, 4h) declare constant correlation (CCC), the
   operator's choice, with the evidence in `signals.toml`. Each also writes
   `constancy`, Engle and Sheppard's test that its correlation has stayed
-  constant over the last 30 days: a small p is CCC failing. A fitted horizon
+  constant over the last 30 days: a small p is CCC failing. The tower shows
+  it, and `galata-watch` flags two consecutive windows below
+  `[watch] max_constancy_p` as a correlation regime flag. A fitted horizon
   also stores `correlation_target`, the R̄ its model reverts to (under CCC,
   its correlation), and `galata-watch` reconciles it against `derive`'s equal-weight ρ over
   the same window when `[watch] max_correlation_target_gap` is declared: a

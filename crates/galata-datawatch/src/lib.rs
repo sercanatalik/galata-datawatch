@@ -43,6 +43,7 @@ pub mod ledger;
 pub mod normalise;
 pub mod reconcile;
 pub mod record;
+pub mod regime;
 pub mod reorg;
 pub mod replay;
 pub mod retain;
