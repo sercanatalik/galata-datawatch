@@ -83,6 +83,9 @@ the error is confined to `Budget`.
    covered less than it was asked for is not a green one"*, and legacy's
    *reports-never-judges* only works if the report is true.
 
+   **Fixed 2026-09-28** by `a-failed-fetch-is-not-coverage` (`ccce818`). What
+   follows is defect 1 only.
+
 ## What it changes
 
 - **`Budget` states weight.** `weight_per_minute`, plus a per-series request
@@ -95,15 +98,8 @@ the error is confined to `Budget`.
   if the venue sends one, which is unverified; otherwise one budget-minute),
   then retry the **same** page, bounded. A retry that still fails ends that instrument's
   walk *at `from`*.
-- **The outcome is what was taken.** `reached` is the point up to which every
-  instrument has a page that arrived. `walk_forward` leaves `here` at `from` on
-  a failure. `walk_steps` returns the last step every instrument took, and
-  `Walk::outcome` takes that and stops using the plan. A short outcome is
-  logged as an error with the range missing.
-- **The exit code stays zero** for a shortfall the venue caused. Under
-  launchd's `KeepAlive` a non-zero exit is a restart, and restarting into a
-  rate limit is a loop that hammers the venue. The cap stays non-zero, since
-  that one is ours to raise.
+- ~~The outcome is what was taken; the exit code stays zero.~~ Done in
+  `a-failed-fetch-is-not-coverage`.
 
 ## Costs, at the corrected pace
 
@@ -121,8 +117,48 @@ the record is dated by receipt. Its planning also named the other option:
 settlement it holds"*. Funding is not rolling away (`startTime = 0` returns
 2023-05-12), so there is no hurry, and resuming is cheap once. **Open:**
 resume from the newest *settlement* (venue time, which the tape has), or keep
-re-asking and accept the 30 minutes. The walk interleaves the live stream,
-so nothing live waits, but the restart's gap fill runs after it.
+re-asking and accept the 30 minutes.
+
+## The decision this is waiting on: the boot walk blocks the live stream
+
+**Corrected 2026-09-28.** This page said above that the walk interleaves the
+live stream. It does not, and neither does `walk-the-funding-history`'s
+design, which says the same. `boot.rs` walks **before** `fill_with` and
+`.run`, on purpose: *"the history, before the live loop and after the
+restart gap — so a backfill is never mistaken for coverage the record already
+had, and so the walk's own requests are paced against a venue nothing else is
+yet talking to"*. The spec says it too: *History precedes the live
+subscription*. So every minute the boot walk takes is a minute of no quotes
+and no trades after each restart. On 2026-09-28 that was ~61 s.
+
+**And that minute is not in the record as a gap.** Checked in the tape after
+the 01:40Z projection: quotes and trades stop at 01:02:56Z and resume at
+~01:03:57Z, but the `downtime` rows cover **01:02:56 → 01:02:59Z, 2.7 s**. The
+restart gap is published before the walk and closes then. Nothing marks the
+walk's own duration for the streamed series, so the tape implies coverage it
+does not have for ~58 s. That breaks *gaps are events, never inferred from
+silence*, and it has happened on every boot since the walk existed (~20 s
+each at today's pace). **It is its own fix, and it comes first:** the
+restart gap of a streamed series ends when its subscription is held, not when
+the process came back. It is independent of the options below. Option B
+shrinks the hole but does not remove the need to mark it.
+
+Pacing by weight at `walk_share = 0.25` makes that minute **~6 (candles) to
+~36 (with funding)**. That is a regression no one would choose, so the pacing
+cannot land alone. The options:
+
+| | What | Restart hole | Cost |
+|---|---|---|---|
+| **A** | Boot walk takes the **whole** budget (`share = 1.0` before the live loop, where nothing else talks to the venue, as the comment says) | candles ~1.6 min; +funding ~9 min | small; ledger polls share the IP |
+| **B** | The boot walk keeps only the **live width's resume**. The declared widths and the funding depth are queued as **fills**, which run inside the live loop, one at a time and paced | ~seconds | a real change: settle reads the widths from the walk request, and fills report per page, not as one outcome |
+| **C** | A, plus funding **resumes** from the newest settlement held (venue time) instead of re-asking 1,300 days | candles ~1.6 min | the resume `walk-the-funding-history` rejected, for reasons worth re-reading first |
+| **D** | Measure first: the venue took 18 full candle pages (~1,870 documented weight) in ~20 s on every earlier boot with no 429, so its limiter may be a burst bucket | — | one controlled probe, off-hours, same IP as capture |
+
+**Recommendation: D, then B.** D is cheap and tells us whether the documented
+per-row weight is enforced as a per-minute window. B is the only option whose
+restart hole does not grow with history depth. It is also where the fill's
+own retry already lives, so a 429 becomes a paced retry instead of a
+dropped range. A is the stopgap if B waits.
 
 ## The line to hold
 
