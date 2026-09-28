@@ -4,15 +4,15 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "cereyan"
-version = "2.3.0"
+version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/56/8a/7087aecdba99aad669f5902d833079eb7fbc0d74d765ef673319938f056e/cereyan-2.3.0.tar.gz", hash = "sha256:af2f1554d261fa2fff10f93bc1a588f3b84a0ab4b52edbd803d379499363e782", size = 360610, upload-time = "2026-09-20T19:24:47.162Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/30/19b3cc457fe0ecd50008c17955ee967595510a9e91f9c5bb72c4c0d62e33/cereyan-2.3.1.tar.gz", hash = "sha256:a1e16ec62dc9b3fa968250e2d46adcc7196d6e133f4620dee814a0ff5fe2db98", size = 360997, upload-time = "2026-09-28T00:20:52.349Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fd/ee/6580f2ba58fe0db577c74b3ff72722c4f43cf1e02d8c7053895714a4fa3e/cereyan-2.3.0-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:9ec3be9c290a60234d3cc6e02dc3b9f37d9ab5ed8b431a5a8f4b45187784d76a", size = 7667755, upload-time = "2026-09-20T19:24:37.36Z" },
-    { url = "https://files.pythonhosted.org/packages/a8/b3/c7a53467c5a6405601051a18c626bd2a5d8b7d3179957f9f01b0554edf05/cereyan-2.3.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:b8325154c14deea62e920a9716b7a9be5ca440aeceacaa97256e36219eaf2645", size = 7305093, upload-time = "2026-09-20T19:24:39.294Z" },
-    { url = "https://files.pythonhosted.org/packages/06/9b/f562585f37e5d29e8aa02423c9615f3981aeff89ccee89266bb6b351ff0a/cereyan-2.3.0-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:8b5b128d43f2cdee025e9cd51637c1558a83e77ff5800378950c7c2a60ead812", size = 7561651, upload-time = "2026-09-20T19:24:41.375Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/ab/4699f258c92fbcc60e2162a13f3e2c4cd6145ad5c47a89470dbd9264b8d7/cereyan-2.3.0-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:f8fb84b7b90594e610bde324f4de9f26e9155358c6d0553daee35926436d35c5", size = 7971455, upload-time = "2026-09-20T19:24:43.48Z" },
-    { url = "https://files.pythonhosted.org/packages/09/7c/38db30e252e5b7efaf4148335b36363500a6cf78cf67d63241602bc0bfe4/cereyan-2.3.0-cp311-abi3-win_amd64.whl", hash = "sha256:77a8720d17f660de782e055ba8796732c9b13a033a7642a4c7becd16aa713af1", size = 7863476, upload-time = "2026-09-20T19:24:45.187Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/eb/18b90423e88f891395216d18e0ff927aef9734e0b8094f25899ceaab9fac/cereyan-2.3.1-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:8c5d87487da8108b6928b6ae78a47d81fd7eefc8d6c8940a536eb951284a8870", size = 7667553, upload-time = "2026-09-28T00:20:43.195Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/aa/e92e4296e674f47fba16ed694127a570e14be54945cd6fc31ce5b2500299/cereyan-2.3.1-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:508a18961c02e7b511497512a3fcdfe9adcfbe0d7c8b569801a8b0588fad4369", size = 7305578, upload-time = "2026-09-28T00:20:45.266Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/78/927a47e974fd25deb31a4f0eaee1c206accfc9050606d2ce63397dbe42d6/cereyan-2.3.1-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:d1bd1dc905a2b0a7e8c6cf3ff8c57303eaddc296b3b4d49a9d4f5a5d87972b24", size = 7561482, upload-time = "2026-09-28T00:20:47.205Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/74/b1457eca0f6ce7c36decfa86c9348b1ebe0e0917d63d14735868899acb38/cereyan-2.3.1-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:a0deef6e92a23efd4884b78f8c0c7c111606b1d620c8262cd03bb99c844f17ab", size = 7971833, upload-time = "2026-09-28T00:20:49.02Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/ab/1fe8c83b25335d34900448b37548dd5548869564e5fb5cdc23065925d4ab/cereyan-2.3.1-cp311-abi3-win_amd64.whl", hash = "sha256:3ed905404edf682f87b7571ff8892ae027ac6a34e1499583f13f1170d2d7db15", size = 7864577, upload-time = "2026-09-28T00:20:50.812Z" },
 ]
 
 [[package]]
@@ -38,7 +38,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "cereyan", specifier = ">=2.3,<3" }]
+requires-dist = [{ name = "cereyan", specifier = ">=2.3.1,<3" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]

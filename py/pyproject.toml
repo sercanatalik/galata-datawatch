@@ -9,13 +9,14 @@
 #
 # `cereyan` is capped below 3 because the flows lean on 2.x's `Cron`,
 # `retry_on` and resource declarations, and a major bump is where those move.
+# The floor is 2.3.1: 2.3.0 kept a changed code schedule's stale queued runs.
 
 [project]
 name = "galata-flows"
 version = "0.1.0"
 description = "The schedule for galata-datawatch's record maintenance"
 requires-python = ">=3.11"
-dependencies = ["cereyan>=2.3,<3"]
+dependencies = ["cereyan>=2.3.1,<3"]
 
 [dependency-groups]
 dev = ["pytest>=8"]
