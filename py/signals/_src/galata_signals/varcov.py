@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -295,7 +295,7 @@ def derived(hz: Horizon, returns: pl.DataFrame, joint: pl.DataFrame, tickers: li
         except (Refused, matrix.Undefined) as why:
             rows += [_row(base, m, EVERYONE, None, None, str(why), bar_open, (None, None)) for m in measures]
 
-    return rows + constancy_rows(hz, returns, asof, params, span, run) + turbulence_rows(hz, joint, tickers, run)
+    return rows + regime_rows(hz, returns, asof, params, span, run) + turbulence_rows(hz, joint, tickers, run)
 
 
 #: The constancy test's trailing window, in days of the horizon's bars, and its lags.
@@ -303,8 +303,80 @@ CONSTANCY_DAYS = 30
 CONSTANCY_LAGS = 5
 CONSTANCY = ("engle_sheppard_stat", "engle_sheppard_p")
 
+#: The sequential monitor's epochs, in days, per horizon: the baseline is the
+#: epoch before the current one, and the current one is monitored. Sized for a
+#: baseline of 500 joint returns or more (galata-research
+#: `MONITOR_MIN_BASELINE`): 4h has about 6 joint bars a day, the session
+#: instruments' hours; 1h about 24; 5m about 250.
+MONITOR_EPOCH_DAYS = {"5m": 7, "1h": 30, "4h": 90}
+MONITOR_ALPHA = 0.05
+MONITOR_GAMMA = 0.25
+#: The monitored span, in baselines: an epoch holds about as many returns as
+#: the one before, so 1.5 covers its variation.
+MONITOR_T = 1.5
+MONITOR = ("wied_galeano_ratio", "wied_galeano_alarm")
 
-def constancy_rows(hz: Horizon, returns: pl.DataFrame, asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
+
+def regime_rows(hz: Horizon, returns: pl.DataFrame, asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
+    """`constancy` and `monitor`, from one in-sample fit of the declared margins."""
+    if not hz.fitted:
+        return []
+    try:
+        f = _margins(hz, returns)
+    except Refused as why:
+        return _absent_regime(hz, run, asof, params, span, str(why))
+    return constancy_rows(hz, f, asof, params, span, run) + monitor_rows(hz, f, asof, params, span, run)
+
+
+def _margins(hz: Horizon, returns: pl.DataFrame):
+    # As `walk` does: a null return (after a hole) is a dropped bar, not a cell to deseasonalise.
+    returns = returns.drop_nulls("return")
+    column = "return"
+    if hz.deseasonalise:
+        last = returns["close_ts"].max()
+        factors = gr.timeseries.seasonal_factors(returns, fit=(returns["ts"].min(), last), by="hour_of_day")
+        returns = gr.timeseries.deseasonalize(returns, factors)
+        column = "deseasonalized"
+    return gr.models.corr.fit(returns, model=hz.model, dist=hz.dist, corr=hz.corr, column=column, min_obs=hz.min_obs)
+
+
+def _absent_regime(hz: Horizon, run: Run, asof: int, params: dict, span: tuple, reason: str) -> list[dict]:
+    rows = [_row(_base(hz, run, asof, {**params, "lags": CONSTANCY_LAGS, "days": CONSTANCY_DAYS}, "constancy"), m, EVERYONE, None, None, reason, asof, span) for m in CONSTANCY]
+    return rows + [_row(_base(hz, run, asof, params, "monitor"), m, EVERYONE, None, None, reason, asof, span) for m in MONITOR]
+
+
+def monitor_rows(hz: Horizon, f, asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
+    """Wied and Galeano's (2013) sequential monitor over the current epoch, the epoch before it the baseline.
+
+    Epochs are calendar blocks of `MONITOR_EPOCH_DAYS` from 1970-01-01, so every
+    run of an epoch recomputes the same monitor from the same baseline: an alarm
+    raised stays raised until the epoch ends, and the next epoch starts afresh.
+    Every pair at α/15: the chance of any false alarm in an epoch is at most
+    `MONITOR_ALPHA` in the limit (5.7% measured at m = 720).
+    """
+    days = MONITOR_EPOCH_DAYS.get(hz.name)
+    if days is None:
+        return []
+    epoch = days * 86_400_000_000
+    start = asof // epoch * epoch
+    z = pl.DataFrame({t: f.fits[t].series["z"] for t in f.tickers}).with_columns(close=f.fits[f.tickers[0]].series["close_ts"].dt.epoch("us"))
+    window = z.filter((pl.col("close") > start - epoch) & (pl.col("close") <= asof))
+    m = window.filter(pl.col("close") <= start).height
+    base = _base(hz, run, asof, {**params, "epoch_days": days, "epoch_start": datetime.fromtimestamp(start / 1e6, tz=UTC).isoformat(), "m": m, "alpha": MONITOR_ALPHA, "gamma": MONITOR_GAMMA, "T": MONITOR_T}, "monitor")
+    try:
+        found = gr.models.corr.monitor(window.select(f.tickers).to_numpy(), m, T=MONITOR_T, gamma=MONITOR_GAMMA, alpha=MONITOR_ALPHA, tickers=f.tickers)
+    except Refused as why:
+        return [_row(base, measure, EVERYONE, None, None, str(why), asof, span) for measure in MONITOR]
+    base = {**base, "params": json.dumps({**json.loads(base["params"]), "k": found["k"], "critical": found["critical"], "first": found["first"], "pair": found["pair"]}, sort_keys=True)}
+    rows = [
+        _row(base, "wied_galeano_ratio", EVERYONE, None, found["ratio"], None, asof, span),
+        _row(base, "wied_galeano_alarm", EVERYONE, None, 1.0 if found["alarm"] else 0.0, None, asof, span),
+    ]
+    rows += [_row(base, "wied_galeano_ratio", a, b, r, None, asof, span) for (a, b), r in found["pairs"].items()]
+    return [{**r, "n_eff": float(found["k"])} for r in rows]
+
+
+def constancy_rows(hz: Horizon, f, asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
     """Whether the correlation has stayed constant: Engle and Sheppard's (2001) test, on a fitted horizon.
 
     The margins are fitted once more in sample, on the returns the walk saw
@@ -315,20 +387,9 @@ def constancy_rows(hz: Horizon, returns: pl.DataFrame, asof: int, params: dict, 
     p-value is CCC failing; under DCC it says dynamics are present, which DCC
     already models.
     """
-    if not hz.fitted:
-        return []
     base = _base(hz, run, asof, {**params, "lags": CONSTANCY_LAGS, "days": CONSTANCY_DAYS}, "constancy")
     corr = gr.models.corr
     try:
-        # As `walk` does: a null return (after a hole) is a dropped bar, not a cell to deseasonalise.
-        returns = returns.drop_nulls("return")
-        column = "return"
-        if hz.deseasonalise:
-            last = returns["close_ts"].max()
-            factors = gr.timeseries.seasonal_factors(returns, fit=(returns["ts"].min(), last), by="hour_of_day")
-            returns = gr.timeseries.deseasonalize(returns, factors)
-            column = "deseasonalized"
-        f = corr.fit(returns, model=hz.model, dist=hz.dist, corr=hz.corr, column=column, min_obs=hz.min_obs)
         z = np.column_stack([f.fits[t].series["z"].to_numpy() for t in f.tickers])
         window = min(len(z), CONSTANCY_DAYS * 86_400_000_000 // WIDTH_US[hz.name])
         found = corr.constancy(z[-window:], f.qbar, lags=CONSTANCY_LAGS)
@@ -363,6 +424,8 @@ def derived_absent(hz: Horizon, tickers: list[str], asof: int, reason: str, run:
     derived_signals = [("absorption", ("covariance_ar", "correlation_ar")), ("surprise", ("mahalanobis", "chi2_percentile", "magnitude_surprise", "correlation_surprise"))]
     if hz.fitted:
         derived_signals.append(("constancy", CONSTANCY))
+        if hz.name in MONITOR_EPOCH_DAYS:
+            derived_signals.append(("monitor", MONITOR))
     for signal, measures in derived_signals:
         base = _base(hz, run, asof, _params(hz), signal)
         rows += [_row(base, m, EVERYONE, None, None, reason, asof, none) for m in measures]

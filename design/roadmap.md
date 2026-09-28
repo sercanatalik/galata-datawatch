@@ -934,7 +934,14 @@ the 10th percentile. That completes the signals this tier listed.
   days, White-robust because ν̂ ≈ 3. On a copy of the record: 4h p 0.59, 1h
   0.13, 5m 0.03 (its whole 1,477-return sample). Its power is about 5% against
   dynamics as faint as the DCC fitted here (a ≈ 0.005), and 0.68 against a
-  correlation that moved 0.6 → 0.2 over the last 180 bars;
+  correlation that moved 0.6 → 0.2 over the last 180 bars. **`monitor`**
+  (`monitor-the-correlation`, the operator's choice) is the sequential
+  version: Wied and Galeano's (2013) monitor over calendar epochs (5m 7 days,
+  1h 30, 4h 90), with the epoch before as the baseline and every pair at
+  α/15. Its false alarms are bounded per epoch: 5.7% measured at m = 720, and
+  13% at m = 250, hence a floor of 500. On a clone of the record the 4h ratio
+  was 0.48 and the 1h 0.98, both under the boundary, and 5m alarmed on
+  BTC|GOLD;
 - the next signals. From the matrix almost free: β to BTC, the absorption
   ratio, turbulence. Independent of it: funding carry, jump flags,
   liquidity. Each gets its own change once the store exists. **All built**
