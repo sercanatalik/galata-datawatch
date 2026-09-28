@@ -19,6 +19,11 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **Liquidity every hour** (`galata-signals liquidity`, Tier 16): the
+  time-weighted quoted spread and touch depth, the effective spread (volume-
+  and equal-weighted), 5 s price impact, 24-hour Amihud, and a robust z of the
+  spread against the signal's own stored week. `derive-the-signals` runs
+  `varcov`, `carry`, `jumps` and `liquidity`.
 - **Jump flags at every 5m close** (`galata-signals jumps`, Tier 16): the
   last bar's Lee–Mykland statistic and flag, over 24 hours the flagged bars by
   sign, Huang and Tauchen's jump share and its ratio z, the signed jump
