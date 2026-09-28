@@ -846,8 +846,18 @@ a shared-refit multivariate walk-forward, and the fixed-λ EWMA path.
 `Kind::Signals` (market-addressed), `galata_datawatch::signals` (schema, labels,
 writer), `--replace` scoped to the projected datasets, the layout check per
 writer, and a retention family with no horizon. The float guard's exemption is
-by location and stated in the script. **Still to build:** `py/signals` and its
-cross-language fixture, then the tower's reader.
+by location and stated in the script.
+
+**Signals are computed — 2026-09-28** (`derive-the-signals`). `py/signals`
+computes (`galata-signals varcov`, galata-research pinned by commit), and
+`galata-signals-commit` checks the hand-off against the schema and writes it.
+The flow `derive-the-signals` runs both at :15 and :45. The package sits under
+`py/signals/_src/`, because `cereyan serve py` imports every module under
+`py/` except underscored directories. **`checked_at` is dropped:** a row is
+appended when its bar closes, so a figure is stale when
+`now > asof + width + 30 min`, which a reader computes. A 1w figure four days
+old is current. First run on the record: 216 rows in about 100 s. **Still to
+build:** the tower's reader.
 
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,

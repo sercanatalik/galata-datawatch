@@ -198,6 +198,7 @@ published crates link none of it.
 | `galata-compact` | merge the small segments of closed days, and with `--closed-hours` of today's closed hours (never the open hour) |
 | `galata-watch` | judge the record's freshness and completeness, per venue |
 | `galata-retain` | report, and optionally delete, what a retention horizon would expire |
+| `galata-signals-commit` | check one run of computed signals against the dataset's schema and write it to the tape |
 
 ---
 
@@ -375,12 +376,24 @@ whose flows only call the release binaries as subprocesses.
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
+| `derive-the-signals` | `galata-signals varcov`, then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
 uv sync --project py
+uv sync --project py/signals       # the signal calculator's own environment
 cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
 ```
+
+- **Signals are computed outside the lane and committed by Rust.**
+  `py/signals` holds the calculators (numpy, arch and galata-research, pinned
+  by commit), in an environment of their own: cereyan runs every engine under
+  one interpreter, and the lane's carries none of them. `galata-signals varcov`
+  writes one run's rows as an Arrow IPC file. `galata-signals-commit` refuses
+  it unless it is the signals schema exactly, then writes `kind=signals`
+  through `galata_datawatch::signals`. Each horizon's model is declared in
+  `py/signals/signals.toml`. A row is appended only when a bar of its width
+  has closed, so a figure is stale when `now > asof + width + 30 min`.
 
 - **The lane has its own cereyan home.** `~/.cereyan` is shared with every
   other cereyan project on the machine, and a server started there would

@@ -106,9 +106,154 @@ pub enum SignalError {
         /// Which row.
         row: usize,
     },
+    /// A hand-off file that is not an Arrow IPC file.
+    #[error("{path}: not an Arrow IPC file: {reason}")]
+    NotIpc {
+        /// The file.
+        path: PathBuf,
+        /// What the reader said.
+        reason: String,
+    },
+    /// A hand-off file whose fields are not [`schema`]'s.
+    #[error("{path}: not the signals schema: {detail}")]
+    NotTheSchema {
+        /// The file.
+        path: PathBuf,
+        /// The first field that differs, or the count.
+        detail: String,
+    },
+    /// A hand-off file whose rows are not one run.
+    #[error(
+        "{path}: one file is one run, and its rows do not share one computed_micros, run_id and code"
+    )]
+    NotOneRun {
+        /// The file.
+        path: PathBuf,
+    },
+    /// A hand-off file with no rows.
+    #[error("{path}: holds no rows")]
+    Empty {
+        /// The file.
+        path: PathBuf,
+    },
     /// The segment layer refused.
     #[error(transparent)]
     Segment(#[from] SegmentError),
+}
+
+/// What [`commit`] wrote.
+#[derive(Debug)]
+pub struct Committed {
+    /// Rows written.
+    pub rows: usize,
+    /// The segments, one per asof date.
+    pub segments: Vec<PathBuf>,
+    /// The run they belong to.
+    pub run_id: String,
+}
+
+/// Commit a hand-off: an Arrow IPC file of one run's rows, as `py/signals`
+/// writes it. Checked, written through [`write()`], and then removed.
+///
+/// **Refused with nothing written** when its fields are not [`schema`]'s —
+/// name, type and nullability, compared field by field, because metadata is
+/// the writer's business and pyarrow adds its own; a LargeUtf8 is a refusal,
+/// never a cast — or when its rows do not share one `computed_micros`,
+/// `run_id` and `code`.
+pub fn commit(tape_root: &Path, file: &Path) -> Result<Committed, SignalError> {
+    let reader = std::fs::File::open(file)
+        .map_err(|e| e.to_string())
+        .and_then(|f| arrow::ipc::reader::FileReader::try_new(f, None).map_err(|e| e.to_string()))
+        .map_err(|reason| SignalError::NotIpc {
+            path: file.to_path_buf(),
+            reason,
+        })?;
+    let expected = schema();
+    let found = reader.schema();
+    if found.fields() != expected.fields() {
+        let detail = expected
+            .fields()
+            .iter()
+            .zip(found.fields().iter())
+            .find(|(e, f)| e != f)
+            .map(|(e, f)| {
+                format!(
+                    "{} is {:?} nullable={}, expected {} {:?} nullable={}",
+                    f.name(),
+                    f.data_type(),
+                    f.is_nullable(),
+                    e.name(),
+                    e.data_type(),
+                    e.is_nullable()
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "{} fields, expected {}",
+                    found.fields().len(),
+                    expected.fields().len()
+                )
+            });
+        return Err(SignalError::NotTheSchema {
+            path: file.to_path_buf(),
+            detail,
+        });
+    }
+    let batches: Vec<RecordBatch> =
+        reader
+            .collect::<Result<_, _>>()
+            .map_err(|e| SignalError::NotIpc {
+                path: file.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+    let batch =
+        arrow::compute::concat_batches(&expected, &batches).map_err(|e| SignalError::NotIpc {
+            path: file.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+    if batch.num_rows() == 0 {
+        return Err(SignalError::Empty {
+            path: file.to_path_buf(),
+        });
+    }
+    let (Some(computed), Some(run_id), Some(code)) = (
+        one_int(&batch, "computed_micros"),
+        one_text(&batch, "run_id"),
+        one_text(&batch, "code"),
+    ) else {
+        return Err(SignalError::NotOneRun {
+            path: file.to_path_buf(),
+        });
+    };
+    let segments = write(tape_root, computed, &run_id, &code, &batch)?;
+    std::fs::remove_file(file).map_err(|source| SegmentError::Write {
+        path: file.to_path_buf(),
+        source,
+    })?;
+    Ok(Committed {
+        rows: batch.num_rows(),
+        segments,
+        run_id,
+    })
+}
+
+/// The column's one value, when every row holds the same one.
+fn one_int(batch: &RecordBatch, name: &str) -> Option<i64> {
+    let column = batch
+        .column_by_name(name)?
+        .as_any()
+        .downcast_ref::<Int64Array>()?;
+    let first = column.value(0);
+    (column.null_count() == 0 && column.values().iter().all(|v| *v == first)).then_some(first)
+}
+
+fn one_text(batch: &RecordBatch, name: &str) -> Option<String> {
+    let column = batch
+        .column_by_name(name)?
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()?;
+    let first = column.value(0);
+    (column.null_count() == 0 && column.iter().all(|v| v == Some(first))).then(|| first.to_string())
 }
 
 /// Write one run's rows: one labelled segment per `asof` date, named at the
@@ -334,5 +479,96 @@ pub(crate) mod tests {
             "{:?}",
             crate::tape::check_layout(root.path())
         );
+    }
+
+    fn hand_off(dir: &Path, batch: &RecordBatch) -> PathBuf {
+        let path = dir.join("run.arrow");
+        let mut w = arrow::ipc::writer::FileWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            &batch.schema(),
+        )
+        .unwrap();
+        w.write(batch).unwrap();
+        w.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn a_large_string_is_refused_and_nothing_is_written() {
+        // What polars writes by default: the refusal names the field, and
+        // nothing reaches the tape or leaves the hand-off.
+        let good = batch(&[1_790_553_600_000_000]);
+        let mut fields: Vec<Field> = good
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+        fields[0] = Field::new("signal", DataType::LargeUtf8, false);
+        let mut columns = good.columns().to_vec();
+        columns[0] = Arc::new(arrow::array::LargeStringArray::from(vec!["varcov"]));
+        let large = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = hand_off(dir.path(), &large);
+        let tape = dir.path().join("tape");
+        let err = commit(&tape, &file).unwrap_err();
+        assert!(
+            matches!(&err, SignalError::NotTheSchema { detail, .. } if detail.contains("signal is LargeUtf8")),
+            "{err}"
+        );
+        assert!(!tape.exists());
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn two_computed_instants_are_refused() {
+        let a = batch(&[1_790_553_600_000_000]);
+        let mut columns = a.columns().to_vec();
+        columns[11] = Arc::new(Int64Array::from(vec![1_790_560_800_000_001]));
+        let b = RecordBatch::try_new(schema(), columns).unwrap();
+        let both = arrow::compute::concat_batches(&schema(), &[a, b]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = hand_off(dir.path(), &both);
+        assert!(matches!(
+            commit(&dir.path().join("tape"), &file),
+            Err(SignalError::NotOneRun { .. })
+        ));
+        assert!(!dir.path().join("tape").exists());
+    }
+
+    #[test]
+    fn a_committed_file_is_a_signal_on_the_tape() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = hand_off(
+            dir.path(),
+            &batch(&[
+                1_790_553_600_000_000,
+                1_790_553_600_000_000 + 4 * 3_600_000_000,
+            ]),
+        );
+        let tape = dir.path().join("tape");
+        let done = commit(&tape, &file).unwrap();
+        assert_eq!(
+            (done.rows, done.segments.len(), done.run_id.as_str()),
+            (2, 1, "run-1")
+        );
+        assert!(!file.exists(), "the hand-off outlived its commit");
+        assert!(crate::tape::check_layout(&tape).is_empty());
+        let read = galata_segments::read_segment(&done.segments[0]).unwrap();
+        let rows: usize = read.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn the_fixture_py_signals_wrote_commits() {
+        // The contract across languages. `py/signals` writes this file in its
+        // own test and fails if its schema drifts; this fails if ours does.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/signals.arrow");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("signals.arrow");
+        std::fs::copy(&fixture, &file).unwrap();
+        let done = commit(&dir.path().join("tape"), &file).unwrap();
+        assert_eq!(done.rows, 9);
+        assert!(crate::tape::check_layout(&dir.path().join("tape")).is_empty());
     }
 }

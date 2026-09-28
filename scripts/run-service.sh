@@ -198,6 +198,12 @@ case "$service" in
         # directory. Served from the repo root, the flows registered and every
         # run failed "No module named 'flows'" — found by the first run.
         cd "$ROOT/py"
+        # The signal calculator's own environment (py/signals: numpy, arch,
+        # galata-research), which the lane runs as a tool and never imports.
+        # Synced from its lock before the lane serves, so the first :15 finds
+        # it; --frozen, so a start never moves a pin.
+        "$(command -v uv || echo uv)" sync --project signals --frozen --quiet \
+            || refuse "could not sync py/signals from its lock — uv sync --project py/signals"
         start "$(command -v uv || echo uv)" run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
         ;;
     *)

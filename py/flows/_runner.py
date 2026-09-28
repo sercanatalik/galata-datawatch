@@ -23,7 +23,15 @@ and it means different things to different tools, so it is read by table:
     galata-tape-rebuild  ok    Broken     BadArgument  ok, nothing to do
     galata-retain        ok    Broken     BadArgument  ok, nothing to do
     galata-watch         ok    Findings   BadArgument  NothingToCheck
+    galata-signals       ok    Broken     BadArgument  ok, nothing new
+    galata-signals-commit ok   Broken     BadArgument  ok, nothing to do
     anything else        Broken
+
+**`galata-signals` is not a release binary.** It is ``py/signals``'s console
+script, in that project's own environment, because the arithmetic needs
+numpy, arch and galata-research and this lane's interpreter carries none of
+them (cereyan runs every engine under one). It is still a tool the lane spawns
+with a built environment, never a module it imports.
 
 ``3`` fails the watch because the binary names what it means there: *"what
 an empty archive looks like when capture has silently stopped."*
@@ -37,6 +45,8 @@ from pathlib import Path
 # py/flows/_runner.py -> py/flows -> py -> the checkout.
 REPO = Path(__file__).resolve().parents[2]
 RELEASE = REPO / "target" / "release"
+# py/signals' own environment, where its console script is installed.
+SIGNALS = REPO / "py" / "signals" / ".venv" / "bin"
 COMMITTED = REPO / "config" / "datawatch.toml"
 LOCAL = REPO / "var" / "datawatch.local.toml"
 
@@ -99,7 +109,11 @@ TABLES = {
     "galata-tape-rebuild": MAINTENANCE,
     "galata-retain": MAINTENANCE,
     "galata-watch": WATCH,
+    "galata-signals": MAINTENANCE,
+    "galata-signals-commit": MAINTENANCE,
 }
+# The tools that live in py/signals' environment rather than target/release.
+CALCULATORS = ("galata-signals",)
 
 # What `3` means where it is not a failure — said in the run's result, so
 # "did nothing" and "did something" do not read the same in the history.
@@ -107,7 +121,12 @@ NOTHING = 3
 
 
 def binary(name: str) -> Path:
-    """A release binary, refused by name when it is absent."""
+    """A release binary (or a calculator's script), refused by name when it is absent."""
+    if name in CALCULATORS:
+        path = SIGNALS / name
+        if not path.exists():
+            raise Broken(f"no {name} at {path} — uv sync --project py/signals")
+        return path
     path = RELEASE / name
     if not path.exists():
         raise Broken(f"no release binary at {path} — cargo build --release")

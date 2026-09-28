@@ -36,6 +36,22 @@ exists so the four above take no vault dependency.
   - **Rebuild every binary that lists the tape before the first signal is
     written.** An older `galata-watch` reports the directory as an unknown
     dataset every hour.
+- **Signals are computed and committed on a schedule** (Tier 16,
+  `derive-the-signals`).
+  - `py/signals` is a uv project of its own, with galata-research pinned by
+    commit. `galata-signals varcov` computes Σ per declared horizon (5m, 30m,
+    1h, 4h, 1d and 1w) with `gr.models.corr`, from the last closed bar. It
+    appends only when a bar of that width has closed, and writes a refusal as
+    `absent` rows.
+  - `galata-signals-commit` (a new binary) refuses a hand-off that is not the
+    signals schema exactly (a LargeUtf8 is a refusal, not a cast), then
+    writes it through `signals::commit`.
+  - The lane's flow `derive-the-signals` runs both at :15 and :45, holding
+    `galata-record`. `run-service.sh flows` syncs `py/signals` from its lock
+    before serving.
+  - Measured on the record on 2026-09-28: 216 rows (6 horizons × 21
+    covariances and 15 correlations) in about 100 s, most of it reading 1m
+    candles.
 
 ### Fixed
 

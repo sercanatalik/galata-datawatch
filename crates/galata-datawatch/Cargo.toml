@@ -140,6 +140,10 @@ name = "galata-derive"
 required-features = ["bin"]
 
 [[bin]]
+name = "galata-signals-commit"
+required-features = ["bin"]
+
+[[bin]]
 name = "galata-ledger"
 required-features = ["bin", "ledger"]
 
