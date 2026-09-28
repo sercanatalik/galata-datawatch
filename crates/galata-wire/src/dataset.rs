@@ -106,6 +106,11 @@ pub enum Kind {
     /// Deposits, withdrawals, transfers, liquidations and vault moves: the
     /// venue's non-funding ledger updates.
     LedgerUpdates,
+    /// A number computed from market data on a schedule: a volatility, a
+    /// correlation, a covariance. **Computed, not captured**, so no archive
+    /// row stands behind it and no rebuild writes it; it may span venues, so
+    /// it names none of them.
+    Signals,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -218,7 +223,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 19] = [
+    pub const ALL: [Kind; 20] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -238,6 +243,7 @@ impl Kind {
         Kind::Fills,
         Kind::FundingPayments,
         Kind::LedgerUpdates,
+        Kind::Signals,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -265,6 +271,7 @@ impl Kind {
             | Kind::Fills
             | Kind::FundingPayments
             | Kind::LedgerUpdates => Addressing::Account,
+            Kind::Signals => Addressing::Market,
         }
     }
 
@@ -290,6 +297,7 @@ impl Kind {
             Kind::Fills => "fills",
             Kind::FundingPayments => "funding_payments",
             Kind::LedgerUpdates => "ledger_updates",
+            Kind::Signals => "signals",
         }
     }
 }
@@ -326,7 +334,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 19);
+        assert_eq!(Kind::ALL.len(), 20);
     }
 
     #[test]
@@ -351,6 +359,7 @@ mod tests {
             Kind::Reorgs,
             Kind::Positions,
             Kind::Accounts,
+            Kind::Signals,
         ] {
             assert!(!declarable.contains(&kind), "{kind} must not be declarable");
         }
@@ -437,5 +446,19 @@ mod tests {
             assert_eq!(kind.as_str().parse::<Kind>(), Ok(kind));
         }
         assert_eq!(seen.len(), Kind::ALL.len());
+    }
+
+    #[test]
+    fn the_signals_spelling_round_trips_and_is_addressed_by_market() {
+        // Computed about a market, which may span venues: the one dataset
+        // under the `market` level, reserved for it before it existed.
+        assert_eq!("signals".parse::<Kind>(), Ok(Kind::Signals));
+        assert_eq!(Kind::Signals.as_str(), "signals");
+        assert_eq!(Kind::Signals.addressing().key(), "market");
+        let market: Vec<Kind> = Kind::ALL
+            .into_iter()
+            .filter(|k| matches!(k.addressing(), Addressing::Market))
+            .collect();
+        assert_eq!(market, vec![Kind::Signals]);
     }
 }

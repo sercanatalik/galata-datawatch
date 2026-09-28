@@ -277,8 +277,15 @@ pub fn rebuild_with(
         //
         // **Planned in full, then removed.** A refusal therefore means the
         // tape was not touched, never that it was half-replaced.
+        //
+        // **The projected datasets only.** A dataset this tape does not
+        // project — signals, computed on a schedule — has no archive row
+        // behind it: no venue label to refuse on and no source day to
+        // replace. It is never listed here, so it is never touched.
         let ours = tape.pending_venues();
-        for partition in galata_segments::partitions(tape_root) {
+        let projected = crate::tape::schema::projected_kinds()
+            .flat_map(|kind| galata_segments::partitions(&tape_root.join(format!("kind={kind}"))));
+        for partition in projected {
             for (_, segment) in galata_segments::list_segments(&partition) {
                 let Some(venue) = galata_segments::label(&segment, crate::tape::VENUE_LABEL)?
                 else {
@@ -1222,6 +1229,40 @@ mod tests {
             2 * DAY,
             Replace::SourceDays,
         )
+    }
+
+    #[test]
+    fn a_replacement_leaves_the_signals_alone() {
+        // A signal carries no venue label, which on any projected dataset is
+        // a refusal. It is outside the plan, so the run succeeds and the
+        // segment is byte-identical.
+        let (dir, hl) = growing_archive();
+        let tape = dir.path().join("tape");
+        let signal = crate::signals::write(
+            &tape,
+            DAY + 5,
+            "run-1",
+            "code",
+            &crate::signals::tests::batch(&[DAY + 3]),
+        )
+        .unwrap()
+        .remove(0);
+        let before = std::fs::read(&signal).unwrap();
+
+        replace_the_fixture_day(dir.path(), &hl).unwrap();
+
+        assert_eq!(
+            std::fs::read(&signal).ok(),
+            Some(before),
+            "a signal was touched by a replacement"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_writes_nothing_under_signals() {
+        let (dir, hl) = growing_archive();
+        replace_the_fixture_day(dir.path(), &hl).unwrap();
+        assert!(!dir.path().join("tape/kind=signals").exists());
     }
 
     #[test]

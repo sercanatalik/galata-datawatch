@@ -45,6 +45,7 @@ pub mod record;
 pub mod reorg;
 pub mod replay;
 pub mod retain;
+pub mod signals;
 pub mod sink;
 /// **Behind the `capture` feature**: it needs a runtime.
 #[cfg(feature = "capture")]

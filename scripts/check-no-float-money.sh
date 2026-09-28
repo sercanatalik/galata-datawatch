@@ -18,6 +18,13 @@
 #      which covers the tape and not `galata-segments`, and a test in a crate
 #      nobody ran is not a build failure.
 #
+# **The one exemption, by location.** `src/signals.rs` holds the schema of
+# `kind=signals`, the tape's one computed dataset: a volatility, a correlation
+# or a covariance is a statistic, not money, and is `f64` by necessity (logs
+# and roots). It sits outside `tape/schema.rs` on purpose, so rule 3 does not
+# reach it; its own test holds its floats to `value` and `n_eff` and nothing
+# else. A price column added there is a Decimal128 or that test fails.
+#
 # None of these is broken today. **That is when a guard is worth writing**:
 # afterwards the rows are already wrong and unrecoverable, because a double
 # that has lost digits cannot say which ones.

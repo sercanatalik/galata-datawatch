@@ -45,6 +45,12 @@ pub enum Family {
     /// **A cache.** Anything dropped comes back from a rebuild, so its horizon
     /// is a convenience number and may be far shorter.
     Tape,
+    /// The tape's one computed dataset, `kind=signals`.
+    ///
+    /// **A record**, though it sits in the tape: no rebuild brings a signal
+    /// back. No horizon can be declared for it yet, so it is recognised and
+    /// never swept — the tape's horizon does not reach it.
+    Signals,
 }
 
 impl Family {
@@ -53,6 +59,7 @@ impl Family {
         match self {
             Family::Venue(venue) => venue,
             Family::Tape => "tape",
+            Family::Signals => "signals",
         }
     }
 }
@@ -130,6 +137,9 @@ impl Policy {
         match family {
             Family::Venue(venue) => self.venues.get(venue).copied(),
             Family::Tape => self.tape,
+            // Nothing declares one. The day signals should expire is the day
+            // a key is argued for, with every binary rebuilt to parse it.
+            Family::Signals => None,
         }
     }
 }
@@ -168,6 +178,9 @@ impl Classify for Archive {
 struct TapeRoot;
 impl Classify for TapeRoot {
     fn family_of(&self, top: &str) -> Option<Family> {
+        if top == format!("kind={}", galata_wire::Kind::Signals) {
+            return Some(Family::Signals);
+        }
         top.starts_with("kind=").then_some(Family::Tape)
     }
 }
@@ -357,6 +370,25 @@ mod tests {
         let root = tree(&[&format!("venue=rh-crypto/kind=quotes/date={}", day(1))]);
         let swept = sweep(root.path(), empty.path(), &policy(30), NOW);
         assert!(swept.candidates.is_empty());
+        assert!(swept.unclassified.is_empty(), "{swept:?}");
+    }
+
+    #[test]
+    fn the_tapes_horizon_does_not_expire_a_signal() {
+        // A record in the tape: recognised, so not unclassified; no horizon,
+        // so not selected, however old and however short the tape's.
+        let archive = tempfile::tempdir().unwrap();
+        let tape = tree(&[
+            &format!("kind=signals/date={}", day(1)),
+            &format!("kind=quotes/date={}", day(1)),
+        ]);
+        let policy = Policy {
+            venues: Default::default(),
+            tape: Some(Horizon { days: 1 }),
+        };
+        let swept = sweep(archive.path(), tape.path(), &policy, NOW);
+        assert_eq!(swept.candidates.len(), 1, "{swept:?}");
+        assert_eq!(swept.candidates[0].family, Family::Tape);
         assert!(swept.unclassified.is_empty(), "{swept:?}");
     }
 

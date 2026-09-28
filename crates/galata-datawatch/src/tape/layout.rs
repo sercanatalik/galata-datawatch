@@ -95,8 +95,14 @@ impl std::fmt::Display for LayoutProblem {
             ),
             LayoutProblem::UnknownDataset { path, name } => write!(
                 f,
-                "{}: {name:?} is not a dataset this tape projects",
+                "{}: {name:?} is not a dataset this tape holds",
                 path.display()
+            ),
+            LayoutProblem::Unlabelled { path } if is_signal(path) => write!(
+                f,
+                "{}: a signal segment with no `{}` label; only `signals::write` writes this dataset",
+                path.display(),
+                crate::signals::WRITER_LABEL
             ),
             LayoutProblem::Unlabelled { path } => {
                 write!(f, "{}: {}", path.display(), crate::tape::UNLABELLED_REMEDY)
@@ -163,18 +169,34 @@ pub fn check_layout(root: &Path) -> Vec<LayoutProblem> {
     // the dataset, and each venue numbers its stream from its own process's
     // boot — two venues started together have intersecting ranges that are no
     // overlap at all. So ranges are compared per venue label.
-    let (overlaps, unlabelled) =
-        galata_segments::overlapping_ranges_by_label(root, crate::tape::VENUE_LABEL);
-    problems.extend(
-        unlabelled
-            .into_iter()
-            .map(|path| LayoutProblem::Unlabelled { path }),
-    );
-    problems.extend(
-        overlaps
-            .into_iter()
-            .map(|(a, b)| LayoutProblem::OverlappingRanges { a, b }),
-    );
+    //
+    // **Within a writer, for signals.** A signal may span venues and names
+    // none; its segments are numbered by the run that computed them, so they
+    // are compared per `galata.writer` instead. Per `kind=` directory, so each
+    // dataset is held to its own label and no other.
+    for kind_dir in children(root) {
+        let Some(kind) = file_name(&kind_dir)
+            .and_then(|n| n.strip_prefix("kind=").map(str::to_string))
+            .and_then(|k| k.parse::<Kind>().ok())
+        else {
+            continue;
+        };
+        let label = match kind {
+            Kind::Signals => crate::signals::WRITER_LABEL,
+            _ => crate::tape::VENUE_LABEL,
+        };
+        let (overlaps, unlabelled) = galata_segments::overlapping_ranges_by_label(&kind_dir, label);
+        problems.extend(
+            unlabelled
+                .into_iter()
+                .map(|path| LayoutProblem::Unlabelled { path }),
+        );
+        problems.extend(
+            overlaps
+                .into_iter()
+                .map(|(a, b)| LayoutProblem::OverlappingRanges { a, b }),
+        );
+    }
     problems
 }
 
@@ -198,6 +220,11 @@ fn classify(path: &Path, name: &str) -> LayoutProblem {
         path: path.to_path_buf(),
         reason: format!("{name:?} is not a partition level the tape has"),
     }
+}
+
+fn is_signal(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str() == std::ffi::OsStr::new(&format!("kind={}", Kind::Signals)))
 }
 
 fn children(dir: &Path) -> Vec<PathBuf> {
@@ -363,6 +390,49 @@ mod tests {
         assert_eq!(
             problems,
             vec![LayoutProblem::Unlabelled { path: unlabelled }]
+        );
+    }
+
+    fn a_signal(root: &Path, labels: &[(&str, &str)]) -> PathBuf {
+        let batch = crate::signals::tests::batch(&[1_790_553_600_000_000]);
+        let cursor = galata_segments::Cursor::Time {
+            first_micros: 1_790_560_800_000_000,
+            last_micros: 1_790_560_800_000_000,
+            pid: 1,
+            seq: 0,
+        };
+        galata_segments::write_segment_labelled(
+            &root.join("kind=signals/date=2026-09-28"),
+            cursor,
+            &batch,
+            galata_segments::Codec::Zstd,
+            &[],
+            labels,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_signal_segment_is_not_a_venues() {
+        let root = tempfile::tempdir().unwrap();
+        a_signal(
+            root.path(),
+            &[(crate::signals::WRITER_LABEL, crate::signals::WRITER)],
+        );
+        assert_eq!(check_layout(root.path()), Vec::new());
+    }
+
+    #[test]
+    fn a_signal_segment_without_a_writer_is_reported() {
+        let root = tempfile::tempdir().unwrap();
+        // A venue label is not a writer: a signal is held to its own label.
+        let path = a_signal(root.path(), &[(crate::tape::VENUE_LABEL, "hyperliquid")]);
+        let problems = check_layout(root.path());
+        assert_eq!(problems, vec![LayoutProblem::Unlabelled { path }]);
+        assert!(
+            problems[0].to_string().contains("galata.writer"),
+            "{}",
+            problems[0]
         );
     }
 }

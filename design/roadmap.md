@@ -842,6 +842,13 @@ is most carefully guarded:
 a shared-refit multivariate walk-forward, and the fixed-λ EWMA path.
 `py/signals` pins galata-research by SHA.
 
+**The store exists — 2026-09-28** (`a-home-for-signals-on-the-tape`).
+`Kind::Signals` (market-addressed), `galata_datawatch::signals` (schema, labels,
+writer), `--replace` scoped to the projected datasets, the layout check per
+writer, and a retention family with no horizon. The float guard's exemption is
+by location and stated in the script. **Still to build:** `py/signals` and its
+cross-language fixture, then the tower's reader.
+
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,

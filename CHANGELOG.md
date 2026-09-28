@@ -17,6 +17,26 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **The tape holds market-data signals, `kind=signals`** (Tier 16). A signal
+  is computed, not projected, so it is a record that lives only on the tape.
+  - `Kind::Signals` in `galata-wire`, addressed `Addressing::Market`, is the
+    first dataset under that level. **API:** `Kind` gains a variant, and
+    `Kind::ALL` is 20 long.
+  - `galata_datawatch::signals` owns the dataset: its schema (one row per
+    value, with `value` and `n_eff` its only floats), its labels
+    (`galata.writer`, `galata.run_id`, `galata.code`), and `write`, one
+    time-cursor segment per asof date at the run's `computed_micros`.
+  - `--replace` plans over the projected datasets only, so it never lists,
+    refuses on, or removes a signal.
+  - `check_layout` compares a signal's ranges per writer, not per venue.
+  - Retention recognises `signals` as its own family, with no horizon, so the
+    tape's horizon never expires one.
+  - **Rebuild every binary that lists the tape before the first signal is
+    written.** An older `galata-watch` reports the directory as an unknown
+    dataset every hour.
+
 ### Fixed
 
 - **A walk request that failed is no longer reported as covered.** On
