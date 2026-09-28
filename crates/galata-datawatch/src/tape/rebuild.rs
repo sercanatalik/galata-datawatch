@@ -315,8 +315,11 @@ pub fn rebuild_with(
     // the unlinks take, never neither.
     //
     // **Never a path this run wrote.** The rebuild is deterministic, so an
-    // unchanged receipt day comes back under the same name, renamed
-    // atomically over the old file. That path is now the new segment.
+    // unchanged receipt day comes back under the same name with the same
+    // bytes, and the segment writer leaves the file already there alone
+    // (`leave-an-identical-segment`): no sync, no rename. A changed one is
+    // renamed atomically over the old file. Either way that path is now this
+    // run's segment.
     let written = tape.commit()?;
     report.segments = written.len();
     let written: std::collections::HashSet<_> = written.into_iter().collect();

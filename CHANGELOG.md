@@ -17,6 +17,17 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Changed
+
+- **`galata-segments`: a segment already present byte for byte is left
+  alone** (`leave-an-identical-segment`). `SegmentWriter::finish` compares
+  the new segment with the file at its final path, by size and then by bytes.
+  When they are identical it discards its temporary and returns the existing
+  path, with no sync and no rename, so the file keeps its mtime and inode. The
+  hourly `--replace` projection re-derives about 10,000 identical segments: on
+  a clone of production it went from 162 s to 41 s, and from 10,047 segments
+  touched to none. `write_file` is unchanged.
+
 ### Added
 
 - **Whether the correlation stayed constant** (`constancy`, Tier 16). Each
