@@ -19,6 +19,12 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **The basis every hour** (`galata-signals basis`, Tier 16). From the tape's
+  marks, per instrument: the venue's premium, time-weighted and winsorised,
+  with its median; mark against oracle in bps; the hour's open-interest log
+  change and its dollars; and a robust z of the premium against the signal's
+  own 30 days, on the main dex only. `derive-the-signals` runs it after
+  `liquidity`.
 - **The monitor's alarm reaches the operator** (`surface-the-monitor`). When
   `[watch] monitor_alarms = true`, `galata-watch` reports a horizon whose
   newest `monitor` run alarmed, naming the pair and the bar its correlation
