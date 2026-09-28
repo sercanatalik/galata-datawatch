@@ -23,3 +23,4 @@ project-level roadmap is in the [README](../README.md#roadmap).
 | [`bound-the-replay`](./bound-the-replay.md) | 3 | 2026-09-25 | `galata-research` needs a view at a replay position; carries forward legacy `reader-replay` |
 | [`walk-the-coarse-candles`](./walk-the-coarse-candles.md) | 1 | 2026-09-25 | `galata-research` found the venue's `1h`/`4h` history rolling away uncaptured; carries forward legacy `walk_candles` |
 | [`walk-the-funding-history`](./walk-the-funding-history.md) | 1 | 2026-09-25 | `galata-research` found settled funding starting at capture start while the venue holds it from 2023-05-12; carries forward legacy `walk-the-funding` |
+| [`pace-by-the-venue-weight`](./pace-by-the-venue-weight.md) | 1 | 2026-09-28 | switching on `walk_funding_days` met 429 on every instrument; `Budget` counts requests where the venue counts weight, and a failed fetch reads as covered |

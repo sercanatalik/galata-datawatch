@@ -1,6 +1,10 @@
 # walk-the-funding-history
 
-**BUILT 2026-09-26**: `walk_funding_days`, asked every boot
+**BUILT 2026-09-26, NOT DEPLOYED.** Switched on 2026-09-28 and off again:
+the venue answered 429 on every instrument, and the outcome claimed full
+coverage anyway. See [`pace-by-the-venue-weight`](./pace-by-the-venue-weight.md).
+
+`walk_funding_days`, asked every boot
 (`walk-the-funding-history`), and `premium` carried on settled funding
 (`carry-the-settled-premium`). Named 2026-09-25, from `galata-research`, whose every backtest has to
 say *funding not charged* because the record holds five days of settled
