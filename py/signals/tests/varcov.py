@@ -176,6 +176,25 @@ def a_fitted_pair_states_the_correlation_it_reverts_to(served, tmp_path):
     assert target[("BTC", "ETH")]["value"] == pytest.approx(f.qbar[i, j] / (d[i] * d[j]), abs=1e-5)
 
 
+def a_constant_correlation_is_its_own_target(served, tmp_path):
+    served["4h"] = _bars(n=700, width=timedelta(hours=4))
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "ccc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "varcov"]
+    assert {r["model"] for r in rows} == {"gjr-t/ccc"} and all(r["fitted"] for r in rows)
+    params = json.loads(rows[0]["params"])
+    assert (params["a"], params["b"]) == (0.0, 0.0)
+    value = {(r["measure"], r["ticker_i"], r["ticker_j"]): r["value"] for r in rows}
+    pairs = [k[1:] for k in value if k[0] == "correlation"]
+    assert len(pairs) == 3
+    for pair in pairs:
+        assert value[("correlation", *pair)] == pytest.approx(value[("correlation_target", *pair)], abs=1e-12)
+
+
+def an_undeclarable_correlation_model_is_refused():
+    with pytest.raises(ValueError, match="dcc, cdcc, ccc or ewma"):
+        varcov.Horizon.declared("4h", {"bars": "4h", "corr": "bekk"})
+
+
 def an_unknown_key_is_a_bad_argument(tmp_path):
     (tmp_path / "tape").mkdir()
     config = tmp_path / "signals.toml"
