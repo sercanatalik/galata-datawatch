@@ -25,6 +25,7 @@ and it means different things to different tools, so it is read by table:
     galata-watch         ok    Findings   BadArgument  NothingToCheck
     galata-signals       ok    Broken     BadArgument  ok, nothing new
     galata-signals-commit ok   Broken     BadArgument  ok, nothing to do
+    galata-fetch         ok    Broken     BadArgument  —
     anything else        Broken
 
 **`galata-signals` is not a release binary.** It is ``py/signals``'s console
@@ -111,9 +112,11 @@ TABLES = {
     "galata-watch": WATCH,
     "galata-signals": MAINTENANCE,
     "galata-signals-commit": MAINTENANCE,
+    "galata-fetch": MAINTENANCE,
 }
-# The tools that live in py/signals' environment rather than target/release.
-CALCULATORS = ("galata-signals",)
+# The tools that live in py/signals' environment rather than target/release:
+# galata-research's console scripts, at the commit py/signals pins.
+CALCULATORS = ("galata-signals", "galata-fetch")
 
 # What `3` means where it is not a failure — said in the run's result, so
 # "did nothing" and "did something" do not read the same in the history.
@@ -138,12 +141,15 @@ def job_env(config: Path) -> dict[str, str]:
     return {"GALATA_CONFIG": str(config), "PATH": PATH, "RUST_LOG": RUST_LOG, "NO_COLOR": NO_COLOR}
 
 
-def run(tool: str, args: list[str], config: Path = CONFIG) -> str:
+def run(tool: str, args: list[str], config: Path = CONFIG, paths: dict[str, Path] | None = None) -> str:
     """Run one tool to completion and return what it said.
 
     Raises a :class:`Refused` chosen by the tool's table. The configuration
     path is made absolute before it is handed over, so it means the same
-    thing whatever directory the scheduler started in.
+    thing whatever directory the scheduler started in. ``paths`` adds named
+    locations to the built environment (``GALATA_REFERENCE`` for
+    ``galata-fetch``), each made absolute; a path is not a credential, and
+    nothing is inherited.
     """
     table = TABLES[tool]
     config = Path(config).resolve()
@@ -152,7 +158,7 @@ def run(tool: str, args: list[str], config: Path = CONFIG) -> str:
     finished = subprocess.run(
         [str(binary(tool)), *args],
         cwd=str(REPO),
-        env=job_env(config),
+        env=job_env(config) | {name: str(Path(path).resolve()) for name, path in (paths or {}).items()},
         capture_output=True,
         text=True,
     )
