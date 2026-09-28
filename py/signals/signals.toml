@@ -1,0 +1,51 @@
+# The declared signals. Each horizon's model is a person's choice, citing the
+# evidence behind it (galata-research's volatility study, roadmap Tier 16).
+# EWMA is declared, never fallen back to: a fitted horizon whose sample is
+# too short is a refusal, written as absent rows.
+#
+# `model` is a gr.models.vol step-1 model; `corr` is "dcc", "cdcc" or "ewma"
+# (RiskMetrics, nothing fitted, `lam`). `deseasonalise` divides returns by
+# an hour-of-day factor fitted through the last close.
+
+[varcov.5m]
+# From 1m bars (captured since 2026-09-20). GARCH-t: the study's baseline;
+# nothing supports GJR below 4h. Deseasonalised: the daily cycle.
+bars = "1m"
+model = "garch"
+dist = "t"
+corr = "dcc"
+deseasonalise = true
+
+[varcov.30m]
+# From 1m bars: ~336 joint returns on 2026-09-28, under min_obs. Declared
+# EWMA until the sample passes 500.
+bars = "1m"
+corr = "ewma"
+lam = 0.94
+
+[varcov.1h]
+# GARCH-t deseasonalised: the study's 1h finding (α+β≈1 is the daily cycle).
+bars = "1h"
+model = "garch"
+dist = "t"
+corr = "dcc"
+deseasonalise = true
+
+[varcov.4h]
+# GJR-t: the leverage effect was found at BTC 4h.
+bars = "4h"
+model = "gjr"
+dist = "t"
+corr = "dcc"
+
+[varcov.1d]
+# CL's 265 days are under min_obs until about May 2027.
+bars = "1d"
+corr = "ewma"
+lam = 0.94
+
+[varcov.1w]
+# From 1d bars; 37 weeks.
+bars = "1d"
+corr = "ewma"
+lam = 0.94

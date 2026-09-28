@@ -307,15 +307,23 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
     }
 }
 
-/// Whether a dataset belongs in **this** tape: the market's.
+/// Whether a dataset is **projected** into this tape: the market's, rebuilt
+/// from the archive.
+///
+/// Venue-addressed datasets only, stated as what *is* projected, so an
+/// addressing added later is excluded until someone decides otherwise.
 ///
 /// An account's datasets are not projected here. Their rows name an account
 /// rather than an instrument, so they cannot carry the common five; and they
 /// live under their own root (`var/ledger`), readable by its owner only, which
-/// a tape the tower reads must not become a copy of. Projecting the ledger is
-/// a later change, with its own schema.
+/// a tape the tower reads must not become a copy of.
+///
+/// Signals (market-addressed) sit in this tape and are **not** projected into
+/// it: they are computed, and no archive row stands behind them (see
+/// [`crate::signals`]). So no rebuild writes them and no replacement plans
+/// over them, and the no-float assertion below does not reach their schema.
 pub fn projected(kind: Kind) -> bool {
-    !matches!(kind.addressing(), Addressing::Account)
+    matches!(kind.addressing(), Addressing::Venue)
 }
 
 /// Every dataset this tape projects.
@@ -344,9 +352,14 @@ mod tests {
                 "{kind} has a market-tape schema"
             );
         }
-        // Every account-addressed kind is excluded, and nothing else is.
+        // Every account-addressed kind is excluded, and signals, and nothing else is.
+        assert!(!projected(Kind::Signals));
+        assert!(
+            schema_for(Kind::Signals).is_none(),
+            "signals have a market-tape schema"
+        );
         let excluded = Kind::ALL.into_iter().filter(|k| !projected(*k)).count();
-        assert_eq!(excluded, accounts.len());
+        assert_eq!(excluded, accounts.len() + 1);
     }
 
     #[test]

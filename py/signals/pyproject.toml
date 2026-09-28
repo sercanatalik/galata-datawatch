@@ -1,0 +1,50 @@
+# The signal calculators: computed figures over the tape, for the risk manager,
+# the algos and research (design/roadmap.md, Tier 16).
+#
+# **Not the lane.** `py/flows` is thin by rule and cereyan runs every engine
+# under its one interpreter, so the arithmetic lives here, in its own
+# environment, and the lane runs it as a tool: `galata-signals`, whose rows
+# `galata-signals-commit` (Rust) checks and writes. This project never names a
+# segment and never writes the tape.
+#
+# **galata-research is pinned by commit**, from the local repository, so a
+# dirty working tree there never reaches a signal; the commit is written on
+# every row as `code` (PEP 610's direct_url.json). Moving the pin is a change,
+# not an update.
+
+[project]
+name = "galata-signals"
+version = "0.1.0"
+description = "Market-data signals computed over galata-datawatch's tape"
+requires-python = ">=3.11"
+dependencies = [
+    "galata-research[models]",
+    "pyarrow>=17",
+    "polars>=1.30",
+]
+
+[project.scripts]
+galata-signals = "galata_signals.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Under `_src/`: `cereyan serve py` imports every module it can find under
+# py/, and skips directories that start with an underscore — the convention
+# `flows/_runner.py` already relies on. Without it the lane would try to import
+# numpy and fail three modules at every start.
+packages = ["_src/galata_signals"]
+
+[tool.uv.sources]
+galata-research = { git = "file:///Users/sercan/codebase/trading-works/galata-research", rev = "2b5e6a46e8c54a50b8a3aece289acd44be41fa05" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["_src"]
+python_files = ["*.py"]
+python_functions = ["a_*", "an_*", "the_*", "every_*", "no_*", "nothing_*", "only_*", "six_*"]

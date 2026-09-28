@@ -17,6 +17,49 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **The tape holds market-data signals, `kind=signals`** (Tier 16). A signal
+  is computed, not projected, so it is a record that lives only on the tape.
+  - `Kind::Signals` in `galata-wire`, addressed `Addressing::Market`, is the
+    first dataset under that level. **API:** `Kind` gains a variant, and
+    `Kind::ALL` is 20 long.
+  - `galata_datawatch::signals` owns the dataset: its schema (one row per
+    value, with `value` and `n_eff` its only floats), its labels
+    (`galata.writer`, `galata.run_id`, `galata.code`), and `write`, one
+    time-cursor segment per asof date at the run's `computed_micros`.
+  - `--replace` plans over the projected datasets only, so it never lists,
+    refuses on, or removes a signal.
+  - `check_layout` compares a signal's ranges per writer, not per venue.
+  - Retention recognises `signals` as its own family, with no horizon, so the
+    tape's horizon never expires one.
+  - **Rebuild every binary that lists the tape before the first signal is
+    written.** An older `galata-watch` reports the directory as an unknown
+    dataset every hour.
+- **Signals are computed and committed on a schedule** (Tier 16,
+  `derive-the-signals`).
+  - `py/signals` is a uv project of its own, with galata-research pinned by
+    commit. `galata-signals varcov` computes Σ per declared horizon (5m, 30m,
+    1h, 4h, 1d and 1w) with `gr.models.corr`, from the last closed bar. It
+    appends only when a bar of that width has closed, and writes a refusal as
+    `absent` rows.
+  - `galata-signals-commit` (a new binary) refuses a hand-off that is not the
+    signals schema exactly (a LargeUtf8 is a refusal, not a cast), then
+    writes it through `signals::commit`.
+  - The lane's flow `derive-the-signals` runs both at :15 and :45, holding
+    `galata-record`. `run-service.sh flows` syncs `py/signals` from its lock
+    before serving.
+  - Measured on the record on 2026-09-28: 216 rows (6 horizons × 21
+    covariances and 15 correlations) in about 100 s, most of it reading 1m
+    candles.
+- **Signals derived from the covariance matrix**, in the same run and at the
+  same asof: `beta` to BTC and its idiosyncratic share, `absorption` (n = 1,
+  on Σ and on R), `surprise` (the last bar against the Σ forecast before it:
+  Mahalanobis, its χ² percentile, magnitude and correlation surprise), and
+  historical `turbulence`. A second one-origin walk at the previous close
+  supplies Σ_{t|t−1}, and the stored `varcov` rows are unchanged by it
+  (pinned by a test).
+
 ### Fixed
 
 - **The time between a restart and the live subscription is a gap.** The

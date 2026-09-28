@@ -70,6 +70,7 @@ def tools(tmp_path, monkeypatch) -> Tools:
     release = tmp_path / "release"
     release.mkdir()
     monkeypatch.setattr(_runner, "RELEASE", release)
+    monkeypatch.setattr(_runner, "SIGNALS", release)
     return Tools(release)
 
 

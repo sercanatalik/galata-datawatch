@@ -842,6 +842,38 @@ is most carefully guarded:
 a shared-refit multivariate walk-forward, and the fixed-λ EWMA path.
 `py/signals` pins galata-research by SHA.
 
+**The store exists — 2026-09-28** (`a-home-for-signals-on-the-tape`).
+`Kind::Signals` (market-addressed), `galata_datawatch::signals` (schema, labels,
+writer), `--replace` scoped to the projected datasets, the layout check per
+writer, and a retention family with no horizon. The float guard's exemption is
+by location and stated in the script.
+
+**Signals are computed — 2026-09-28** (`derive-the-signals`). `py/signals`
+computes (`galata-signals varcov`, galata-research pinned by commit), and
+`galata-signals-commit` checks the hand-off against the schema and writes it.
+The flow `derive-the-signals` runs both at :15 and :45. The package sits under
+`py/signals/_src/`, because `cereyan serve py` imports every module under
+`py/` except underscored directories. **`checked_at` is dropped:** a row is
+appended when its bar closes, so a figure is stale when
+`now > asof + width + 30 min`, which a reader computes. A 1w figure four days
+old is current. First run on the record: 216 rows in about 100 s. **Still to
+build:** the tower's reader.
+
+**Derived from the matrix — 2026-09-28** (`derive-from-the-matrix`). Each
+run also writes, from the same fit and at the same asof:
+- `beta` to BTC with its idiosyncratic share (Engle 2016, Eq. 3, one regressor);
+- `absorption` with n = 1 (Kritzman et al. 2011: n ≈ N/5), on Σ as the paper
+  does and on R, which on this mixed universe measures co-movement rather
+  than which instrument is most volatile;
+- `surprise`: the last bar against the Σ forecast before it (Mahalanobis,
+  its χ²₆ percentile, and Kinlaw and Turkington's magnitude and correlation
+  surprise);
+- `turbulence`: Kritzman and Li's historical form, ranked in its own sample.
+
+First run on the record: 324 rows. At 1d, β against BTC is ETH 1.05,
+HYPE 0.99, XYZ100 0.25, GOLD 0.19 and CL −0.38, and the correlation
+absorption ratio is 0.61.
+
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
