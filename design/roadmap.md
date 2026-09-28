@@ -874,6 +874,21 @@ First run on the record: 324 rows. At 1d, β against BTC is ETH 1.05,
 HYPE 0.99, XYZ100 0.25, GOLD 0.19 and CL −0.38, and the correlation
 absorption ratio is 0.61.
 
+**Funding carry — 2026-09-28** (`derive-the-carry`). `galata-signals carry`
+writes one row set per closed hour, per instrument:
+- the settled carry over 24h, 7d and 30d (× 8,760), and its excess over the
+  dex's interest-only baseline (declared: main 0.00125%/h, xyz 0.000625%/h,
+  the deployer's multiplier of 0.5 inferred on 2026-09-28);
+- the 7-day z-score against the 90 daily means before it, the shares of
+  positive and at-baseline hours, and carry over hourly volatility;
+- the live rate as a **nowcast**, never averaged into carry.
+
+A trailing figure is absent under 90% settled coverage, naming the last
+settled hour. On its first run every settled figure was absent ("covers 0 of
+24 hours; the last settled hour is 2026-09-25T06:00") because the funding walk
+is off (todo P1), so the signal states that the walk is off. The flow runs
+`varcov` then `carry`, and one refusal does not stop the other.
+
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,

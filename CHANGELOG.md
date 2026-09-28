@@ -19,6 +19,13 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **Funding carry, hourly** (`galata-signals carry`, Tier 16). It writes the
+  settled carry over 24h, 7d and 30d, the excess over each dex's declared
+  interest-only baseline, a 7-day z-score, positive and at-baseline shares,
+  carry over volatility, and the live rate as a nowcast. A trailing figure
+  under 90% settled coverage is absent, naming the last settled hour.
+  `derive-the-signals` now runs `varcov` then `carry`; one refusal does not
+  stop the other, and the run fails after both, naming it.
 - **The tape holds market-data signals, `kind=signals`** (Tier 16). A signal
   is computed, not projected, so it is a record that lives only on the tape.
   - `Kind::Signals` in `galata-wire`, addressed `Addressing::Market`, is the

@@ -376,7 +376,7 @@ whose flows only call the release binaries as subprocesses.
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
-| `derive-the-signals` | `galata-signals varcov`, then `galata-signals-commit` when it wrote rows | :15 and :45 |
+| `derive-the-signals` | `galata-signals varcov` and `galata-signals carry`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
@@ -396,6 +396,9 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   has closed, so a figure is stale when `now > asof + width + 30 min`.
   The same run writes `beta` (to BTC), `absorption`, `surprise` (the last bar
   against the Σ forecast before it) and `turbulence`, all from the same fit.
+  `galata-signals carry` then writes each instrument's funding carry every
+  hour: settled trailing means, excess over the dex baseline, and the live
+  rate as a nowcast. It says when settlements have stopped.
 
 - **The lane has its own cereyan home.** `~/.cereyan` is shared with every
   other cereyan project on the machine, and a server started there would

@@ -49,3 +49,13 @@ lam = 0.94
 bars = "1d"
 corr = "ewma"
 lam = 0.94
+
+[carry]
+# Each dex's interest-only baseline, hourly: the rate at a neutral premium.
+# Main dex: 0.01% per 8h, settled hourly at 1/8 (Hyperliquid docs, Funding).
+# xyz: the deployer's funding multiplier of 0.5 on the same interest rate,
+# inferred from the record on 2026-09-28 (CL, GOLD and XYZ100 fit
+# 0.5 × (P + clamp(0.0001 − P, ±0.0003)) / 8 exactly). The deployer can change
+# it (setFundingMultipliers); re-derive, and date the change here.
+baseline = { main = 0.0000125, xyz = 0.00000625 }
+dex = { xyz = ["CL", "GOLD", "XYZ100"] }

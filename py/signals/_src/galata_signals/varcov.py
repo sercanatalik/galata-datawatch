@@ -73,26 +73,27 @@ class Run:
 
     computed_micros: int
     code: str
+    signal: str = SIGNAL
     rows: list[dict] = field(default_factory=list)
     said: list[str] = field(default_factory=list)
 
     @property
     def run_id(self) -> str:
-        return f"{SIGNAL}-{self.computed_micros}"
+        return f"{self.signal}-{self.computed_micros}"
 
 
 def micros(ts: datetime) -> int:
     return int(ts.timestamp() * 1_000_000)
 
 
-def stored_asof(tape: Path) -> dict[str, int]:
-    """The newest asof per horizon already on the tape for this signal."""
+def stored_asof(tape: Path, signal: str = SIGNAL) -> dict[str, int]:
+    """The newest asof per horizon already on the tape for `signal`: the tape is the cursor."""
     root = tape / "kind=signals"
     if not any(root.rglob("*.parquet")) if root.is_dir() else True:
         return {}
     frame = (
         pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
-        .filter(pl.col("signal") == SIGNAL)
+        .filter(pl.col("signal") == signal)
         .group_by("horizon")
         .agg(pl.col("asof_micros").max())
         .collect()
