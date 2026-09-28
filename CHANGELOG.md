@@ -19,6 +19,16 @@ exists so the four above take no vault dependency.
 
 ### Fixed
 
+- **The time between a restart and the live subscription is a gap.** The
+  restart gap is published before the boot walk, and the walk runs before
+  the stream is subscribed. On 2026-09-28 that left ~58 s with no quotes or
+  trades and no gap row, after 2.7 s of `downtime`. Every pair whose last
+  accounting is a published gap now gets a second gap, from its end to the
+  moment subscriptions are sent, with the same cause: `downtime` after a
+  restart, `session_lost` after a reconnect's backoff. Walked candles and
+  funding are covered by the walk and get none. The end is the send, never a
+  first frame, so a quiet market is still never a gap. Gaps no longer
+  overlap: a gap starts at the later of covered and already gapped.
 - **A walk request that failed is no longer reported as covered.** On
   2026-09-28 the funding walk met 429 on every instrument and its outcome read
   `covered 1300d`, and the refused 1h, 4h and 1d candle pages read their

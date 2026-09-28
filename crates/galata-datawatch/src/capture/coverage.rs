@@ -27,6 +27,25 @@ struct Ledger {
     last_recv_micros: Option<i64>,
     /// Messages in the window being counted.
     count: u32,
+    /// Where this pair's last **published** gap ended, and why.
+    ///
+    /// A gap is accounting, not coverage: until something covers the pair
+    /// again, the time after it is still not covered, and
+    /// [`Coverage::asked_again`] says so.
+    gapped: Option<Gapped>,
+}
+
+/// A pair's last published gap.
+#[derive(Debug, Clone, Copy)]
+struct Gapped {
+    /// Where it ended.
+    end_micros: i64,
+    /// Why.
+    cause: GapCause,
+    /// **Still open**: published by a loss or a restart and not yet closed by
+    /// asking the stream again. Once asked, the pair is listened to, and a
+    /// quiet pair's silence after that is not a gap.
+    open: bool,
 }
 
 /// What each declared pair was covered to.
@@ -159,12 +178,21 @@ impl Coverage {
     ) -> Vec<(Ticker, Gap)> {
         let mut out = Vec::new();
         for (ticker, series) in pairs {
-            let Some(from) = self.last_recv(ticker, *series) else {
+            let Some(covered) = self.last_recv(ticker, *series) else {
                 // Never covered at all. There is no covered moment to date a
                 // gap from, and a gap back to the beginning of time is not a
                 // fact.
                 continue;
             };
+            // **From the later of covered and already gapped**, so a second
+            // loss before any frame does not publish the first one's span
+            // again.
+            let gapped = self
+                .pairs
+                .get(&(ticker.clone(), *series))
+                .and_then(|l| l.gapped)
+                .map(|g| g.end_micros);
+            let from = gapped.map_or(covered, |end| end.max(covered));
             if from >= to_micros {
                 continue;
             }
@@ -179,6 +207,78 @@ impl Coverage {
                     dex: None,
                 },
             ));
+        }
+        self.note_gapped(&out, true);
+        out
+    }
+
+    fn note_gapped(&mut self, gaps: &[(Ticker, Gap)], open: bool) {
+        for (ticker, gap) in gaps {
+            if let Some(ledger) = self.pairs.get_mut(&(ticker.clone(), gap.series)) {
+                ledger.gapped = Some(Gapped {
+                    end_micros: gap.to_micros,
+                    cause: gap.cause,
+                    open,
+                });
+            }
+        }
+    }
+
+    /// **The tail of a gap that is still open**, up to the moment the stream
+    /// was asked again.
+    ///
+    /// For each pair whose last accounting is a published gap, with nothing
+    /// covered since, a gap from that gap's end to `at_micros`, with the same
+    /// cause. The end is the moment subscriptions were **sent**: a fact about
+    /// us. The first frame would be an inference from silence, since a closed
+    /// market's first trade on Monday would date a gap across the weekend.
+    ///
+    /// Measured 2026-09-28: a restart published 2.7 s of `downtime`, then
+    /// walked for a minute before subscribing, and the ~58 s between was in no
+    /// gap. A pair the walk covered after its gap (candles, funding) has
+    /// nothing to add here.
+    pub fn asked_again(
+        &mut self,
+        pairs: &[(Ticker, Series)],
+        at_micros: i64,
+    ) -> Vec<(Ticker, Gap)> {
+        let mut out = Vec::new();
+        for (ticker, series) in pairs {
+            let Some(ledger) = self.pairs.get(&(ticker.clone(), *series)) else {
+                continue;
+            };
+            let Some(Gapped {
+                end_micros: from,
+                cause,
+                open: true,
+            }) = ledger.gapped
+            else {
+                continue;
+            };
+            let covered_since = ledger.last_recv_micros.is_some_and(|recv| recv >= from);
+            if covered_since || from >= at_micros {
+                continue;
+            }
+            out.push((
+                ticker.clone(),
+                Gap {
+                    series: *series,
+                    from_micros: from,
+                    to_micros: at_micros,
+                    cause,
+                    clipped: self.clipped,
+                    dex: None,
+                },
+            ));
+        }
+        self.note_gapped(&out, false);
+        // And every pair asked, tail or not: it is listened to from here.
+        for pair in pairs {
+            if let Some(Gapped { open, .. }) =
+                self.pairs.get_mut(pair).and_then(|l| l.gapped.as_mut())
+            {
+                *open = false;
+            }
         }
         out
     }
@@ -311,5 +411,47 @@ mod tests {
         let mut c = Coverage::new(Clipped::Continuous);
         c.received(&t("DOGE"), Series::Trades, SEC);
         assert!(c.pairs().contains(&(t("DOGE"), Series::Trades)));
+    }
+
+    #[test]
+    fn a_second_loss_before_any_frame_starts_where_the_first_ended() {
+        let mut c = Coverage::new(Clipped::Continuous);
+        c.received(&t("BTC"), Series::Quotes, 10 * SEC);
+        let first = c.gaps_for_all(20 * SEC, GapCause::SessionLost);
+        assert_eq!(first[0].1.from_micros, 10 * SEC);
+        let second = c.gaps_for_all(50 * SEC, GapCause::SessionLost);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].1.from_micros, 20 * SEC, "no span published twice");
+    }
+
+    #[test]
+    fn asked_again_closes_an_open_gap_and_only_that() {
+        let mut c = Coverage::new(Clipped::Continuous);
+        let pairs = [(t("BTC"), Series::Quotes), (t("BTC"), Series::Candles)];
+        c.known(&t("BTC"), Series::Quotes, 10 * SEC);
+        c.known(&t("BTC"), Series::Candles, 10 * SEC);
+        c.gaps_for(&pairs, 20 * SEC, GapCause::Downtime);
+        // The walk brought candles in after the gap: covered, so no tail.
+        c.received(&t("BTC"), Series::Candles, 25 * SEC);
+
+        let tails = c.asked_again(&pairs, 80 * SEC);
+        assert_eq!(tails.len(), 1, "{tails:?}");
+        let (ticker, gap) = &tails[0];
+        assert_eq!(ticker.as_str(), "BTC");
+        assert_eq!(gap.series, Series::Quotes);
+        assert_eq!((gap.from_micros, gap.to_micros), (20 * SEC, 80 * SEC));
+        assert_eq!(gap.cause, GapCause::Downtime);
+
+        assert!(c.asked_again(&pairs, 90 * SEC).is_empty(), "closed once");
+    }
+
+    #[test]
+    fn a_pair_never_gapped_has_no_tail() {
+        let mut c = Coverage::new(Clipped::Continuous);
+        c.received(&t("BTC"), Series::Quotes, 10 * SEC);
+        assert!(
+            c.asked_again(&[(t("BTC"), Series::Quotes)], 99 * SEC)
+                .is_empty()
+        );
     }
 }
