@@ -928,7 +928,13 @@ the 10th percentile. That completes the signals this tier listed.
   measured descriptively, no horizon distinguishes the two: QLIKE DCC − CCC is
   +0.155 at 4h (p 0.34), +0.020 at 1h (p 0.74) and −0.030 at 5m (p 0.30).
   The cost is a correlation that cannot rise in a crisis until the next refit;
-  `surprise` and `turbulence` still register such an episode;
+  `surprise` and `turbulence` still register such an episode, and so does
+  **`constancy`** (`test-the-constant-correlation`, 2026-09-28): Engle and
+  Sheppard's test of constant correlation over each fitted horizon's last 30
+  days, White-robust because ν̂ ≈ 3. On a copy of the record: 4h p 0.59, 1h
+  0.13, 5m 0.03 (its whole 1,477-return sample). Its power is about 5% against
+  dynamics as faint as the DCC fitted here (a ≈ 0.005), and 0.68 against a
+  correlation that moved 0.6 → 0.2 over the last 180 bars;
 - the next signals. From the matrix almost free: β to BTC, the absorption
   ratio, turbulence. Independent of it: funding carry, jump flags,
   liquidity. Each gets its own change once the store exists. **All built**

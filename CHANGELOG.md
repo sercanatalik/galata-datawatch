@@ -17,6 +17,14 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **Whether the correlation stayed constant** (`constancy`, Tier 16). Each
+  fitted horizon writes Engle and Sheppard's (2001) test of constant
+  correlation: `engle_sheppard_stat` and `engle_sheppard_p` over the last 30
+  days of its standardised returns, against the declared R (galata-research
+  `corr.constancy`, White-robust, 5 lags). A small p is CCC failing.
+
 ### Changed
 
 - **Constant correlation at 5m, 1h and 4h** (`declare-constant-correlation`,

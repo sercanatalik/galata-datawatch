@@ -144,6 +144,8 @@ def a_thin_sample_is_an_absent_row(served, tmp_path):
     assert len(rows) == 6 + 3 + 3  # three instruments: six pairs i ≤ j, three i < j, and their targets
     assert all(r["value"] is None for r in rows)
     assert all("264" in r["absent"] and "500" in r["absent"] for r in rows), rows[0]["absent"]
+    const = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "constancy"]
+    assert len(const) == 2 and all(r["value"] is None and "500" in r["absent"] for r in const)
 
 
 def a_fitted_horizon_states_its_parameters(served, tmp_path):
@@ -188,6 +190,24 @@ def a_constant_correlation_is_its_own_target(served, tmp_path):
     assert len(pairs) == 3
     for pair in pairs:
         assert value[("correlation", *pair)] == pytest.approx(value[("correlation_target", *pair)], abs=1e-12)
+
+
+def a_fitted_horizon_states_whether_its_correlation_stayed_constant(served, tmp_path):
+    served["4h"] = _bars(n=700, width=timedelta(hours=4))
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "ccc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "constancy"]
+    by = {r["measure"]: r for r in rows}
+    assert set(by) == {"engle_sheppard_stat", "engle_sheppard_p"}
+    assert by["engle_sheppard_stat"]["value"] >= 0 and 0 <= by["engle_sheppard_p"]["value"] <= 1
+    assert all(r["ticker_i"] == "*" and r["ticker_j"] is None and r["model"] == "gjr-t/ccc" for r in rows)
+    params = json.loads(rows[0]["params"])
+    assert (params["lags"], params["days"]) == (5, 30)
+    assert rows[0]["n_eff"] == 180  # 30 days of 4h bars
+
+
+def no_constancy_where_nothing_is_fitted(served, tmp_path):
+    served["1h"] = _bars()
+    assert not [r for r in varcov.compute([_ewma()], tmp_path, _run()).rows if r["signal"] == "constancy"]
 
 
 def an_undeclarable_correlation_model_is_refused():

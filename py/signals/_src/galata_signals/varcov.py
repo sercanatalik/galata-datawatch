@@ -295,7 +295,50 @@ def derived(hz: Horizon, returns: pl.DataFrame, joint: pl.DataFrame, tickers: li
         except (Refused, matrix.Undefined) as why:
             rows += [_row(base, m, EVERYONE, None, None, str(why), bar_open, (None, None)) for m in measures]
 
-    return rows + turbulence_rows(hz, joint, tickers, run)
+    return rows + constancy_rows(hz, returns, asof, params, span, run) + turbulence_rows(hz, joint, tickers, run)
+
+
+#: The constancy test's trailing window, in days of the horizon's bars, and its lags.
+CONSTANCY_DAYS = 30
+CONSTANCY_LAGS = 5
+CONSTANCY = ("engle_sheppard_stat", "engle_sheppard_p")
+
+
+def constancy_rows(hz: Horizon, returns: pl.DataFrame, asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
+    """Whether the correlation has stayed constant: Engle and Sheppard's (2001) test, on a fitted horizon.
+
+    The margins are fitted once more in sample, on the returns the walk saw
+    (deseasonalised as it deseasonalised them), and R is that fit's Q̄
+    normalised: under CCC it is the declared R. The test runs on the last
+    `CONSTANCY_DAYS` of the horizon's bars against that R, so a correlation
+    that has moved lately, or moves with the bars before it, rejects. A small
+    p-value is CCC failing; under DCC it says dynamics are present, which DCC
+    already models.
+    """
+    if not hz.fitted:
+        return []
+    base = _base(hz, run, asof, {**params, "lags": CONSTANCY_LAGS, "days": CONSTANCY_DAYS}, "constancy")
+    corr = gr.models.corr
+    try:
+        # As `walk` does: a null return (after a hole) is a dropped bar, not a cell to deseasonalise.
+        returns = returns.drop_nulls("return")
+        column = "return"
+        if hz.deseasonalise:
+            last = returns["close_ts"].max()
+            factors = gr.timeseries.seasonal_factors(returns, fit=(returns["ts"].min(), last), by="hour_of_day")
+            returns = gr.timeseries.deseasonalize(returns, factors)
+            column = "deseasonalized"
+        f = corr.fit(returns, model=hz.model, dist=hz.dist, corr=hz.corr, column=column, min_obs=hz.min_obs)
+        z = np.column_stack([f.fits[t].series["z"].to_numpy() for t in f.tickers])
+        window = min(len(z), CONSTANCY_DAYS * 86_400_000_000 // WIDTH_US[hz.name])
+        found = corr.constancy(z[-window:], f.qbar, lags=CONSTANCY_LAGS)
+        rows = [
+            _row(base, "engle_sheppard_stat", EVERYONE, None, found["statistic"], None, asof, span),
+            _row(base, "engle_sheppard_p", EVERYONE, None, found["p_value"], None, asof, span),
+        ]
+        return [{**r, "n_eff": float(found["n"])} for r in rows]
+    except Refused as why:
+        return [_row(base, m, EVERYONE, None, None, str(why), asof, span) for m in CONSTANCY]
 
 
 def turbulence_rows(hz: Horizon, joint: pl.DataFrame, tickers: list[str], run: Run) -> list[dict]:
@@ -317,7 +360,10 @@ def derived_absent(hz: Horizon, tickers: list[str], asof: int, reason: str, run:
     if REFERENCE in tickers:
         base = _base(hz, run, asof, _params(hz), "beta")
         rows += [_row(base, m, t, REFERENCE, None, reason, asof, none) for t in tickers if t != REFERENCE for m in ("beta", "idiosyncratic_share")]
-    for signal, measures in (("absorption", ("covariance_ar", "correlation_ar")), ("surprise", ("mahalanobis", "chi2_percentile", "magnitude_surprise", "correlation_surprise"))):
+    derived_signals = [("absorption", ("covariance_ar", "correlation_ar")), ("surprise", ("mahalanobis", "chi2_percentile", "magnitude_surprise", "correlation_surprise"))]
+    if hz.fitted:
+        derived_signals.append(("constancy", CONSTANCY))
+    for signal, measures in derived_signals:
         base = _base(hz, run, asof, _params(hz), signal)
         rows += [_row(base, m, EVERYONE, None, None, reason, asof, none) for m in measures]
     return rows
