@@ -74,6 +74,41 @@ fn a_committed_segment_is_complete() {
 }
 
 #[test]
+fn an_identical_segment_already_there_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = write_segment(dir.path(), time(0, 9, 1), &batch(0, 10, 1), Codec::Zstd).unwrap();
+    let before = std::fs::metadata(&first).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let again = write_segment(dir.path(), time(0, 9, 1), &batch(0, 10, 1), Codec::Zstd).unwrap();
+    assert_eq!(again, first);
+    let after = std::fs::metadata(&again).unwrap();
+    // Not rewritten: the same file, untouched, and no temporary left behind.
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(after.ino(), before.ino());
+    }
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(names.len(), 1, "only the segment: {names:?}");
+}
+
+#[test]
+fn a_segment_with_other_bytes_under_the_same_name_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = write_segment(dir.path(), time(0, 9, 1), &batch(0, 10, 1), Codec::Zstd).unwrap();
+    // The same range, other rows: a receipt day re-derived after it changed.
+    let again = write_segment(dir.path(), time(0, 9, 1), &batch(100, 10, 1), Codec::Zstd).unwrap();
+    assert_eq!(again, first);
+    assert_eq!(micros_of(&read_segment(&again).unwrap())[0], 100);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn a_dropped_writer_leaves_no_segment() {
     let dir = tempfile::tempdir().unwrap();
     {

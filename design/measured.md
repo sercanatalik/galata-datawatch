@@ -4303,3 +4303,35 @@ throwaway agent that exits 5 s after SIGTERM:
 The installer now waits up to 30 s (launchd's default 20 s exit timeout, plus
 margin) and refuses by name past that. The proof ran the installer's own
 `wait_unloaded`, extracted from the script, not a copy.
+
+## The hourly projection rewrote an unchanged tape — 2026-09-28
+
+`leave-an-identical-segment`. After a boot walk, a receipt day holds years of
+candle and funding history, so `--replace` over the last four receipt days
+re-derives nearly every partition. The 15:40 run on production:
+
+```text
+  segments on the tape            10,063
+  rewritten by the run            10,047
+  byte-identical afterwards       10,058   (SHA-1, before and after)
+  same name, other bytes               0
+  new names / removed              5 / 5   (today's receipt day)
+  run time, 2026-09-27/28     3 – 25 min
+```
+
+Each rewrite was a write, two `F_FULLFSYNC`s (Rust's `sync_all` on macOS) and
+a rename. On an idle disk the syncs alone are about **11 ms a segment**, and a
+byte comparison against the existing file is **0.03 ms**. The rename changed
+every file's mtime and inode, so the label cache, the page cache and the
+tower's layout check (58 s on its first call after the 12:40 run) all started
+cold every hour.
+
+Leaving an identical segment alone, on an APFS clone of the same archive and
+tape (9,484,087 payloads → 13,232,449 rows in 10,047 segments):
+
+| binary | run 1 | run 2 | segments touched |
+|---|---|---|---|
+| before | 162 s | 162 s | 10,047 |
+| after | 41 s | 42 s | 0 |
+
+What remains, 41 s, is reading and normalising four receipt days of the archive.
