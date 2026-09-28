@@ -176,6 +176,10 @@ instruments = [
 #   max_segments_in_closed_partition = 64
 #   # How old the newest segment may be before the record is stale.
 #   max_record_age_secs = 300
+#   # How far, in Fisher z, the var-covar signal's fitted R-bar may sit from
+#   # derive's equal-weight rho over the same window. Measured 2026-09-28: at
+#   # most 0.076 (4h), 0.041 (1h), 0.038 (5m) on a healthy record.
+#   max_correlation_target_gap = 0.15
 #
 # With no block it still reports a ticker that became a directory, because that
 # is not a matter of degree. It watches THE RECORD, not the scheduler: a

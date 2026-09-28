@@ -41,6 +41,7 @@ pub mod ingest;
 #[cfg(feature = "ledger")]
 pub mod ledger;
 pub mod normalise;
+pub mod reconcile;
 pub mod record;
 pub mod reorg;
 pub mod replay;

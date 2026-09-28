@@ -113,6 +113,7 @@ def six_instruments_make_twenty_one_covariances_and_fifteen_correlations(served,
     assert (len(cov), len(cor)) == (21, 15)
     assert all(r["value"] > 0 for r in cov if r["ticker_i"] == r["ticker_j"])
     assert all(r["ticker_i"] < r["ticker_j"] and -1 <= r["value"] <= 1 for r in cor)
+    assert not [r for r in rows if r["measure"] == "correlation_target"]  # EWMA reverts to nothing
 
 
 def nothing_closed_since_the_last_run_exits_three(served, tmp_path, monkeypatch):
@@ -140,7 +141,7 @@ def a_thin_sample_is_an_absent_row(served, tmp_path):
     served["4h"] = _bars(n=265)
     hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "dcc"})
     rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "varcov"]
-    assert len(rows) == 6 + 3  # three instruments: six pairs i ≤ j, three i < j
+    assert len(rows) == 6 + 3 + 3  # three instruments: six pairs i ≤ j, three i < j, and their targets
     assert all(r["value"] is None for r in rows)
     assert all("264" in r["absent"] and "500" in r["absent"] for r in rows), rows[0]["absent"]
 
@@ -153,6 +154,26 @@ def a_fitted_horizon_states_its_parameters(served, tmp_path):
     assert rows[0]["model"] == "garch-normal/dcc" and rows[0]["fitted"]
     assert 0 <= params["a"] and params["a"] + params["b"] < 1
     assert all(r["fitted_through_micros"] == r["asof_micros"] for r in rows)
+
+
+def a_fitted_pair_states_the_correlation_it_reverts_to(served, tmp_path):
+    served["1h"] = _bars(n=700)
+    hz = varcov.Horizon.declared("1h", {"bars": "1h", "model": "garch", "dist": "normal", "corr": "dcc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "varcov"]
+    target = {(r["ticker_i"], r["ticker_j"]): r for r in rows if r["measure"] == "correlation_target"}
+    rho = {(r["ticker_i"], r["ticker_j"]): r for r in rows if r["measure"] == "correlation"}
+    assert target.keys() == rho.keys() and len(target) == 3
+    for pair, t in target.items():
+        assert -1 < t["value"] < 1
+        assert (t["fit_from_micros"], t["fitted_through_micros"], t["asof_micros"]) == (
+            rho[pair]["fit_from_micros"], rho[pair]["fitted_through_micros"], rho[pair]["asof_micros"],
+        )  # fmt: skip
+    # The walk's own R̄, recomputed from an in-sample fit on the same returns.
+    returns = gr.timeseries.returns(served["1h"], kind="log").drop_nulls("return")
+    f = gr.models.corr.fit(returns, model="garch", dist="normal")
+    d = np.sqrt(np.diag(f.qbar))
+    i, j = f.tickers.index("BTC"), f.tickers.index("ETH")
+    assert target[("BTC", "ETH")]["value"] == pytest.approx(f.qbar[i, j] / (d[i] * d[j]), abs=1e-5)
 
 
 def an_unknown_key_is_a_bad_argument(tmp_path):

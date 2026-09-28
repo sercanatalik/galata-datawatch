@@ -81,6 +81,17 @@ fn col<'a, T: 'static>(
 
 /// Derive a horizon's statistics for one venue from the tape under `root`.
 pub fn from_tape(root: &Path, venue: &str, horizon: &Horizon) -> Result<Derived, DeriveError> {
+    let (bars, bound) = bars_from_tape(root, venue)?;
+    Ok(Derived {
+        venue: venue.to_string(),
+        bound,
+        statistics: derive(&bars, horizon),
+    })
+}
+
+/// One venue's candles off the tape, every width, with the venue's durable
+/// bound: read once for several horizons, as the watch's reconciliation does.
+pub fn bars_from_tape(root: &Path, venue: &str) -> Result<(Vec<Bar>, Option<i64>), DeriveError> {
     let mut bars = Vec::new();
     let mut bound = None;
     if unwritten(root, &["kind=candles"]).is_empty() {
@@ -125,11 +136,7 @@ pub fn from_tape(root: &Path, venue: &str, horizon: &Horizon) -> Result<Derived,
         }
     }
 
-    Ok(Derived {
-        venue: venue.to_string(),
-        bound,
-        statistics: derive(&bars, horizon),
-    })
+    Ok((bars, bound))
 }
 
 #[cfg(test)]

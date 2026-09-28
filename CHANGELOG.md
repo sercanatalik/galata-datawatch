@@ -19,6 +19,15 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **The fitted matrix is reconciled against `derive`** (Tier 16's
+  cross-check). `galata-signals varcov` stores `correlation_target`, the R̄ a
+  fitted horizon reverts to (from galata-research's `walk_forward`), and
+  `galata-watch` compares each pair's newest R̄ with `derive`'s equal-weight ρ
+  over the same window. A gap in Fisher z above the new, optional
+  `[watch] max_correlation_target_gap` is a finding naming the pair, both
+  figures and the gap. `watch::Thresholds` and `config::Watch` gain the field
+  and lose `Eq`. `derive::tape::bars_from_tape` reads a venue's candles once
+  for several horizons.
 - **Liquidity every hour** (`galata-signals liquidity`, Tier 16): the
   time-weighted quoted spread and touch depth, the effective spread (volume-
   and equal-weighted), 5 s price impact, 24-hour Amihud, and a robust z of the

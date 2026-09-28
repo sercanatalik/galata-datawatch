@@ -303,7 +303,7 @@ pub struct Capture {
 /// chose is one nobody will believe when it fires. With no block, only
 /// structural problems are checked — a ticker that became a directory is not a
 /// matter of degree.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Watch {
     /// The most segments a **closed** partition may hold before compaction is
@@ -312,6 +312,9 @@ pub struct Watch {
     pub max_segments_in_closed_partition: Option<usize>,
     /// How old the newest segment may be before the record is stale.
     pub max_record_age_secs: Option<u64>,
+    /// How far, in Fisher z, the var-covar signal's R̄ may sit from `derive`'s
+    /// ρ over the same window before it is reported (Tier 16's cross-check).
+    pub max_correlation_target_gap: Option<f64>,
 }
 
 /// Where events go, if anywhere.
