@@ -356,7 +356,7 @@ prove "check-python-flows (subprocess outside the runner)" \
 prove "check-python-flows (a spawn without env=)" \
       ./scripts/check-python-flows.sh \
       py/flows/_runner.py replace \
-      $'        env=job_env(config),\n' \
+      $'        env=job_env(config) | {name: str(Path(path).resolve()) for name, path in (paths or {}).items()},\n' \
       ''
 
 # 4. The retention flow asked to delete.

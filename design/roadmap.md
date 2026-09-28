@@ -918,6 +918,16 @@ On the record (06:00 hour): BTC quoted 0.134 bps (the library measured 0.12),
 effective 1.2–6.3 bps across the six, BTC touch depth $125k median and $242 at
 the 10th percentile. That completes the signals this tier listed.
 
+**The basis — 2026-09-28** (`derive-the-basis`, the operator's next signals).
+`galata-signals basis`, each closed hour, per instrument, from the tape's
+marks (about one a second since 2026-09-20): the venue's premium,
+time-weighted and winsorised, with its median; mark against oracle; the open
+interest's log change and dollars; a robust z of the premium against 30 stored
+days, on the main dex only. The xyz oracle follows the venue's own book
+outside the underlying's hours (trade.xyz docs), so its premium has no
+history to be unusual against. For the hour to 17:00: BTC −1.7 bps, GOLD
++5.3, CL −4.5 with open interest up 17% in the hour.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
