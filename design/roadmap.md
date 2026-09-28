@@ -750,7 +750,9 @@ BTC/GOLD's typed 0.11 was noise ([−0.40, 0.09]).*
 - The screen computes on request from the tape first, the way the tower folds
   candles. **`derive-the-closed-days`** becomes a cereyan flow only when
   something other than the screen needs stored statistics: the fold's own
-  history, or research.
+  history, or research. *That happened 2026-09-28: see Tier 16. The stored
+  figures are model-based signals, and this tier's `derive` stays as their
+  equal-weight check.*
 - The xyz instruments were measured continuous on 2026-09-20, so no session
   mask is needed for today's universe. The grid still takes one, for the first
   instrument that closes.
@@ -769,6 +771,84 @@ The tower's Portfolio view reads Tiers 11–15 as they land. Until Tier 12 its
 positions are the viewer's own inputs. The risk arithmetic (risk share, VaR,
 shocks) stays in the screen: it is a model over the fold and the statistics,
 not a record.
+
+---
+
+## Tier 16 — market-data signals
+
+*Decided 2026-09-28 in an exploration with the operator. Not built. This is
+Tier 15's trigger: stored statistics now have readers other than the screen,
+namely the book and portfolio risk manager, individual algos, and research's
+historical studies.*
+
+A **market-data signal** is a number computed from market data: a function
+over ticks or bars, run on a schedule and **never near real time**. It says
+nothing about what to do. That is a trading signal, which comes later and
+reads this one (legacy `design/datasignal/datasignal.md`, *the distinction
+this component exists inside*).
+
+The first signal is **a variance-covariance matrix over every subscribed
+instrument**, per horizon.
+
+| | Decided |
+|---|---|
+| where | `py/signals`, a second uv project beside `py/flows`, with its own import guard. `py/flows` stays thin: `check-python-flows.sh` is unchanged |
+| cadence | a cereyan flow, every 30 min by default, holding `galata-record` like the other writers |
+| horizons | 5m · 30m · 1h · 4h · 1d · 1w. 1w is weekly returns over an expanding sample, as much as the tape holds |
+| output | Parquet, **a tape dataset `kind=signals`**, append-only. A row is appended only when a new bucket of its horizon closes. *Latest* is the newest `computed_at`, a query and never a rewritten file. The latest view carries `checked_at`, so an unchanged figure reads differently from a dead flow |
+| σ and ρ | **One fit, consistent by construction:** a two-step DCC (Engle 2002). Step 1 is the declared GARCH-family model per instrument (Student-t), and its filtered σ standardises the returns. Step 2 is DCC by Gaussian QML on those z. Σ = D·R·D, with D from each model's own h-step forecast and R from DCC's. One refit clock and one `fitted_through` per matrix. Refits are slow; each 30-min run filters new bars with fixed parameters |
+| model | **GJR-t where galata-research's study supports it.** A horizon's config names the model and the study cell behind it |
+| 1d, 1w today | **Fixed-parameter EWMA**, σ and ρ from one λ, labelled `fitted = false`. The joint sample starts at CL's listing (2026-01-06): 265 daily and 37 weekly returns, against `min_obs = 500`. 1d moves to a fitted model by a config change once CL reaches 500 days, around May 2027 |
+| gatekeeping | floors and intervals on **n_eff = (Σw)²/Σw²**, not n: a weighted figure rests on fewer returns than its window holds. Below the floor a cell is `Absent`, naming the instrument and count, as Tier 15 does |
+| lineage | on every row: `asof`, `computed_at`, model and parameters, `fitted_through`, n_eff, the galata-research SHA, and the run id |
+| readers | the tower reads `kind=signals` as it reads market data; research reads its history point-in-time, joining on `computed_at` |
+| cross-check | Tier 15's `derive` stays. Its long-sample close-to-close ρ is the independent check on DCC's R̄, which lets a Python defect show up against Rust |
+
+**Legacy's objection is overruled, on the record.** Legacy excluded EWMA and
+GARCH from the risk derive step: *"a model that quietly reweights it is the
+opposite of a review that exists to make choices explicit"*
+(`legacy/galata-legacy/design/tower/econometrics.md`). Here the reweighting is
+declared per horizon, named on every row, and it is the operator's choice.
+The equal-weight ρ remains available from `derive`.
+
+**The tape changes this needs.** Each is small, and each sits where the tape
+is most carefully guarded:
+
+- **`--replace` must plan over the kinds it projects, not the whole tape.**
+  Today it reads every segment's venue and source-day labels
+  (`tape/rebuild.rs`, *"the whole tape, not the partitions this run
+  writes"*). A signals segment would make the hourly projection fail on
+  `UnknownVenue` or `UnknownSource`. Or, if it were labelled like market
+  data, the projection would delete it. This is the one change that breaks
+  production if it is missed.
+- **`Kind::Signals` in `galata-wire`**, or `layout::check` reports
+  `UnknownDataset`. It must land before the Tier 10 publish, or the publish
+  waits for it.
+- **Floats are allowed in signals only, structurally.** `no_price_is_a_float`
+  keeps asserting over `projected_kinds()`, and `Signals` is not projected.
+  The signals schema is an Arrow schema in the tape module, never a
+  `galata-wire` struct with `f64` fields: `check-no-float-money.sh` rule 1
+  holds unchanged.
+- **Retention never reaches signals.** It is excluded from `tape_days`. A
+  signal's history is research's time series and cannot be recomputed.
+- **One schema, two languages.** Python writes it, and Rust and research read
+  it. A fixture segment written by `py/signals` is read in a Rust test through
+  `tape::Reader` and passes `layout::check`, so drift fails the build. The
+  Python writer follows `galata-segments`' naming, atomic rename and labels.
+- **Invariant 8 is amended**, below: the tape becomes a cache of the archive
+  plus one computed record.
+
+**Depends on** galata-research's `add-dcc` (its roadmap item 25): the DCC,
+a shared-refit multivariate walk-forward, and the fixed-λ EWMA path.
+`py/signals` pins galata-research by SHA.
+
+**Still open:**
+- the default model for fitted horizons the study never decided (1h, 30m,
+  5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
+  which is the study's own baseline;
+- the next signals. From the matrix almost free: β to BTC, the absorption
+  ratio, turbulence. Independent of it: funding carry, jump flags,
+  liquidity. Each gets its own change once the store exists.
 
 ---
 
@@ -820,6 +900,9 @@ estimate is given for them.
    not only testability.
 8. **The archive is a record; the tape is a cache** — which is what licenses the
    tape to collapse identical poll states while the archive keeps every one.
+   *One exception, from Tier 16:* `kind=signals` is computed, not projected.
+   It is a record that lives only on the tape. No rebuild reads it, replaces
+   it or expires it, and it is the only dataset that may hold floats.
 
 *Tests are named after the claim they defend. A test called `test_ingest_ok` can
 survive the deletion of the invariant it was written for; one called
