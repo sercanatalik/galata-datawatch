@@ -32,7 +32,7 @@ def code() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="galata-signals")
-    parser.add_argument("signal", choices=["varcov"])
+    parser.add_argument("signal", choices=["varcov", "carry"])
     parser.add_argument("--var", required=True, type=Path, help="the record's root, holding tape/")
     parser.add_argument("--out", required=True, type=Path, help="the Arrow IPC file to hand to galata-signals-commit")
     parser.add_argument("--config", type=Path, default=HERE / "signals.toml")
@@ -49,23 +49,30 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["GALATA_VAR"] = str(args.var.resolve())
     from . import schema, varcov
 
+    from . import carry
+
     try:
         with args.config.open("rb") as fh:
-            declared = tomllib.load(fh).get("varcov", {})
-        horizons = [varcov.Horizon.declared(name, table) for name, table in declared.items()]
+            document = tomllib.load(fh)
+        if args.signal == "varcov":
+            horizons = [varcov.Horizon.declared(name, table) for name, table in document.get("varcov", {}).items()]
+            if not horizons:
+                raise ValueError("declares no [varcov.*] horizon")
+        else:
+            declared = carry.Declared.declared(document.get("carry", {}))
     except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f"{args.config}: {error}", file=sys.stderr)
-        return BAD_ARGUMENT
-    if not horizons:
-        print(f"{args.config} declares no [varcov.*] horizon", file=sys.stderr)
         return BAD_ARGUMENT
     now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
     if now.tzinfo is None:
         print("--now needs a zone", file=sys.stderr)
         return BAD_ARGUMENT
-    run = varcov.Run(computed_micros=varcov.micros(now), code=code())
+    run = varcov.Run(computed_micros=varcov.micros(now), code=code(), signal=args.signal)
     try:
-        varcov.compute(horizons, tape, run)
+        if args.signal == "varcov":
+            varcov.compute(horizons, tape, run)
+        else:
+            carry.compute(declared, tape, run)
     except Exception as error:  # the tool's own failure, reported as broken
         print(f"broken: {type(error).__name__}: {error}", file=sys.stderr)
         return BROKEN

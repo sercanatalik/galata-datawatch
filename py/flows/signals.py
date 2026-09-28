@@ -1,8 +1,9 @@
 """Derive the market-data signals. Every 30 minutes, at :15 and :45.
 
-**Two tools, and no figure here** (design/roadmap.md, Tier 16). The
-calculator, ``galata-signals`` (``py/signals``), reads the tape through
-galata-research and writes one run's rows as an Arrow IPC file; the commit,
+**Two tools, and no figure here** (design/roadmap.md, Tier 16). Each
+calculator — ``galata-signals varcov``, then ``galata-signals carry``
+(``py/signals``) — reads the tape through galata-research and writes one run's
+rows as an Arrow IPC file; the commit,
 ``galata-signals-commit``, checks them against the dataset's schema and writes
 them to the tape. The arithmetic is galata-research's and the tape's contract
 is Rust's; this only gives them a cadence.
@@ -26,17 +27,20 @@ from . import _runner
 
 SCHEDULE = Cron("15,45 * * * *", timezone="UTC")
 
-# The hand-off, inside the record's root. The commit removes it; a commit that
-# failed leaves it, and the next run's calculator writes over it.
-HANDOFF = _runner.REPO / "var" / "signals-staging" / "varcov.arrow"
-# The declared horizons and models: a committed file, named here rather than
-# found by the calculator relative to wherever it happens to be installed.
+# The calculators, in order, each with its own hand-off inside the record's
+# root. A commit removes its hand-off; a commit that failed leaves it, and that
+# calculator's next run writes over it.
+CALCULATORS = ("varcov", "carry")
+STAGING = _runner.REPO / "var" / "signals-staging"
+HANDOFF = STAGING / "varcov.arrow"
+# The declared horizons, models and baselines: a committed file, named here
+# rather than found by the calculator relative to wherever it is installed.
 DECLARED = _runner.REPO / "py" / "signals" / "signals.toml"
 
 
 @task(retries=0)
-def compute_varcov(config: str, var: str, out: str) -> str:
-    return _runner.run("galata-signals", ["varcov", "--var", var, "--out", out, "--config", str(DECLARED)], config)
+def compute(config: str, signal: str, var: str, out: str) -> str:
+    return _runner.run("galata-signals", [signal, "--var", var, "--out", out, "--config", str(DECLARED)], config)
 
 
 @task(retries=0)
@@ -52,7 +56,19 @@ def commit_signals(config: str, out: str) -> str:
     resources={"galata-record": 1},
 )
 def derive_the_signals(config: str = str(_runner.CONFIG)) -> dict[str, str]:
-    said = compute_varcov(config, str(_runner.REPO / "var"), str(HANDOFF))
-    if said.startswith("nothing to do"):
-        return {"varcov": said}
-    return {"varcov": said, "commit": commit_signals(config, str(HANDOFF))}
+    """Every calculator, then its commit. One that refuses does not stop the
+    next; the run fails after all of them, naming each refusal, as
+    `project-the-recent-days` does across venues."""
+    said: dict[str, str] = {}
+    refused: list[str] = []
+    for signal in CALCULATORS:
+        out = str(STAGING / f"{signal}.arrow")
+        try:
+            said[signal] = compute(config, signal, str(_runner.REPO / "var"), out)
+            if not said[signal].startswith("nothing to do"):
+                said[f"{signal} commit"] = commit_signals(config, out)
+        except _runner.Refused as refusal:
+            refused.append(f"{signal}: {refusal}")
+    if refused:
+        raise _runner.Broken("\n".join(refused))
+    return said
