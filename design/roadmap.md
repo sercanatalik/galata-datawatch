@@ -936,6 +936,15 @@ its R², and the queue imbalance, time-weighted. For the hour to 18:00 the
 book's flow explained 35–65% of the 10-s moves and the trades' 2–18%, as in
 equities (Cont et al. 2014) rather than on BitMEX in 2017 (Silantyev 2019).
 
+**The realized moments — 2026-09-28** (`derive-the-moments`). `galata-signals
+moments`, each closed UTC day, per instrument, from 5-minute log returns:
+Amaya, Christoffersen, Jacobs and Vasquez's (2015) realized volatility,
+skewness and kurtosis (galata-research `timeseries.realized_moments`), and
+their 7-day means. N counts only the returns there, so a session instrument's
+closed hours and reopening jump do not enter. For Sunday 2026-09-27: crypto
+skew −0.2 to −0.6, XYZ100 −3.95 with a kurtosis of 45 while its oracle
+followed the venue's own book, GOLD absent with 31 whole bars.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
