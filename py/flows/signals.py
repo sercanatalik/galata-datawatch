@@ -1,7 +1,7 @@
 """Derive the market-data signals. Every 30 minutes, at :15 and :45.
 
 **Two tools, and no figure here** (design/roadmap.md, Tier 16). Each
-calculator — ``galata-signals varcov``, then ``galata-signals carry``
+calculator — ``galata-signals varcov``, ``carry`` and ``jumps``, in that order
 (``py/signals``) — reads the tape through galata-research and writes one run's
 rows as an Arrow IPC file; the commit,
 ``galata-signals-commit``, checks them against the dataset's schema and writes
@@ -30,7 +30,7 @@ SCHEDULE = Cron("15,45 * * * *", timezone="UTC")
 # The calculators, in order, each with its own hand-off inside the record's
 # root. A commit removes its hand-off; a commit that failed leaves it, and that
 # calculator's next run writes over it.
-CALCULATORS = ("varcov", "carry")
+CALCULATORS = ("varcov", "carry", "jumps")
 STAGING = _runner.REPO / "var" / "signals-staging"
 HANDOFF = STAGING / "varcov.arrow"
 # The declared horizons, models and baselines: a committed file, named here

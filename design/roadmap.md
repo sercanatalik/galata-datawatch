@@ -889,6 +889,20 @@ settled hour. On its first run every settled figure was absent ("covers 0 of
 is off (todo P1), so the signal states that the walk is off. The flow runs
 `varcov` then `carry`, and one refusal does not stop the other.
 
+**Jumps — 2026-09-28** (`derive-the-jumps`). `galata-signals jumps`, at each
+new 5m close, per instrument:
+- the last bar's Lee–Mykland statistic and flag (`gr.jumps`, K = 270, Gumbel
+  α = 1%, hour-of-day periodicity fitted before the window);
+- over 24 hours, the flagged bars by sign, Huang and Tauchen's jump share with
+  its ratio z, and the signed jump variance shares;
+- a fixed-parameter Hawkes intensity (τ 6 h) by sign.
+
+On the record (5m from 1m, 6 days of periodicity fit) it flags **4 to 8 bars a
+day** per instrument. The crypto literature finds about one jump a week at the
+daily level (Scaillet et al. 2020), and finds a 1% rule permissive. Read the
+counts as flags, not as jump days; FDR is the alternative when that matters.
+GOLD's 24-hour figures are absent: 121 traded 5m bars a day, under 259.
+
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
