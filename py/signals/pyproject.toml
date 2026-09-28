@@ -41,7 +41,7 @@ build-backend = "hatchling.build"
 packages = ["_src/galata_signals"]
 
 [tool.uv.sources]
-galata-research = { git = "file:///Users/sercan/codebase/trading-works/galata-research", rev = "829dbb3f7068e280b2fc06936f6b6bb9d45ac7d1" }
+galata-research = { git = "file:///Users/sercan/codebase/trading-works/galata-research", rev = "e61015264dca7435d03d689590551f27aa4876a0" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

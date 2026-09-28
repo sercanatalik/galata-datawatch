@@ -376,7 +376,7 @@ whose flows only call the release binaries as subprocesses.
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
-| `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity` and `basis`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
+| `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis` and `flow`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
@@ -405,6 +405,9 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   and touch depth, the effective spread and 5 s impact, and Amihud.
   `galata-signals basis` measures each hour's premium over the oracle
   (time-weighted), mark against oracle and the open interest's change.
+  `galata-signals flow` measures who pushed the price: order-flow imbalance
+  at the top of the book and its fit to the 10-s returns, the trade and queue
+  imbalances.
   The fitted horizons (5m, 1h, 4h) declare constant correlation (CCC), the
   operator's choice, with the evidence in `signals.toml`. Each also writes
   `constancy`, Engle and Sheppard's test that its correlation has stayed

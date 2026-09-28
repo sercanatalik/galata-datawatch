@@ -19,6 +19,13 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **The order flow every hour** (`galata-signals flow`, Tier 16). Per
+  instrument: Cont, Kukanov and Stoikov's order-flow imbalance over 10-s
+  buckets, normalised by depth, with its price-impact slope and R²; the
+  trade imbalance by aggressor and its R²; and the time-weighted queue
+  imbalance with its share beyond ±0.5. galata-research gains
+  `liquidity.ofi` and `liquidity.impact`. `derive-the-signals` runs it after
+  `basis`.
 - **The basis every hour** (`galata-signals basis`, Tier 16). From the tape's
   marks, per instrument: the venue's premium, time-weighted and winsorised,
   with its median; mark against oracle in bps; the hour's open-interest log
