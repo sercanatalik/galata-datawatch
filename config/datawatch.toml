@@ -185,6 +185,10 @@ instruments = [
 #   # on overlapping 30-day windows, so 0.001, not 0.05: about one false
 #   # episode in years rather than one a month per horizon.
 #   max_constancy_p = 0.001
+#   # Report the sequential correlation monitor's alarms (Wied-Galeano, per
+#   # calendar epoch). Its false alarms are bounded where it is computed
+#   # (alpha 0.05 per epoch per horizon), so this is a switch, not a number.
+#   monitor_alarms = true
 #
 # With no block it still reports a ticker that became a directory, because that
 # is not a matter of degree. It watches THE RECORD, not the scheduler: a

@@ -367,7 +367,12 @@ def monitor_rows(hz: Horizon, f, asof: int, params: dict, span: tuple, run: Run)
         found = gr.models.corr.monitor(window.select(f.tickers).to_numpy(), m, T=MONITOR_T, gamma=MONITOR_GAMMA, alpha=MONITOR_ALPHA, tickers=f.tickers)
     except Refused as why:
         return [_row(base, measure, EVERYONE, None, None, str(why), asof, span) for measure in MONITOR]
-    base = {**base, "params": json.dumps({**json.loads(base["params"]), "k": found["k"], "critical": found["critical"], "first": found["first"], "pair": found["pair"]}, sort_keys=True)}
+    # The monitored bar an alarm dates the change to: row m + k̂ of the window, by its close.
+    change_at = None
+    if found["change"] is not None:
+        change_at = datetime.fromtimestamp(window["close"][m + found["change"] - 1] / 1e6, tz=UTC).isoformat()
+    said = {"k": found["k"], "critical": found["critical"], "first": found["first"], "pair": found["pair"], "change": found["change"], "change_at": change_at}
+    base = {**base, "params": json.dumps({**json.loads(base["params"]), **said}, sort_keys=True)}
     rows = [
         _row(base, "wied_galeano_ratio", EVERYONE, None, found["ratio"], None, asof, span),
         _row(base, "wied_galeano_alarm", EVERYONE, None, 1.0 if found["alarm"] else 0.0, None, asof, span),

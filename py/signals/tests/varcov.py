@@ -219,6 +219,7 @@ def a_fitted_horizon_is_monitored_over_its_epoch(served, tmp_path, monkeypatch):
     params = json.loads(universe["wied_galeano_ratio"]["params"])
     assert params["m"] == 600 and params["epoch_days"] == 100 and 0 < params["k"] <= 900
     assert (params["alpha"], params["gamma"], params["T"]) == (0.05, 0.25, 1.5)
+    assert (params["change_at"] is None) == (params["change"] is None) == (universe["wied_galeano_alarm"]["value"] == 0.0)
 
 
 def a_short_baseline_is_an_absent_monitor(served, tmp_path, monkeypatch):

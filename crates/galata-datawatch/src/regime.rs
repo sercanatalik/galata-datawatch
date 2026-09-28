@@ -15,6 +15,12 @@
 //! (`[watch] max_constancy_p`, no default; 0.001 suggested). The second window
 //! removes a single-bar blip; the bound does the rest. The watch keeps no
 //! state, so a flag is reported every hour it holds, as every finding is.
+//!
+//! **And the sequential monitor's alarm** (`monitor`, Wied and Galeano 2013),
+//! when `[watch] monitor_alarms` is true: the newest `wied_galeano_alarm` of a
+//! horizon, raised. The monitor bounds its own false alarms per calendar epoch,
+//! so nothing is repeated or thresholded here; its α is declared where it is
+//! computed. The finding names the pair and the bar the change is dated to.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -138,6 +144,135 @@ fn rows(batch: &RecordBatch) -> Vec<Stored> {
         .collect()
 }
 
+/// Each horizon whose newest `monitor` alarm is raised.
+pub fn alarms(tape: &Path, now_micros: i64) -> Vec<Finding> {
+    let at = tape.join(format!("kind={}", galata_wire::Kind::Signals));
+    judge_alarms(&stored_alarms(tape, now_micros), &at)
+}
+
+/// One stored alarm: horizon, asof, computed, value, params.
+type Alarm = (String, i64, i64, Option<f64>, String);
+
+fn judge_alarms(rows: &[Alarm], at: &Path) -> Vec<Finding> {
+    let mut newest: BTreeMap<&str, &Alarm> = BTreeMap::new();
+    for row in rows {
+        let key = (row.1, row.2);
+        match newest.get(row.0.as_str()) {
+            Some(held) if (held.1, held.2) >= key => {}
+            _ => {
+                newest.insert(row.0.as_str(), row);
+            }
+        }
+    }
+    let mut findings = Vec::new();
+    for (horizon, (_, _, _, value, params)) in newest {
+        if *value != Some(1.0) {
+            continue;
+        }
+        let p: serde_json::Value = serde_json::from_str(params).unwrap_or_default();
+        let pair = p["pair"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_else(|| "?".into());
+        let since = p["change_at"].as_str().unwrap_or("an undated bar");
+        let epoch = p["epoch_start"].as_str().unwrap_or("?");
+        findings.push(Finding {
+            observed: format!(
+                "{horizon}: the sequential monitor alarmed on {pair}, its correlation changed \
+                 around {since} (Wied–Galeano, epoch from {epoch}, α {})",
+                p["alpha"]
+            ),
+            expected: "no alarm in the epoch (monitor_alarms)".into(),
+            at: at.to_path_buf(),
+        });
+    }
+    findings
+}
+
+fn stored_alarms(tape: &Path, now_micros: i64) -> Vec<Alarm> {
+    let root = tape.join(format!("kind={}", galata_wire::Kind::Signals));
+    let oldest = crate::calendar::date_of(now_micros - LOOKBACK_DAYS * DAY_MICROS);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Some(date) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.strip_prefix("date="))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if date < oldest {
+            continue;
+        }
+        for (_, path) in galata_segments::list_segments(&entry.path()) {
+            let Ok(batches) = galata_segments::read_segment(&path) else {
+                continue;
+            };
+            for batch in &batches {
+                let text = |name: &str| {
+                    batch
+                        .column_by_name(name)
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray>().cloned())
+                };
+                let int = |name: &str| {
+                    batch
+                        .column_by_name(name)
+                        .and_then(|c| c.as_any().downcast_ref::<Int64Array>().cloned())
+                };
+                let value = batch
+                    .column_by_name("value")
+                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>().cloned());
+                let (
+                    Some(signal),
+                    Some(measure),
+                    Some(ti),
+                    Some(horizon),
+                    Some(value),
+                    Some(asof),
+                    Some(computed),
+                    Some(params),
+                ) = (
+                    text("signal"),
+                    text("measure"),
+                    text("ticker_i"),
+                    text("horizon"),
+                    value,
+                    int("asof_micros"),
+                    int("computed_micros"),
+                    text("params"),
+                )
+                else {
+                    continue;
+                };
+                for i in 0..batch.num_rows() {
+                    if signal.value(i) == "monitor"
+                        && measure.value(i) == "wied_galeano_alarm"
+                        && ti.value(i) == "*"
+                    {
+                        out.push((
+                            horizon.value(i).to_string(),
+                            asof.value(i),
+                            computed.value(i),
+                            (!value.is_null(i)).then(|| value.value(i)),
+                            params.value(i).to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +311,48 @@ mod tests {
         again.2 += 1;
         let rows = [p("4h", 1, Some(0.0001)), p("4h", 2, Some(0.0001)), again];
         assert!(judge(&rows, 0.001, Path::new("t")).is_empty());
+    }
+
+    fn alarm(horizon: &str, asof: i64, value: f64) -> Alarm {
+        let params = r#"{"alpha":0.05,"change_at":"2026-09-26T14:05:00+00:00","epoch_start":"2026-09-24T00:00:00+00:00","pair":["BTC","GOLD"]}"#;
+        (
+            horizon.to_string(),
+            asof * H,
+            asof * H + 1,
+            Some(value),
+            params.to_string(),
+        )
+    }
+
+    #[test]
+    fn a_raised_alarm_names_its_pair_and_its_date() {
+        let found = judge_alarms(
+            &[
+                alarm("5m", 1, 0.0),
+                alarm("5m", 2, 1.0),
+                alarm("4h", 2, 0.0),
+            ],
+            Path::new("t"),
+        );
+        assert_eq!(found.len(), 1);
+        let said = found[0].to_string();
+        for part in [
+            "5m",
+            "BTC|GOLD",
+            "2026-09-26T14:05",
+            "epoch from 2026-09-24",
+            "α 0.05",
+        ] {
+            assert!(said.contains(part), "{part} missing from: {said}");
+        }
+    }
+
+    #[test]
+    fn only_the_newest_alarm_counts() {
+        // Raised in an old run, clear in the newest: a new epoch started.
+        assert!(
+            judge_alarms(&[alarm("1h", 1, 1.0), alarm("1h", 2, 0.0)], Path::new("t")).is_empty()
+        );
     }
 
     #[test]
