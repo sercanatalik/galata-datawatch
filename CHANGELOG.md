@@ -52,6 +52,13 @@ exists so the four above take no vault dependency.
   - Measured on the record on 2026-09-28: 216 rows (6 horizons × 21
     covariances and 15 correlations) in about 100 s, most of it reading 1m
     candles.
+- **Signals derived from the covariance matrix**, in the same run and at the
+  same asof: `beta` to BTC and its idiosyncratic share, `absorption` (n = 1,
+  on Σ and on R), `surprise` (the last bar against the Σ forecast before it:
+  Mahalanobis, its χ² percentile, magnitude and correlation surprise), and
+  historical `turbulence`. A second one-origin walk at the previous close
+  supplies Σ_{t|t−1}, and the stored `varcov` rows are unchanged by it
+  (pinned by a test).
 
 ### Fixed
 

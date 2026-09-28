@@ -17,6 +17,8 @@ from galata_signals import __main__ as cli
 from galata_signals import bars as bars_mod
 from galata_signals import schema, varcov
 
+import galata_research as gr
+
 T0 = datetime(2026, 9, 1, tzinfo=UTC)
 FIXTURE = Path(__file__).resolve().parents[3] / "crates" / "galata-datawatch" / "tests" / "data" / "signals.arrow"
 
@@ -105,7 +107,7 @@ def the_asof_is_the_last_close(served, tmp_path):
 
 def six_instruments_make_twenty_one_covariances_and_fifteen_correlations(served, tmp_path):
     served["1h"] = _bars(tickers=("BTC", "CL", "ETH", "GOLD", "HYPE", "XYZ100"))
-    rows = varcov.compute([_ewma()], tmp_path, _run()).rows
+    rows = [r for r in varcov.compute([_ewma()], tmp_path, _run()).rows if r["signal"] == "varcov"]
     cov = [r for r in rows if r["measure"] == "covariance"]
     cor = [r for r in rows if r["measure"] == "correlation"]
     assert (len(cov), len(cor)) == (21, 15)
@@ -137,7 +139,7 @@ def only_the_moved_horizons_are_written(served, tmp_path):
 def a_thin_sample_is_an_absent_row(served, tmp_path):
     served["4h"] = _bars(n=265)
     hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "dcc"})
-    rows = varcov.compute([hz], tmp_path, _run()).rows
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "varcov"]
     assert len(rows) == 6 + 3  # three instruments: six pairs i ≤ j, three i < j
     assert all(r["value"] is None for r in rows)
     assert all("264" in r["absent"] and "500" in r["absent"] for r in rows), rows[0]["absent"]
@@ -146,7 +148,7 @@ def a_thin_sample_is_an_absent_row(served, tmp_path):
 def a_fitted_horizon_states_its_parameters(served, tmp_path):
     served["1h"] = _bars(n=700)
     hz = varcov.Horizon.declared("1h", {"bars": "1h", "model": "garch", "dist": "normal", "corr": "dcc"})
-    rows = varcov.compute([hz], tmp_path, _run()).rows
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "varcov"]
     params = json.loads(rows[0]["params"])
     assert rows[0]["model"] == "garch-normal/dcc" and rows[0]["fitted"]
     assert 0 <= params["a"] and params["a"] + params["b"] < 1
@@ -177,3 +179,39 @@ def the_committed_fixture_is_the_schema(served, tmp_path):
 def a_value_and_a_reason_together_are_refused(tmp_path):
     with pytest.raises(ValueError, match="exactly one"):
         schema.write([{"horizon": "1h", "measure": "covariance", "ticker_i": "BTC", "ticker_j": "BTC", "value": 1.0, "absent": "x"}], tmp_path / "x.arrow")
+
+
+# ── derived from the matrix ─────────────────────────────────────────────────
+
+
+def a_run_writes_every_derived_signal(served, tmp_path):
+    served["1h"] = _bars()
+    rows = varcov.compute([_ewma()], tmp_path, _run()).rows
+    measures = {(r["signal"], r["measure"]) for r in rows}
+    assert {("beta", "beta"), ("beta", "idiosyncratic_share"), ("absorption", "covariance_ar"), ("absorption", "correlation_ar"),
+            ("surprise", "mahalanobis"), ("surprise", "chi2_percentile"), ("surprise", "magnitude_surprise"),
+            ("surprise", "correlation_surprise"), ("turbulence", "turbulence"), ("turbulence", "percentile")} <= measures  # fmt: skip
+    assert {r["asof_micros"] for r in rows} == {varcov.micros(served["1h"]["close_ts"].max())}
+    betas = [r for r in rows if r["measure"] == "beta"]
+    assert {r["ticker_i"] for r in betas} == {"ETH", "GOLD"} and {r["ticker_j"] for r in betas} == {"BTC"}
+    schema.write(rows, tmp_path / "all.arrow")  # every row is a value or a reason, in the schema
+
+
+def the_stored_sigma_is_unchanged_by_the_derived_figures(served, tmp_path):
+    served["1h"] = _bars(n=700)
+    hz = varcov.Horizon.declared("1h", {"bars": "1h", "model": "garch", "dist": "normal", "corr": "dcc"})
+    with_derived = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "varcov"]
+    returns = gr.timeseries.returns(served["1h"], kind="log")
+    alone = varcov.present(hz, varcov.walk(hz, returns, served["1h"]["close_ts"].max()), _run())
+    key = lambda r: (r["measure"], r["ticker_i"], r["ticker_j"])  # noqa: E731
+    assert sorted(with_derived, key=key) == sorted(alone, key=key)
+
+
+def an_absent_horizon_is_absent_everywhere(served, tmp_path):
+    served["4h"] = _bars(n=265)
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "dcc"})
+    rows = varcov.compute([hz], tmp_path, _run()).rows
+    model_rows = [r for r in rows if r["signal"] in ("varcov", "beta", "absorption", "surprise")]
+    assert model_rows and all(r["value"] is None and "500" in r["absent"] for r in model_rows)
+    # Turbulence needs no model: it is written from the sample alone.
+    assert all(r["value"] is not None for r in rows if r["signal"] == "turbulence")

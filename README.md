@@ -394,6 +394,8 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   through `galata_datawatch::signals`. Each horizon's model is declared in
   `py/signals/signals.toml`. A row is appended only when a bar of its width
   has closed, so a figure is stale when `now > asof + width + 30 min`.
+  The same run writes `beta` (to BTC), `absorption`, `surprise` (the last bar
+  against the Σ forecast before it) and `turbulence`, all from the same fit.
 
 - **The lane has its own cereyan home.** `~/.cereyan` is shared with every
   other cereyan project on the machine, and a server started there would

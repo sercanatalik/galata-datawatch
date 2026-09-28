@@ -859,6 +859,21 @@ appended when its bar closes, so a figure is stale when
 old is current. First run on the record: 216 rows in about 100 s. **Still to
 build:** the tower's reader.
 
+**Derived from the matrix — 2026-09-28** (`derive-from-the-matrix`). Each
+run also writes, from the same fit and at the same asof:
+- `beta` to BTC with its idiosyncratic share (Engle 2016, Eq. 3, one regressor);
+- `absorption` with n = 1 (Kritzman et al. 2011: n ≈ N/5), on Σ as the paper
+  does and on R, which on this mixed universe measures co-movement rather
+  than which instrument is most volatile;
+- `surprise`: the last bar against the Σ forecast before it (Mahalanobis,
+  its χ²₆ percentile, and Kinlaw and Turkington's magnitude and correlation
+  surprise);
+- `turbulence`: Kritzman and Li's historical form, ranked in its own sample.
+
+First run on the record: 324 rows. At 1d, β against BTC is ETH 1.05,
+HYPE 0.99, XYZ100 0.25, GOLD 0.19 and CL −0.38, and the correlation
+absorption ratio is 0.61.
+
 **Still open:**
 - the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
