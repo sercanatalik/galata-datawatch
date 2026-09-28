@@ -17,6 +17,15 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Changed
+
+- **Constant correlation at 5m, 1h and 4h** (`declare-constant-correlation`,
+  the operator's choice). `varcov` accepts `corr = "ccc"` (Bollerslev 1990: R
+  is the refit window's correlation of the standardised returns, a = b = 0),
+  and `signals.toml` declares it for the fitted horizons, with the registered
+  and the six-instrument evidence in the comment. Rows are labelled
+  `garch-t/ccc` and `gjr-t/ccc`. Stored DCC rows are unchanged.
+
 ### Added
 
 - **The fitted matrix is reconciled against `derive`** (Tier 16's

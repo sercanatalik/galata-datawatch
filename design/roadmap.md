@@ -919,9 +919,16 @@ effective 1.2–6.3 bps across the six, BTC touch depth $125k median and $242 at
 the 10th percentile. That completes the signals this tier listed.
 
 **Still open:**
-- the default model for fitted horizons the study never decided (1h, 30m,
+- ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
-  which is the study's own baseline;
+  which is the study's own baseline;~~ **Decided 2026-09-28 by the operator**
+  (`declare-constant-correlation`). The margins are as proposed. The correlation
+  is **constant (CCC)** at 5m, 1h and 4h. The registered study preferred DCC
+  on BTC/ETH/HYPE at 4h (Holm p 1e-6). On the six declared instruments,
+  measured descriptively, no horizon distinguishes the two: QLIKE DCC − CCC is
+  +0.155 at 4h (p 0.34), +0.020 at 1h (p 0.74) and −0.030 at 5m (p 0.30).
+  The cost is a correlation that cannot rise in a crisis until the next refit;
+  `surprise` and `turbulence` still register such an episode;
 - the next signals. From the matrix almost free: β to BTC, the absorption
   ratio, turbulence. Independent of it: funding carry, jump flags,
   liquidity. Each gets its own change once the store exists. **All built**

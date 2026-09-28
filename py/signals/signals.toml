@@ -3,9 +3,23 @@
 # EWMA is declared, never fallen back to: a fitted horizon whose sample is
 # too short is a refusal, written as absent rows.
 #
-# `model` is a gr.models.vol step-1 model; `corr` is "dcc", "cdcc" or "ewma"
-# (RiskMetrics, nothing fitted, `lam`). `deseasonalise` divides returns by
-# an hour-of-day factor fitted through the last close.
+# `model` is a gr.models.vol step-1 model; `corr` is "dcc", "cdcc", "ccc" or
+# "ewma" (RiskMetrics, nothing fitted, `lam`). `deseasonalise` divides returns
+# by an hour-of-day factor fitted through the last close.
+#
+# CORRELATION: CONSTANT (CCC, Bollerslev 1990), CHOSEN BY THE OPERATOR ON
+# 2026-09-28 for 5m, 1h and 4h. R is the refit window's correlation of the
+# margins' standardised returns (Q-bar normalised), a = b = 0.
+#   - For DCC: the registered study (galata-research,
+#     planning/preregistered/correlation-models.md) found DCC beats CCC on R
+#     alone for BTC/ETH/HYPE at 4h (Holm p 1e-6, 1,985 origins).
+#   - For CCC: on the six instruments declared here, measured descriptively on
+#     a copy of the record, one-step multivariate QLIKE, DCC minus CCC:
+#     4h +0.155 (p 0.34, 787 origins), 1h +0.020 (p 0.74, 2,531),
+#     5m -0.030 (p 0.30, 642). No horizon distinguishes them.
+#   - The cost: R cannot rise in a crisis until the next run refits, which
+#     matters most for highly correlated pairs (Engle and Colacito 2006).
+#     `surprise` and `turbulence` still register such an episode.
 
 [varcov.5m]
 # From 1m bars (captured since 2026-09-20). GARCH-t: the study's baseline;
@@ -13,7 +27,7 @@
 bars = "1m"
 model = "garch"
 dist = "t"
-corr = "dcc"
+corr = "ccc"
 deseasonalise = true
 
 [varcov.30m]
@@ -28,7 +42,7 @@ lam = 0.94
 bars = "1h"
 model = "garch"
 dist = "t"
-corr = "dcc"
+corr = "ccc"
 deseasonalise = true
 
 [varcov.4h]
@@ -36,7 +50,7 @@ deseasonalise = true
 bars = "4h"
 model = "gjr"
 dist = "t"
-corr = "dcc"
+corr = "ccc"
 
 [varcov.1d]
 # CL's 265 days are under min_obs until about May 2027.

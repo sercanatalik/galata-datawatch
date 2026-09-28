@@ -56,8 +56,8 @@ class Horizon:
         unknown = set(table) - known
         if unknown:
             raise ValueError(f"varcov.{name}: unknown key(s) {', '.join(sorted(unknown))}")
-        if table.get("corr") not in ("dcc", "cdcc", "ewma"):
-            raise ValueError(f"varcov.{name}: corr must be dcc, cdcc or ewma")
+        if table.get("corr") not in ("dcc", "cdcc", "ccc", "ewma"):
+            raise ValueError(f"varcov.{name}: corr must be dcc, cdcc, ccc or ewma")
         return cls(name=name, **table)
 
     @property

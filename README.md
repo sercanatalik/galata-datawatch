@@ -403,8 +403,10 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   states the last day's jump share (Huang–Tauchen) and jump intensity.
   `galata-signals liquidity` measures each hour's time-weighted quoted spread
   and touch depth, the effective spread and 5 s impact, and Amihud.
-  A fitted horizon also stores `correlation_target`, the R̄ its DCC reverts
-  to, and `galata-watch` reconciles it against `derive`'s equal-weight ρ over
+  The fitted horizons (5m, 1h, 4h) declare constant correlation (CCC), the
+  operator's choice, with the evidence in `signals.toml`. A fitted horizon
+  also stores `correlation_target`, the R̄ its model reverts to (under CCC,
+  its correlation), and `galata-watch` reconciles it against `derive`'s equal-weight ρ over
   the same window when `[watch] max_correlation_target_gap` is declared: a
   Python defect shows up against Rust.
 
