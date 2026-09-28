@@ -403,6 +403,10 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   states the last day's jump share (Huang–Tauchen) and jump intensity.
   `galata-signals liquidity` measures each hour's time-weighted quoted spread
   and touch depth, the effective spread and 5 s impact, and Amihud.
+  A fitted horizon also stores `correlation_target`, the R̄ its DCC reverts
+  to, and `galata-watch` reconciles it against `derive`'s equal-weight ρ over
+  the same window when `[watch] max_correlation_target_gap` is declared: a
+  Python defect shows up against Rust.
 
 - **The lane has its own cereyan home.** `~/.cereyan` is shared with every
   other cereyan project on the machine, and a server started there would

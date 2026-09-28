@@ -76,6 +76,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let thresholds = Thresholds {
         max_segments_in_closed_partition: config.watch.max_segments_in_closed_partition,
         max_record_age_secs: config.watch.max_record_age_secs,
+        max_correlation_target_gap: config.watch.max_correlation_target_gap,
     };
 
     if thresholds.is_empty() {

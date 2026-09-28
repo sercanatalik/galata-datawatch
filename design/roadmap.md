@@ -924,7 +924,25 @@ the 10th percentile. That completes the signals this tier listed.
   which is the study's own baseline;
 - the next signals. From the matrix almost free: β to BTC, the absorption
   ratio, turbulence. Independent of it: funding carry, jump flags,
-  liquidity. Each gets its own change once the store exists.
+  liquidity. Each gets its own change once the store exists. **All built**
+  (see above).
+
+**The cross-check — 2026-09-28** (`check-the-correlation-target`). The table
+above decided that `derive`'s ρ checks DCC's R̄; now it does. `varcov` stores
+`correlation_target` (R̄: Q̄ normalised, or cDCC's S̃) per pair on fitted
+horizons, and `galata-watch` runs `derive` over each newest fit's window and
+reports a pair whose |atanh R̄ − atanh ρ| exceeds
+`[watch] max_correlation_target_gap`. It has no default. Measured on a copy of
+the record:
+
+| | 5m | 1h | 4h |
+|---|---|---|---|
+| returns | 1,477 | 5,064 | 1,587 |
+| worst Fisher-z gap | 0.038 (BTC\|GOLD) | 0.041 (CL\|XYZ100) | 0.076 (ETH\|HYPE) |
+
+`derive`'s ρ equals the calculator's joint-sample Pearson to within 0.002, so
+the gap is the model's reweighting, not the two codes. The config suggests 0.15.
+A swap of two pairs with similar ρ stays inside it.
 
 ---
 

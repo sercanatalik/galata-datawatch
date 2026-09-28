@@ -4,7 +4,9 @@ For each horizon in `signals.toml`: the closed bars of that width, their log
 returns, and `gr.models.corr.walk_forward` from the last close (split there,
 one origin, h = 1; every run refits on everything, so a run is stateless and
 deterministic — a fit takes about a second). Rows are the signals schema:
-`covariance` for every pair i ≤ j, `correlation` for i < j.
+`covariance` for every pair i ≤ j, `correlation` for i < j, and on a fitted
+horizon `correlation_target` for i < j: R̄, the correlation the fit reverts
+to, which `galata-watch` reconciles against `derive`'s equal-weight ρ.
 
 **Only what is new.** A horizon whose last close is no later than the newest
 `asof` already on the tape is skipped; the tape is the cursor, nothing is
@@ -190,6 +192,8 @@ def present(hz: Horizon, walked: pl.DataFrame, run: Run) -> list[dict]:
         rows.append({**common, "measure": "covariance", "value": r["covariance"]})
         if r["ticker_i"] != r["ticker_j"]:
             rows.append({**common, "measure": "correlation", "value": r["correlation"]})
+            if hz.fitted:
+                rows.append({**common, "measure": "correlation_target", "value": r["correlation_target"]})
     return rows
 
 
@@ -202,6 +206,8 @@ def absent(hz: Horizon, tickers: list[str], asof: int, reason: str, run: Run) ->
             rows.append({**common, "measure": "covariance"})
             if a != b:
                 rows.append({**common, "measure": "correlation"})
+                if hz.fitted:
+                    rows.append({**common, "measure": "correlation_target"})
     return rows
 
 

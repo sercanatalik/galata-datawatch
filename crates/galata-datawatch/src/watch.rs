@@ -58,7 +58,7 @@ impl std::fmt::Display for Finding {
 /// **No `Default` that invents a number.** Same argument as retention horizons:
 /// a default is right for one venue's cadence and wrong for the next, and a
 /// threshold nobody chose is one nobody will believe when it fires.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Thresholds {
     /// The most segments a **closed** partition may hold before compaction is
     /// overdue. `None` checks nothing.
@@ -66,12 +66,18 @@ pub struct Thresholds {
     /// How old the newest segment may be, in seconds, before the record is
     /// stale. `None` checks nothing.
     pub max_record_age_secs: Option<u64>,
+    /// How far, in Fisher z, a fitted matrix's R̄ may sit from `derive`'s
+    /// equal-weight ρ over the same window ([`crate::reconcile`]). `None`
+    /// checks nothing.
+    pub max_correlation_target_gap: Option<f64>,
 }
 
 impl Thresholds {
     /// Whether anything at all is declared.
     pub fn is_empty(&self) -> bool {
-        self.max_segments_in_closed_partition.is_none() && self.max_record_age_secs.is_none()
+        self.max_segments_in_closed_partition.is_none()
+            && self.max_record_age_secs.is_none()
+            && self.max_correlation_target_gap.is_none()
     }
 }
 
@@ -210,6 +216,13 @@ pub fn watch(
                 }
             }
         }
+    }
+
+    // The signals' fit against `derive`: a Python defect shown up by Rust.
+    if let Some(bound) = thresholds.max_correlation_target_gap {
+        report.findings.extend(crate::reconcile::reconcile(
+            tape_root, venues, bound, now_micros,
+        ));
     }
 
     report
@@ -455,6 +468,7 @@ mod tests {
         let thresholds = Thresholds {
             max_segments_in_closed_partition: None,
             max_record_age_secs: Some(30),
+            max_correlation_target_gap: None,
         };
         // Sixty seconds later: stale.
         let report = watch(
@@ -495,6 +509,7 @@ mod tests {
         let thresholds = Thresholds {
             max_segments_in_closed_partition: Some(1),
             max_record_age_secs: None,
+            max_correlation_target_gap: None,
         };
         assert!(watch(root.path(), root.path(), "2026-09-21", &thresholds, 0, &[]).is_clean());
     }
@@ -560,6 +575,7 @@ mod tests {
         Thresholds {
             max_segments_in_closed_partition: None,
             max_record_age_secs: Some(300),
+            max_correlation_target_gap: None,
         }
     }
 
