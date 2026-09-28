@@ -19,6 +19,11 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **Jump flags at every 5m close** (`galata-signals jumps`, Tier 16): the
+  last bar's Lee–Mykland statistic and flag, over 24 hours the flagged bars by
+  sign, Huang and Tauchen's jump share and its ratio z, the signed jump
+  variance shares, and a decaying jump intensity. `derive-the-signals` runs
+  `varcov`, `carry` and `jumps`.
 - **Funding carry, hourly** (`galata-signals carry`, Tier 16). It writes the
   settled carry over 24h, 7d and 30d, the excess over each dex's declared
   interest-only baseline, a 7-day z-score, positive and at-baseline shares,

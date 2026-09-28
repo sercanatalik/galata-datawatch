@@ -13,7 +13,7 @@ def no_commit_follows_nothing_new(tools, config):
     tools.exits("galata-signals", 3)
     tools.exits("galata-signals-commit", 0)
     said = derive_the_signals(str(config))
-    assert said["varcov"].startswith("nothing to do") and said["carry"].startswith("nothing to do")
+    assert all(said[s].startswith("nothing to do") for s in ("varcov", "carry", "jumps"))
     assert tools.calls("galata-signals-commit") == []
 
 
@@ -21,11 +21,11 @@ def a_written_file_is_committed(tools, config):
     tools.exits("galata-signals", 0)
     tools.exits("galata-signals-commit", 0)
     said = derive_the_signals(str(config))
-    assert set(said) == {"varcov", "varcov commit", "carry", "carry commit"}
-    first, second = tools.calls("galata-signals")
+    assert set(said) == {"varcov", "varcov commit", "carry", "carry commit", "jumps", "jumps commit"}
+    first, second, third = tools.calls("galata-signals")
     commits = tools.calls("galata-signals-commit")
-    assert [first["argv"][0], second["argv"][0]] == ["varcov", "carry"]
-    assert [c["argv"][0] for c in commits] == [str(signals.STAGING / "varcov.arrow"), str(signals.STAGING / "carry.arrow")]
+    assert [first["argv"][0], second["argv"][0], third["argv"][0]] == ["varcov", "carry", "jumps"]
+    assert [c["argv"][0] for c in commits] == [str(signals.STAGING / f"{s}.arrow") for s in ("varcov", "carry", "jumps")]
     assert first["argv"][first["argv"].index("--out") + 1] == str(signals.HANDOFF)
     assert first["argv"][-1] == str(signals.DECLARED)
     commit = commits[0]
@@ -41,12 +41,11 @@ def a_refused_commit_fails_the_run(tools, config):
 
 
 def a_broken_varcov_does_not_cost_the_carry(tools, config):
-    tools.exits("galata-signals", 1, 0)  # varcov broken, carry fine
+    tools.exits("galata-signals", 1, 0)  # varcov broken, the rest fine
     tools.exits("galata-signals-commit", 0)
     with pytest.raises(_runner.Broken, match="varcov: galata-signals exited 1"):
         derive_the_signals(str(config))
-    (commit,) = tools.calls("galata-signals-commit")
-    assert commit["argv"][0] == str(signals.STAGING / "carry.arrow")
+    assert [c["argv"][0] for c in tools.calls("galata-signals-commit")] == [str(signals.STAGING / f"{s}.arrow") for s in ("carry", "jumps")]
 
 
 def a_missing_calculator_names_its_sync(tools, config, tmp_path, monkeypatch):
