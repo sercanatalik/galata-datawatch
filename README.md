@@ -560,9 +560,10 @@ each tier, is [`design/roadmap.md`](design/roadmap.md).
 
 Also in progress or planned here:
 
-- **`replace-by-source`** (in progress). `galata-tape-rebuild --replace` must
-  never delete tape rows it did not rebuild, even when history walked at boot
-  lands in a day that another receipt day also fed.
+- **`pace-by-the-venue-weight`** (planned, blocks Tier 10). The walk paces
+  Hyperliquid by requests where the venue counts weight. It changes the
+  public `Budget` type, so it lands before the publish. See
+  [`planning/pace-by-the-venue-weight.md`](planning/pace-by-the-venue-weight.md).
 - **`bound-the-replay`** (planned). A view of the tape *as it stood at time
   T*, so a replay host cannot see data that arrived after its simulated
   clock. galata-research's loaders do not need it: they bound on venue time
