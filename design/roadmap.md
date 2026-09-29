@@ -968,6 +968,17 @@ Over 13 whole hours every instrument peaked one block (−100 ms) *ahead* of
 BTC with an LLR below 1: at the resolution limit, unexplained, and flagged
 `within_one_block`. The lead that matters, Binance over Hyperliquid, needs a
 second venue.
+**Explained 2026-09-29** (`resolve-the-block`). About 80% of each
+instrument's update stamps are one of BTC's, and with tied stamps
+Hayashi–Yoshida at exactly 0 pairs each interval only with its twin, while
+any shift also takes in the adjacent block: ETH's ρ was 0.24 at 0 and 0.40
+at −25 ms. A simulation with no lead on a shared 84 ms grid is flat within a
+block. With 0 and then ±100 ms on the grid, the peak fell to −100 ms: the
+notch. The grid now holds ±1 ms. A peak within a block, or beyond one by less
+than 2/√n over the block's best, reads 0 (flagged `within_one_block` or
+`indistinct`). `rho_btc_first`, `rho_other_first` and `block_asymmetry`
+state the one-block ordering. On two hours of the record every instrument
+reads 0, and the asymmetry is −0.03 to +0.01.
 
 **The activity — 2026-09-29** (`derive-the-activity`). `galata-signals
 activity`, each whole hour, per instrument: notional, trade count and average

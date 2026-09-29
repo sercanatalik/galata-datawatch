@@ -59,6 +59,38 @@ def a_lead_within_a_block_is_flagged(record, tmp_path):
     assert params["within_one_block"] is True
 
 
+def _blocks(delay_blocks: int, seed=5, block_ms=84):
+    """Both mids stamped on one shared block grid, as the venue stamps them; the follower shows BTC's price `delay_blocks` later."""
+    rng = random.Random(seed)
+    n = 3_600_000 // block_ms
+    path = [0.0]
+    for _ in range(n):
+        path.append(path[-1] + rng.gauss(0, 2e-5))
+    rows = []
+    for ticker, p_quote, delay, scale in (("BTC", 0.9, 0, 100_000.0), ("ETH", 0.6, delay_blocks, 3_000.0)):
+        for i in range(n):
+            if rng.random() < p_quote:
+                mid = scale * pow(2.718281828, path[max(0, i - delay)])
+                rows.append({"venue": "hyperliquid", "ticker": ticker, "ts": START + timedelta(milliseconds=i * block_ms), "bid_px": mid * 0.9999, "ask_px": mid * 1.0001, "bid_sz": 1.0, "ask_sz": 1.0})
+    return pl.DataFrame(rows, schema=QSCHEMA)
+
+
+def no_lead_on_a_shared_block_grid_reads_as_none(record, tmp_path):
+    # Ties at a shift of 0 notch the correlation; the next grid point is not a lead.
+    record["quotes"] = _blocks(0)
+    got = _got(tmp_path)
+    assert got["lead_ms"]["value"] == 0 and json.loads(got["lead_ms"]["params"])["within_one_block"] is True
+    assert abs(got["block_asymmetry"]["value"]) < 0.05
+    assert got["rho_lead"]["value"] > got["rho_0"]["value"] - 1e-9
+
+
+def a_follower_one_block_behind_shows_in_the_asymmetry(record, tmp_path):
+    record["quotes"] = _blocks(1)
+    got = _got(tmp_path)
+    assert got["lead_ms"]["value"] == 0  # one block is under the grid's 100 ms
+    assert got["block_asymmetry"]["value"] > 0.3 and got["rho_btc_first"]["value"] > got["rho_other_first"]["value"]
+
+
 def a_thin_hour_is_absent(record, tmp_path):
     record["quotes"] = _book(2.0, every_ms=(200, 20_000))
     got = _got(tmp_path)
