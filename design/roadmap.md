@@ -961,6 +961,14 @@ from 40 minutes (`basis` absent every hour since the deploy). They now bound
 their asof by the tape's newest receipt time, so the :45 run computes the hour
 whole.
 
+**The lead-lag — 2026-09-29** (`derive-the-lead-lag`). `galata-signals
+leadlag`, each whole hour, BTC against each other instrument: the shifted
+Hayashi–Yoshida correlation of mid prices (`gr.leadlag.lead_lag`) to ±30 s.
+Over 13 whole hours every instrument peaked one block (−100 ms) *ahead* of
+BTC with an LLR below 1: at the resolution limit, unexplained, and flagged
+`within_one_block`. The lead that matters, Binance over Hyperliquid, needs a
+second venue.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,

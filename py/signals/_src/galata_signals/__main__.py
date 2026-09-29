@@ -32,7 +32,7 @@ def code() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="galata-signals")
-    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade"])
+    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag"])
     parser.add_argument("--var", required=True, type=Path, help="the record's root, holding tape/")
     parser.add_argument("--out", required=True, type=Path, help="the Arrow IPC file to hand to galata-signals-commit")
     parser.add_argument("--config", type=Path, default=HERE / "signals.toml")
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["GALATA_VAR"] = str(args.var.resolve())
     from . import schema, varcov
 
-    from . import basis, carry, cascade, flow, jumps, liquidity, moments
+    from . import basis, carry, cascade, flow, jumps, leadlag, liquidity, moments
 
     try:
         with args.config.open("rb") as fh:
@@ -83,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
             moments.compute(tape, run)
         elif args.signal == "cascade":
             cascade.compute(declared, tape, run)
+        elif args.signal == "leadlag":
+            leadlag.compute(tape, run)
         else:
             liquidity.compute(tape, run)
     except Exception as error:  # the tool's own failure, reported as broken
