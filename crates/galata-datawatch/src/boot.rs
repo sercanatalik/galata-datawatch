@@ -354,8 +354,19 @@ pub fn boot(
             tracing::info!(pages, dir = %dir.display(), "imported a rescue through the one path");
         }
 
+        // **Only the live width before the subscription.** It resumes from
+        // the record, so it must precede the stream: a backfill must never be
+        // mistaken for coverage the record already had. The widths that ask
+        // for a stated need (`walk_candles`, a declared funding depth) never
+        // resume from the record, and at the venue's weight they are 6 to 36
+        // minutes of no quotes and no trades after every restart. They are
+        // asked as history fills once the live loop runs
+        // (`pace-by-the-venue-weight`).
+        let (live_items, history_items): (Vec<_>, Vec<_>) = walk_items
+            .into_iter()
+            .partition(|(_, interval)| interval.is_live());
         let request = WalkRequest {
-            items: walk_items,
+            items: live_items,
             share: config.capture.walk_share,
             cold_start_days: config.capture.cold_start_days,
             cap: config.capture.walk_cap,
@@ -394,11 +405,16 @@ pub fn boot(
         // the record's latest receipt and never looks behind it, so without
         // this a session lost mid-run keeps candles and funding the venue
         // would hand back missing until nobody remembers why.
-        capture.fill_with(request, move |fetch| {
+        // The fills know every width, so a settle and a gap on a declared
+        // width are filled too, as before.
+        let mut fill_request = request;
+        fill_request.items.extend(history_items.iter().copied());
+        capture.fill_with(fill_request, move |fetch| {
             let history = history.clone();
             let at = SystemClock.now_micros();
             async move { history.fetch(fetch, at).await }
         });
+        capture.fill_history(&history_items);
         // And the bars closed while running, where the operator asked: the
         // stream never sends one final, so without this nothing closes them.
         if let Some(secs) = config.capture.settle_secs {

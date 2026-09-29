@@ -316,10 +316,49 @@ impl<'a> Walk<'a> {
         self.overlap_micros
     }
 
-    /// The interval between requests, from the venue's stated budget and the
-    /// declared share. **No interval constant appears here.**
+    /// The interval after a call of weight one, from the venue's stated budget
+    /// and the declared share. **No interval constant appears here.**
     pub fn request_interval_ms(&self) -> u64 {
         self.declaration.budget.walk_interval_ms(self.walk_share)
+    }
+
+    /// What a call for `from..to` at one width is expected to weigh.
+    ///
+    /// **Expected, not received**: the rows a most-recent step spans, or a
+    /// whole page where the venue pages forward. A received count would need
+    /// the adapter to parse every page, and the only short page of a forward
+    /// walk is its last; over-counting it costs one pause.
+    pub fn expected_weight(
+        &self,
+        series: Series,
+        interval_micros: i64,
+        from_micros: i64,
+        to_micros: i64,
+    ) -> u32 {
+        let Some(paging) = self.declaration.paging(series) else {
+            return 1;
+        };
+        let rows = match paging.direction {
+            PageDirection::MostRecent if interval_micros > 0 => {
+                let span = (to_micros - from_micros).max(0);
+                u32::try_from((span + interval_micros - 1) / interval_micros).unwrap_or(u32::MAX)
+            }
+            _ => paging.max_rows_per_call,
+        };
+        paging.weight(rows.max(1))
+    }
+
+    /// The pause after a call for `from..to` at one width: its expected
+    /// weight at the declared share of the venue's stated weight a minute.
+    pub fn pause_ms(
+        &self,
+        series: Series,
+        interval_micros: i64,
+        from_micros: i64,
+        to_micros: i64,
+    ) -> u64 {
+        let weight = self.expected_weight(series, interval_micros, from_micros, to_micros);
+        self.declaration.budget.interval_ms(weight, self.walk_share)
     }
 
     /// Which series this venue serves historically. The rest stay gaps, and are
@@ -624,7 +663,7 @@ pub fn walk_items(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::venue::{Budget, ConnectionPolicy, Paging};
+    use crate::venue::{Budget, ConnectionPolicy, Paging, RequestCost};
     use std::collections::BTreeMap;
 
     const MINUTE: i64 = MICROS_PER_MINUTE;
@@ -643,7 +682,7 @@ mod tests {
                 (Series::Funding, Paging::forward_from_start(500)),
             ]),
             budget: Budget {
-                requests_per_minute: 1_200.0,
+                weight_per_minute: 1_200.0,
                 min_historical_interval_ms: 100,
             },
             connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 20 },
@@ -947,6 +986,54 @@ mod tests {
             Series::Funding,
         ]);
         assert_eq!(walkable, vec![Series::Candles, Series::Funding]);
+    }
+
+    /// Hyperliquid's own costs on the test declaration.
+    fn weighted() -> Declaration {
+        let mut d = declaration(None, Some(5_000));
+        d.paging.insert(
+            Series::Candles,
+            Paging::most_recent(5_000, Some(5_000), None).costing(RequestCost {
+                base: 20,
+                per_rows: 60,
+            }),
+        );
+        d.paging.insert(
+            Series::Funding,
+            Paging::forward_from_start(500).costing(RequestCost {
+                base: 20,
+                per_rows: 20,
+            }),
+        );
+        d
+    }
+
+    #[test]
+    fn each_call_waits_its_own_weight() {
+        let d = weighted();
+        let w = Walk::new(&d, 0.25, 7, 500);
+        // A funding page is a whole page whatever range is asked: 45 at 300
+        // a minute.
+        assert_eq!(
+            w.expected_weight(Series::Funding, MINUTE, 0, 1_000 * DAY),
+            45
+        );
+        assert_eq!(w.pause_ms(Series::Funding, MINUTE, 0, 1_000 * DAY), 9_000);
+        // A candle step spanning the venue's reach: 104.
+        assert_eq!(w.pause_ms(Series::Candles, HOUR, 0, 5_000 * HOUR), 20_800);
+    }
+
+    #[test]
+    fn a_one_bar_page_waits_less_than_a_full_one() {
+        let d = weighted();
+        let w = Walk::new(&d, 0.25, 7, 500);
+        // A settle's one-bar page weighs 21, not 104.
+        assert_eq!(w.expected_weight(Series::Candles, MINUTE, 0, MINUTE), 21);
+        assert_eq!(w.pause_ms(Series::Candles, MINUTE, 0, MINUTE), 4_200);
+        assert!(
+            w.pause_ms(Series::Candles, MINUTE, 0, MINUTE)
+                < w.pause_ms(Series::Candles, MINUTE, 0, 5_000 * MINUTE)
+        );
     }
 
     #[test]

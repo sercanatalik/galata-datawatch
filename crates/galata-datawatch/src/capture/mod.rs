@@ -33,7 +33,7 @@ pub use cursor::Pass;
 pub use import::{ImportError, ImportedPage, verified_pages};
 #[cfg(feature = "capture")]
 pub use poll::{Polls, Refusal};
-pub use run::{Capture, CaptureError, Fetch, WalkRequest, Wiring};
+pub use run::{Capture, CaptureError, Fetch, FetchFailure, FetchResult, WalkRequest, Wiring};
 pub use session::{Act, Session};
 pub use status::{Connection, PairState, PairStatus, Status, StatusFile};
 pub use subscriptions::{Held, Outcome};

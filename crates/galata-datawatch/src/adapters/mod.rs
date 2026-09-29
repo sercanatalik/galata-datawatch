@@ -576,16 +576,20 @@ impl History {
     /// One historical request, returning the bytes **and the moment they
     /// arrived** — the payload the one path then archives verbatim.
     ///
-    /// The error is a `String` because the walk does not act on its variant: a
-    /// failed fetch is logged and the walk continues, and the outcome reports
-    /// what was reached either way.
-    pub async fn fetch(&self, request: Fetch, now_micros: i64) -> Result<Payload, String> {
+    /// The error says only what the walk acts on: whether the venue refused to
+    /// pace, and how long it asked for. Anything else is logged, and the
+    /// outcome reports what was reached.
+    pub async fn fetch(
+        &self,
+        request: Fetch,
+        now_micros: i64,
+    ) -> Result<Payload, crate::capture::FetchFailure> {
         // See `for_config`: with no venue feature on, `History` has no
         // variants and a match through `&History` still needs an arm.
         #[cfg(not(feature = "hyperliquid"))]
         {
             let _ = (request, now_micros);
-            return Err("this build compiles in no venue with a history walk".to_string());
+            return Err("this build compiles in no venue with a history walk".into());
         }
         #[cfg(feature = "hyperliquid")]
         match self {
@@ -593,10 +597,10 @@ impl History {
             History::Hyperliquid(client) => match request.series {
                 Series::Candles => {
                     let interval = request.interval_label.ok_or_else(|| {
-                        format!(
+                        crate::capture::FetchFailure::from(format!(
                             "the venue serves no bar of {} micros",
                             request.interval_micros
-                        )
+                        ))
                     })?;
                     client
                         .candles(
@@ -607,7 +611,7 @@ impl History {
                             now_micros,
                         )
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.into_failure())
                 }
                 Series::Funding => client
                     .funding(
@@ -617,7 +621,7 @@ impl History {
                         now_micros,
                     )
                     .await
-                    .map_err(|e| e.to_string()),
+                    .map_err(|e| e.into_failure()),
                 // The walk never asks for one the declaration does not list as
                 // historical, so reaching this is a defect rather than a venue
                 // refusal — and it says so instead of returning empty bytes
@@ -625,7 +629,8 @@ impl History {
                 other => Err(format!(
                     "{} is not served historically; the walk should not have asked",
                     other.as_str()
-                )),
+                )
+                .into()),
             },
         }
     }

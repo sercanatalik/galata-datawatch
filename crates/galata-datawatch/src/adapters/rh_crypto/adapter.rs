@@ -79,7 +79,7 @@ impl RhCrypto {
                 historical: Vec::new(),
                 paging: BTreeMap::from([(Series::Quotes, Paging::forward_from_start(1))]),
                 budget: Budget {
-                    requests_per_minute: 60.0 / f64::from(config.poll_secs.max(1)),
+                    weight_per_minute: 60.0 / f64::from(config.poll_secs.max(1)),
                     min_historical_interval_ms: u64::from(config.poll_secs) * 1_000,
                 },
                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 0 },

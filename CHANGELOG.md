@@ -17,6 +17,22 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: the walk paces by the venue's weight** (`pace-by-the-venue-weight`).
+  `Budget.requests_per_minute` is now `Budget.weight_per_minute`, and each
+  `Paging` states a `RequestCost { base, per_rows }` (`Paging::costing`); a
+  venue that counts requests keeps the default weight of one. Hyperliquid
+  declares candles 20 + 1 per 60 bars and funding 20 + 1 per 20 rows, from its
+  docs; it had been paced 20–45× over its 1,200 a minute. Each call waits its
+  own expected weight at the share. A 429 is a wait (`Retry-After`, else a
+  minute), then the same page, at most three times at boot; a throttled fill
+  holds every fill. `FetchResult`'s error is now `FetchFailure`.
+- **Only the live width is walked before the subscription.** `walk_candles`
+  and `walk_funding_days` are asked as history fills inside the live loop
+  (`Capture::fill_history`), capped by `walk_cap` pages each and logged on
+  completion, so a restart's hole no longer grows with the declared depth.
+  A history fill that reaches the cap logs an error and capture continues.
+
 ### Added
 - **The lead-lag's one-block peak explained and removed** (`resolve-the-block`).
   With every instrument stamped on the venue's shared block times,

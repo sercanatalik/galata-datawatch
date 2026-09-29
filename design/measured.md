@@ -4335,3 +4335,37 @@ tape (9,484,087 payloads → 13,232,449 rows in 10,047 segments):
 | after | 41 s | 42 s | 0 |
 
 What remains, 41 s, is reading and normalising four receipt days of the archive.
+
+## How Hyperliquid's limiter answers a burst — 2026-09-29
+
+`pace-by-the-venue-weight`. The venue states *"an aggregated weight limit of
+1200 per minute"* per IP, `fundingHistory` 20 plus one per 20 rows, and
+nothing about a window's shape, a burst or what a 429 carries. One probe from
+this machine's IP, beside running capture, 06:38:35Z: full `fundingHistory`
+pages for BTC from 2023-05-12, 0.1 s apart, to stop at the first 429 or at 50
+pages; then `allMids` every 5 s until a 200.
+
+```python
+# the loop, in full apart from the HTTP helper (urllib, 20 s timeout)
+for i in range(50):
+    s, h, d, dt = post({"type": "fundingHistory", "coin": "BTC",
+                        "startTime": 1683849600000 + i * 3_600_000 * 500})
+    if s != 200: print(h, d); break      # never reached
+    time.sleep(0.1)
+```
+
+| | pages | documented weight | elapsed | answer |
+|---|---|---|---|---|
+| the probe | 50 × 500 rows | 2,250 | 24.2 s | all 200 |
+| the boot walk, 2026-09-28 01:03Z (capture log) | 6 small candle + ~48 funding | ≈2,300 | ≈30 s | first 429 |
+
+- A 200 carries **no rate-limit header**: nginx, CloudFront and CORS only. No
+  429's headers have been seen. `Retry-After` is claimed by third-party pages
+  and not by the venue's.
+- The venue took **≈1.9× its stated minute inside 24 s**, and refused at about
+  the same total a day earlier. Both fit a bucket of ~1,700–1,800 above a
+  20-a-second refill, and a window near 2,300. Two points do not separate
+  them, and the probe stopped short of a 429 on purpose: legacy's rule, *the
+  number the walk needs is one it can rely on*.
+- So the walk paces at the **stated** 1,200, by each call's stated weight. The
+  burst is slack a restart's small walk may use; nothing is paced to it.

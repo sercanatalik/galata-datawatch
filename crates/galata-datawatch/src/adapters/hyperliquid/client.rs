@@ -46,6 +46,9 @@ pub enum FetchError {
         path: &'static str,
         /// What it said.
         status: u16,
+        /// Its `Retry-After`, in whole seconds, where it sent one. Hyperliquid
+        /// documents none and none has been seen (2026-09-29); read in case.
+        retry_after_secs: Option<u64>,
     },
     /// The universe payload is not what the venue documents.
     #[error("{venue}: the universe payload is not what the venue documents: {detail}")]
@@ -281,10 +284,16 @@ impl Client {
             .map_err(|source| FetchError::http(VENUE, source))?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after_secs = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
             return Err(FetchError::Status {
                 venue: VENUE,
                 path: INFO_PATH,
                 status: status.as_u16(),
+                retry_after_secs,
             });
         }
         response
@@ -296,6 +305,20 @@ impl Client {
 }
 
 impl FetchError {
+    /// The walk's reading of this failure: **a 429 is a wait**, with the
+    /// venue's `Retry-After` where it sent one, and anything else a failure.
+    #[cfg(feature = "capture")]
+    pub fn into_failure(self) -> crate::capture::FetchFailure {
+        match self {
+            FetchError::Status {
+                status: 429,
+                retry_after_secs,
+                ..
+            } => crate::capture::FetchFailure::throttled(self.to_string(), retry_after_secs),
+            other => crate::capture::FetchFailure::from(other.to_string()),
+        }
+    }
+
     /// The poll lane's reading of this failure: **a 429 is ours to fix by
     /// asking less often**, and anything else is the venue not answering.
     #[cfg(feature = "ledger")]

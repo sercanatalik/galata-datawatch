@@ -1,8 +1,23 @@
 # pace-by-the-venue-weight
 
-**NOT PROPOSED.** Named 2026-09-28, from switching on `walk_funding_days`
-in the deployment (the last step of `walk-the-funding-history`), which the
-venue answered with 429 on every instrument.
+**BUILT 2026-09-29** (`pace-by-the-venue-weight`, archived), not yet
+deployed. Named 2026-09-28, from switching on `walk_funding_days` in the
+deployment (the last step of `walk-the-funding-history`), which the venue
+answered with 429 on every instrument.
+
+**What was built:** D, then B, as recommended below. The probe took 50 full
+funding pages (2,250 documented weight) in 24 s with no 429; the 09-28 walk
+met its first at ≈2,300 in ≈30 s (`design/measured.md`). The venue tolerates
+about twice its stated minute in a burst, of a shape two points cannot fix, so
+the pace is the stated 1,200 by each call's stated weight. `Budget` states
+`weight_per_minute`, each `Paging` a `RequestCost`. A 429 waits for
+`Retry-After` or a minute and asks the same page again (three times at boot;
+a throttled fill holds every fill). The boot walk keeps only the live width;
+declared widths and the funding depth are history fills in the live loop,
+capped by `walk_cap` pages each and reported on completion. Funding still
+re-asks the whole depth each boot (~30 min of background fills), as
+`walk-the-funding-history` chose. **Still open:** the limiter's true shape,
+whether a 429 carries `Retry-After`, and history fills on the status surface.
 
 Tier 1, the walk. Blocks switching the funding walk on, and blocks the
 Tier 10 publish, because it changes the public `Budget` type.
