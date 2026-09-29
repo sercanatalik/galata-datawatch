@@ -19,6 +19,15 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **The stored tails backtested daily** (`galata-signals backtest`,
+  Tier 16). For each fitted horizon and instrument, the last 90 days of `tail`
+  rows against the bars they forecast: at 97.5%, the hit rate, Kupiec,
+  Christoffersen's conditional coverage and DQ (`gr.models.evaluate`), and
+  Acerbi and Székely's Z2 for the ES; at 99%, the hit rate, Kupiec and
+  conditional coverage. It needs 250 matched forecasts.
+
+### Added
+
 - **Each instrument's next-bar tail** (`tail`, Tier 16). Every fitted horizon
   of `varcov` writes VaR 99%, VaR 97.5% and ES 97.5% (Basel FRTB) by filtered
   historical simulation: the walk's σ̂ₜ₊₁ and the margins' standardised
