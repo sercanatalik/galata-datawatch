@@ -18,6 +18,13 @@ exists so the four above take no vault dependency.
 ## [Unreleased]
 
 ### Added
+- **Volatility forecast each day** (`galata-signals realvol`, `forecast-the-volatility`).
+  HARQ (Bollerslev, Patton and Quaedvlieg 2016) on each instrument's daily
+  realized variance from hourly bars: `sigma_1d`, `sigma_7d`, the day's
+  realized `rv_sigma_1d`, `vol_term` (the day's RV over its 30-day mean), and
+  the last 60 days' out-of-sample QLIKE of HARQ, yesterday's RV and the 30-day
+  mean. galata-research's six-year study found HARQ beat GARCH at 1d on BTC
+  and ETH. `derive-the-signals` runs it after `backtest`.
 - **The xyz perps' moments keep to their session** (`keep-to-the-session`).
   `galata-signals moments` keeps an `xyz` perp's 5-minute return only when
   both its bars lie wholly in the CME Globex session, as Amaya et al. leave

@@ -32,7 +32,7 @@ def code() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="galata-signals")
-    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest"])
+    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest", "realvol"])
     parser.add_argument("--var", required=True, type=Path, help="the record's root, holding tape/")
     parser.add_argument("--out", required=True, type=Path, help="the Arrow IPC file to hand to galata-signals-commit")
     parser.add_argument("--config", type=Path, default=HERE / "signals.toml")
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["GALATA_VAR"] = str(args.var.resolve())
     from . import frontier, schema, varcov
 
-    from . import activity, backtest, basis, carry, cascade, flow, jumps, leadlag, liquidity, moments
+    from . import activity, backtest, basis, carry, cascade, flow, jumps, leadlag, liquidity, moments, realvol
 
     try:
         with args.config.open("rb") as fh:
@@ -103,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
                 activity.compute(tape, run)
             elif args.signal == "backtest":
                 backtest.compute(horizons, tape, run)
+            elif args.signal == "realvol":
+                realvol.compute(tape, run)
             else:
                 liquidity.compute(tape, run)
     except frontier.NotWhole as error:
