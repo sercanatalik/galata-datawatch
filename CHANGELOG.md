@@ -18,6 +18,12 @@ exists so the four above take no vault dependency.
 ## [Unreleased]
 
 ### Added
+- **The xyz perps' moments keep to their session** (`keep-to-the-session`).
+  `galata-signals moments` keeps an `xyz` perp's 5-minute return only when
+  both its bars lie wholly in the CME Globex session, as Amaya et al. leave
+  out the overnight return: the jump at Sunday's reopen held 93% of XYZ100's
+  Σr⁴ on 27 September and made its kurtosis 45. Such rows' params say
+  `"session": "external"`.
 - **The xyz perps' sessions** (`tag-the-sessions`). `galata-signals basis`
   stores `external_share` for each `xyz` hour, the share of its minutes in the
   CME Globex session that trade.xyz's oracle follows (Sunday 18:00 to Friday

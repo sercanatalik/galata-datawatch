@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             horizons = [varcov.Horizon.declared(name, table) for name, table in document.get("varcov", {}).items()]
             if not horizons:
                 raise ValueError("declares no [varcov.*] horizon")
-        elif args.signal in ("carry", "basis", "cascade"):
+        elif args.signal in ("carry", "basis", "cascade", "moments"):
             declared = carry.Declared.declared(document.get("carry", {}))
     except (OSError, ValueError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f"{args.config}: {error}", file=sys.stderr)
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.signal == "flow":
                 flow.compute(tape, run)
             elif args.signal == "moments":
-                moments.compute(tape, run)
+                moments.compute(tape, run, declared)
             elif args.signal == "cascade":
                 cascade.compute(declared, tape, run)
             elif args.signal == "leadlag":
