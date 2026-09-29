@@ -17,6 +17,15 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The signal calculators read the tape while the projection rewrote it**
+  (`hold-the-tape`). `galata-signals` now holds galata-segments'
+  `.compact.lock` shared around every calculator, so a projection in progress
+  is waited out (up to 50 minutes). Without it the :45 run saw today's
+  partition projected and yesterday's not yet, and read a 40-minute hour as
+  whole.
+
 ### Added
 
 - **BTC's lead over each instrument, every hour** (`galata-signals leadlag`,

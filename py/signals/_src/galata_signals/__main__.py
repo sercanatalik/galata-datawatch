@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         return BAD_ARGUMENT
     # galata-research reads the record from GALATA_VAR; set before it loads.
     os.environ["GALATA_VAR"] = str(args.var.resolve())
-    from . import schema, varcov
+    from . import frontier, schema, varcov
 
     from . import basis, carry, cascade, flow, jumps, leadlag, liquidity, moments
 
@@ -69,24 +69,26 @@ def main(argv: list[str] | None = None) -> int:
         return BAD_ARGUMENT
     run = varcov.Run(computed_micros=varcov.micros(now), code=code(), signal=args.signal)
     try:
-        if args.signal == "varcov":
-            varcov.compute(horizons, tape, run)
-        elif args.signal == "carry":
-            carry.compute(declared, tape, run)
-        elif args.signal == "jumps":
-            jumps.compute(tape, run)
-        elif args.signal == "basis":
-            basis.compute(declared, tape, run)
-        elif args.signal == "flow":
-            flow.compute(tape, run)
-        elif args.signal == "moments":
-            moments.compute(tape, run)
-        elif args.signal == "cascade":
-            cascade.compute(declared, tape, run)
-        elif args.signal == "leadlag":
-            leadlag.compute(tape, run)
-        else:
-            liquidity.compute(tape, run)
+        # Held shared, so a projection in progress is waited out (frontier.held).
+        with frontier.held(tape):
+            if args.signal == "varcov":
+                varcov.compute(horizons, tape, run)
+            elif args.signal == "carry":
+                carry.compute(declared, tape, run)
+            elif args.signal == "jumps":
+                jumps.compute(tape, run)
+            elif args.signal == "basis":
+                basis.compute(declared, tape, run)
+            elif args.signal == "flow":
+                flow.compute(tape, run)
+            elif args.signal == "moments":
+                moments.compute(tape, run)
+            elif args.signal == "cascade":
+                cascade.compute(declared, tape, run)
+            elif args.signal == "leadlag":
+                leadlag.compute(tape, run)
+            else:
+                liquidity.compute(tape, run)
     except Exception as error:  # the tool's own failure, reported as broken
         print(f"broken: {type(error).__name__}: {error}", file=sys.stderr)
         return BROKEN

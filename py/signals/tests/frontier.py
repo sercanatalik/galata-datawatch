@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pyarrow as pa
+import pytest
 import pyarrow.parquet as pq
 
 from galata_signals import basis, varcov
@@ -47,3 +48,40 @@ def a_basis_run_before_the_projection_takes_the_hour_before(tmp_path, monkeypatc
     decl = Declared.declared({"baseline": {"main": 0.0000125}})
     basis.compute(decl, tmp_path, varcov.Run(computed_micros=T + 15 * 60_000_000, code="abc", signal="basis"))
     assert seen == [T - HOUR]  # it read the hour to 22:00, not the one to 23:00 the tape does not hold
+
+
+def _hold_exclusive(tape, seconds):
+    import fcntl
+    import threading
+    import time
+
+    fh = open(tape / ".compact.lock", "a+")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+    def release():
+        time.sleep(seconds)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+    threading.Thread(target=release, daemon=True).start()
+
+
+def a_writer_in_progress_is_waited_out(tmp_path):
+    import time
+
+    from galata_signals.frontier import held
+
+    _hold_exclusive(tmp_path, 1.5)
+    start = time.monotonic()
+    with held(tmp_path, patience_s=10):
+        waited = time.monotonic() - start
+    assert waited >= 1.0  # it read only after the writer let go
+
+
+def a_writer_that_never_lets_go_is_refused(tmp_path):
+    from galata_signals.frontier import Held, held
+
+    _hold_exclusive(tmp_path, 5)
+    with pytest.raises(Held, match="held"):
+        with held(tmp_path, patience_s=1):
+            pass
