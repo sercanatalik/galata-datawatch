@@ -19,6 +19,14 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **Each instrument's next-bar tail** (`tail`, Tier 16). Every fitted horizon
+  of `varcov` writes VaR 99%, VaR 97.5% and ES 97.5% (Basel FRTB) by filtered
+  historical simulation: the walk's σ̂ₜ₊₁ and the margins' standardised
+  residuals, a year of them and at least 1,000, so the fat tail is the data's.
+  The ES/VaR ratio says how heavy it is.
+
+### Added
+
 - **Abnormal activity every hour** (`galata-signals activity`, Tier 16). Per
   instrument: the hour's notional, trade count and average trade size; their
   robust z and the notional's rank against the same hour of day on the same

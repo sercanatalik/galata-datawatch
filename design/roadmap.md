@@ -976,6 +976,12 @@ the same kind of day over 28 stored days; the share of notional in trades above
 the previous day's p95 size. For the hour to 01:00, 31–59% of each
 instrument's notional was in those large trades.
 
+**The tail — 2026-09-29** (`derive-the-tail`). Each fitted horizon's next-bar
+VaR 99%, VaR 97.5% and ES 97.5% per instrument by filtered historical
+simulation (the walk's σ̂ₜ₊₁ and a year of the margins' ẑ, at least 1,000).
+At 1h on 2026-09-29: BTC VaR99 1.26%, ES97.5 1.34%; CL 2.25% and 2.35%.
+Backtests (Kupiec, Christoffersen, Acerbi–Székely) wait for the stored series.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,

@@ -230,6 +230,25 @@ def a_short_baseline_is_an_absent_monitor(served, tmp_path, monkeypatch):
     assert len(rows) == 2 and all(r["value"] is None and "too short" in r["absent"] for r in rows)
 
 
+def a_fitted_horizon_states_each_instruments_tail(served, tmp_path):
+    served["4h"] = _bars(n=1300, width=timedelta(hours=4))
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "ccc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "tail"]
+    by = {(r["ticker_i"], r["measure"]): r["value"] for r in rows}
+    assert {t for t, _ in by} == {"BTC", "ETH", "GOLD"}
+    for t in ("BTC", "ETH", "GOLD"):
+        assert 0 < by[(t, "var_975")] < by[(t, "var_99")] and by[(t, "es_975")] >= by[(t, "var_975")]
+        assert by[(t, "sigma_next")] > 0 and by[(t, "es_to_var")] > 0.8
+    assert {r["n_eff"] for r in rows} == {1299.0}
+
+
+def a_short_sample_has_no_tail(served, tmp_path):
+    served["4h"] = _bars(n=700, width=timedelta(hours=4))
+    hz = varcov.Horizon.declared("4h", {"bars": "4h", "model": "gjr", "dist": "t", "corr": "ccc"})
+    rows = [r for r in varcov.compute([hz], tmp_path, _run()).rows if r["signal"] == "tail"]
+    assert rows and all(r["value"] is None and "under 1000" in r["absent"] for r in rows)
+
+
 def no_constancy_where_nothing_is_fitted(served, tmp_path):
     served["1h"] = _bars()
     assert not [r for r in varcov.compute([_ewma()], tmp_path, _run()).rows if r["signal"] == "constancy"]
