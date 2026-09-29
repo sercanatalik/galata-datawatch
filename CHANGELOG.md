@@ -17,6 +17,15 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **Abnormal activity every hour** (`galata-signals activity`, Tier 16). Per
+  instrument: the hour's notional, trade count and average trade size; their
+  robust z and the notional's rank against the same hour of day on the same
+  kind of day (weekday or weekend) over the signal's stored 28 days; and the
+  share of notional in trades above the previous day's 95th-percentile size.
+  `derive-the-signals` runs it after `leadlag`.
+
 ### Fixed
 
 - **The signal calculators read the tape while the projection rewrote it**
