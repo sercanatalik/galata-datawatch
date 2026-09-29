@@ -30,7 +30,7 @@ SCHEDULE = Cron("15,45 * * * *", timezone="UTC")
 # The calculators, in order, each with its own hand-off inside the record's
 # root. A commit removes its hand-off; a commit that failed leaves it, and that
 # calculator's next run writes over it.
-CALCULATORS = ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade")
+CALCULATORS = ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag")
 STAGING = _runner.REPO / "var" / "signals-staging"
 HANDOFF = STAGING / "varcov.arrow"
 # The declared horizons, models and baselines: a committed file, named here

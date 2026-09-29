@@ -17,6 +17,14 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Added
+
+- **BTC's lead over each instrument, every hour** (`galata-signals leadlag`,
+  Tier 16). The shifted Hayashi–Yoshida correlation of mid prices
+  (galata-research `gr.leadlag.lead_lag`) to ±30 s: the lead in ms, ρ at the
+  lead and at zero, and the lead/lag ratio, with a flag when the lead is within
+  one block. `derive-the-signals` runs it after `cascade`.
+
 ### Fixed
 
 - **The hourly and daily signals computed periods the tape did not yet hold
