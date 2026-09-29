@@ -13,7 +13,7 @@ def no_commit_follows_nothing_new(tools, config):
     tools.exits("galata-signals", 3)
     tools.exits("galata-signals-commit", 0)
     said = derive_the_signals(str(config))
-    assert all(said[s].startswith("nothing to do") for s in ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity"))
+    assert all(said[s].startswith("nothing to do") for s in ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest"))
     assert tools.calls("galata-signals-commit") == []
 
 
@@ -21,12 +21,12 @@ def a_written_file_is_committed(tools, config):
     tools.exits("galata-signals", 0)
     tools.exits("galata-signals-commit", 0)
     said = derive_the_signals(str(config))
-    assert set(said) == {s + c for s in ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity") for c in ("", " commit")}
+    assert set(said) == {s + c for s in ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest") for c in ("", " commit")}
     calls = tools.calls("galata-signals")
     first = calls[0]
     commits = tools.calls("galata-signals-commit")
-    assert [c["argv"][0] for c in calls] == ["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity"]
-    assert [c["argv"][0] for c in commits] == [str(signals.STAGING / f"{s}.arrow") for s in ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity")]
+    assert [c["argv"][0] for c in calls] == ["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest"]
+    assert [c["argv"][0] for c in commits] == [str(signals.STAGING / f"{s}.arrow") for s in ("varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest")]
     assert first["argv"][first["argv"].index("--out") + 1] == str(signals.HANDOFF)
     assert first["argv"][-1] == str(signals.DECLARED)
     commit = commits[0]
@@ -46,7 +46,7 @@ def a_broken_varcov_does_not_cost_the_carry(tools, config):
     tools.exits("galata-signals-commit", 0)
     with pytest.raises(_runner.Broken, match="varcov: galata-signals exited 1"):
         derive_the_signals(str(config))
-    assert [c["argv"][0] for c in tools.calls("galata-signals-commit")] == [str(signals.STAGING / f"{s}.arrow") for s in ("carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity")]
+    assert [c["argv"][0] for c in tools.calls("galata-signals-commit")] == [str(signals.STAGING / f"{s}.arrow") for s in ("carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest")]
 
 
 def a_missing_calculator_names_its_sync(tools, config, tmp_path, monkeypatch):

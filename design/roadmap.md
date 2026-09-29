@@ -982,6 +982,13 @@ simulation (the walk's σ̂ₜ₊₁ and a year of the margins' ẑ, at least 1,
 At 1h on 2026-09-29: BTC VaR99 1.26%, ES97.5 1.34%; CL 2.25% and 2.35%.
 Backtests (Kupiec, Christoffersen, Acerbi–Székely) wait for the stored series.
 
+**The backtest — 2026-09-29** (`backtest-the-tail`). `galata-signals
+backtest`, each closed day, per fitted horizon and instrument: the last 90
+days of stored `tail` rows against the bars they forecast. At 97.5% it gives
+the hit rate, Kupiec, conditional coverage, DQ and Acerbi–Székely's Z2 for
+the ES; at 99% the hit rate, Kupiec and conditional coverage. It is absent
+until 250 forecasts are stored.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,

@@ -32,7 +32,7 @@ def code() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="galata-signals")
-    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity"])
+    parser.add_argument("signal", choices=["varcov", "carry", "jumps", "liquidity", "basis", "flow", "moments", "cascade", "leadlag", "activity", "backtest"])
     parser.add_argument("--var", required=True, type=Path, help="the record's root, holding tape/")
     parser.add_argument("--out", required=True, type=Path, help="the Arrow IPC file to hand to galata-signals-commit")
     parser.add_argument("--config", type=Path, default=HERE / "signals.toml")
@@ -49,12 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["GALATA_VAR"] = str(args.var.resolve())
     from . import frontier, schema, varcov
 
-    from . import activity, basis, carry, cascade, flow, jumps, leadlag, liquidity, moments
+    from . import activity, backtest, basis, carry, cascade, flow, jumps, leadlag, liquidity, moments
 
     try:
         with args.config.open("rb") as fh:
             document = tomllib.load(fh)
-        if args.signal == "varcov":
+        if args.signal in ("varcov", "backtest"):
             horizons = [varcov.Horizon.declared(name, table) for name, table in document.get("varcov", {}).items()]
             if not horizons:
                 raise ValueError("declares no [varcov.*] horizon")
@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
                 leadlag.compute(tape, run)
             elif args.signal == "activity":
                 activity.compute(tape, run)
+            elif args.signal == "backtest":
+                backtest.compute(horizons, tape, run)
             else:
                 liquidity.compute(tape, run)
     except Exception as error:  # the tool's own failure, reported as broken

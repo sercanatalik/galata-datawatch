@@ -376,7 +376,7 @@ whose flows only call the release binaries as subprocesses.
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
-| `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag` and `activity`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
+| `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity` and `backtest`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
@@ -415,7 +415,8 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   instrument's (shifted Hayashi–Yoshida, to ±30 s). `galata-signals activity`
   judges each hour's trading against the same hour on the same kind of day.
   Each fitted horizon also states each instrument's next-bar VaR and ES
-  (`tail`, filtered historical simulation).
+  (`tail`, filtered historical simulation), and `galata-signals backtest`
+  judges those daily against the bars they forecast.
   The fitted horizons (5m, 1h, 4h) declare constant correlation (CCC), the
   operator's choice, with the evidence in `signals.toml`. Each also writes
   `constancy`, Engle and Sheppard's test that its correlation has stayed
