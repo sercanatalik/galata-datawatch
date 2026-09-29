@@ -78,6 +78,22 @@ def frontier(tape: Path, kinds: tuple[str, ...]) -> int | None:
     return min(ends)
 
 
+class NotWhole(Exception):
+    """An asof asked for that the tape does not hold whole, or that is not a period end."""
+
+
+def period(run, width_us: int, end: int | None) -> int:
+    """The run's own `asof` when it gave one, checked; else the latest whole period."""
+    latest = whole(run.computed_micros, width_us, end)
+    if run.asof is None:
+        return latest
+    if run.asof % width_us:
+        raise NotWhole(f"asof {run.asof} is not the end of a {width_us // 60_000_000}-minute period")
+    if run.asof > latest:
+        raise NotWhole(f"asof {run.asof} is after the latest period the tape holds whole ({latest})")
+    return run.asof
+
+
 def whole(now_micros: int, width_us: int, end: int | None) -> int:
     """The latest period end at or before both the clock and the tape's frontier."""
     by_clock = now_micros // width_us * width_us

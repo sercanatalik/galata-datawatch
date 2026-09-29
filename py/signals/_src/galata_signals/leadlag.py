@@ -34,7 +34,7 @@ import polars as pl
 import galata_research as gr
 
 from .basis import _dt
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .liquidity import quotes
 from .varcov import Run, stored_asof
 
@@ -51,9 +51,9 @@ MEASURES = ("lead_ms", "rho_lead", "rho_0", "llr")
 
 def compute(tape: Path, run: Run) -> Run:
     # The last whole hour on the tape as well as by the clock (frontier.py).
-    asof = whole(run.computed_micros, HOUR_US, frontier(tape, ("quotes",)))
+    asof = period(run, HOUR_US, frontier(tape, ("quotes",)))
     stored = stored_asof(tape, SIGNAL).get(HORIZON)
-    if stored is not None and asof <= stored:
+    if not run.redo and stored is not None and asof <= stored:
         run.said.append(f"leadlag: nothing new since {_dt(stored):%Y-%m-%d %H:%M}")
         return run
     lo = asof - HOUR_US

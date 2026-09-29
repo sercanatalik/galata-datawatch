@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, type=Path, help="the Arrow IPC file to hand to galata-signals-commit")
     parser.add_argument("--config", type=Path, default=HERE / "signals.toml")
     parser.add_argument("--now", help="the run's computed instant, ISO 8601 with a zone (default: the clock)")
+    parser.add_argument("--asof", help="a period end to compute, ISO 8601 with a zone (default: the latest whole one)")
+    parser.add_argument("--redo", action="store_true", help="compute --asof though it is stored: the repair of a period stored short")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exit_:
@@ -67,7 +69,17 @@ def main(argv: list[str] | None = None) -> int:
     if now.tzinfo is None:
         print("--now needs a zone", file=sys.stderr)
         return BAD_ARGUMENT
-    run = varcov.Run(computed_micros=varcov.micros(now), code=code(), signal=args.signal)
+    asof = datetime.fromisoformat(args.asof) if args.asof else None
+    if asof is not None and asof.tzinfo is None:
+        print("--asof needs a zone", file=sys.stderr)
+        return BAD_ARGUMENT
+    if args.redo and asof is None:
+        print("--redo repairs one period: name it with --asof", file=sys.stderr)
+        return BAD_ARGUMENT
+    if asof is not None and args.signal in ("varcov", "jumps"):
+        print(f"{args.signal} follows its bars' closes and takes no --asof", file=sys.stderr)
+        return BAD_ARGUMENT
+    run = varcov.Run(computed_micros=varcov.micros(now), code=code(), signal=args.signal, asof=varcov.micros(asof) if asof else None, redo=args.redo)
     try:
         # Held shared, so a projection in progress is waited out (frontier.held).
         with frontier.held(tape):
@@ -93,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
                 backtest.compute(horizons, tape, run)
             else:
                 liquidity.compute(tape, run)
+    except frontier.NotWhole as error:
+        print(f"bad argument: {error}", file=sys.stderr)
+        return BAD_ARGUMENT
     except Exception as error:  # the tool's own failure, reported as broken
         print(f"broken: {type(error).__name__}: {error}", file=sys.stderr)
         return BROKEN

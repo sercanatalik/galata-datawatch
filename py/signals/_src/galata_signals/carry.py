@@ -32,7 +32,7 @@ import polars as pl
 
 import galata_research as gr
 
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .varcov import Run, micros, stored_asof
 
 SIGNAL = "carry"
@@ -93,9 +93,9 @@ def _iso(us: int) -> str:
 def compute(declared: Declared, tape: Path, run: Run) -> Run:
     """The hour before the run's clock, if no carry for it is stored yet."""
     # The last whole period on the tape as well as by the clock (frontier.py).
-    asof = whole(run.computed_micros, HOUR_US, frontier(tape, ("marks", "funding")))
+    asof = period(run, HOUR_US, frontier(tape, ("marks", "funding")))
     stored = stored_asof(tape, SIGNAL).get(HORIZON)
-    if stored is not None and asof <= stored:
+    if not run.redo and stored is not None and asof <= stored:
         run.said.append(f"carry: nothing new since {_iso(stored)}")
         return run
     lo = asof - (90 + 7 + 1) * DAY_US

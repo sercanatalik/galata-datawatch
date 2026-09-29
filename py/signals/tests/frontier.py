@@ -85,3 +85,40 @@ def a_writer_that_never_lets_go_is_refused(tmp_path):
     with pytest.raises(Held, match="held"):
         with held(tmp_path, patience_s=1):
             pass
+
+
+def a_period_is_the_runs_own_asof_when_given_and_whole():
+    from galata_signals.frontier import NotWhole, period
+
+    now = T + 15 * 60_000_000
+    run = varcov.Run(computed_micros=now, code="c", signal="basis")
+    assert period(run, HOUR, None) == T
+    run.asof = T - 3 * HOUR
+    assert period(run, HOUR, None) == T - 3 * HOUR
+    run.asof = T - 3 * HOUR + 1
+    with pytest.raises(NotWhole, match="not the end"):
+        period(run, HOUR, None)
+    run.asof = T
+    with pytest.raises(NotWhole, match="after the latest"):
+        period(run, HOUR, T - 20 * 60_000_000)  # the tape ends 22:40: the hour to 23:00 is not whole
+
+
+def a_redo_computes_a_stored_hour_again_with_the_true_computed_time(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(basis, "stored_asof", lambda tape, s: {"1h": T})
+    monkeypatch.setattr(basis, "marks", lambda tape, lo, hi: seen.append(hi) or basis.pl.DataFrame(schema={"ticker": basis.pl.String, "t": basis.pl.Int64, "mark": basis.pl.Float64, "oracle": basis.pl.Float64, "premium": basis.pl.Float64, "open_interest": basis.pl.Float64}))
+    monkeypatch.setattr(basis, "history", lambda tape, lo, hi: basis.pl.DataFrame(schema={"ticker_i": basis.pl.String, "asof_micros": basis.pl.Int64, "value": basis.pl.Float64}))
+    decl = Declared.declared({"baseline": {"main": 0.0000125}})
+    now = T + 10 * HOUR
+    basis.compute(decl, tmp_path, varcov.Run(computed_micros=now, code="c", signal="basis", asof=T - 4 * HOUR))
+    assert seen == []  # stored through T: without --redo, nothing
+    basis.compute(decl, tmp_path, varcov.Run(computed_micros=now, code="c", signal="basis", asof=T - 4 * HOUR, redo=True))
+    assert seen == [T - 4 * HOUR]
+
+
+def a_redo_needs_its_asof_and_no_bar_signal_takes_one(tmp_path):
+    from galata_signals import __main__ as cli
+
+    (tmp_path / "tape").mkdir()
+    assert cli.main(["basis", "--var", str(tmp_path), "--out", str(tmp_path / "o.arrow"), "--redo"]) == cli.BAD_ARGUMENT
+    assert cli.main(["varcov", "--var", str(tmp_path), "--out", str(tmp_path / "o.arrow"), "--asof", "2026-09-28T19:00Z"]) == cli.BAD_ARGUMENT
