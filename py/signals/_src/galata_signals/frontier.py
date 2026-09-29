@@ -15,9 +15,51 @@ projection, computes the hour that closed at :00, whole, once.
 
 from __future__ import annotations
 
+import fcntl
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import polars as pl
+
+#: galata-segments' hold file (`galata_segments::HOLD_FILE`): its writers take
+#: it exclusive, readers shared, through `flock`.
+HOLD_FILE = ".compact.lock"
+#: How long to wait out a writer: a projection has taken 25 minutes under load,
+#: and galata-watch waits 50.
+PATIENCE_S = 50 * 60
+
+
+class Held(Exception):
+    """A writer held the tape for longer than the patience."""
+
+
+@contextmanager
+def held(tape: Path, patience_s: float = PATIENCE_S) -> Iterator[None]:
+    """The tape held shared while a calculator reads it: a projection in progress is waited out.
+
+    **Found 2026-09-29:** the :45 run read the tape while the :40 projection
+    was rewriting it. Today's partition already reached :40 while yesterday's
+    still ended at the previous :40, so the frontier said the hour was whole
+    and the hour read 40 minutes. The rebuild holds the tape exclusive for its
+    whole run; this is the shared side of the same lock.
+    """
+    path = tape / HOLD_FILE
+    with open(path, "a+") as fh:
+        deadline = time.monotonic() + patience_s
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise Held(f"a writer held {path} for over {patience_s:.0f} s") from None
+                time.sleep(1)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def frontier(tape: Path, kinds: tuple[str, ...]) -> int | None:
