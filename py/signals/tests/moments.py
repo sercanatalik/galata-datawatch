@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 
 from galata_signals import moments, varcov
+from galata_signals.carry import Declared
 
 ASOF = datetime(2026, 9, 28, tzinfo=UTC)
 FIVE = timedelta(minutes=5)
@@ -68,3 +69,23 @@ def a_thin_day_has_no_moments(served, tmp_path):
 def only_a_new_day_is_written(served, tmp_path):
     rows = moments.compute(tmp_path, varcov.Run(computed_micros=varcov.micros(ASOF + timedelta(hours=5)), code="abc", signal="moments")).rows
     assert {r["asof_micros"] for r in rows} == {varcov.micros(ASOF)}
+
+
+def an_xyz_perp_keeps_to_its_session(served, tmp_path):
+    # 27 September is a Sunday: the session opens at 22:00 UTC, and the jump into it is the first bar after.
+    served["bars"] = pl.concat([_bars("BTC", shock=(7, 264, 0.05)), _bars("GOLD", shock=(7, 264, 0.05))])
+    declared = Declared.declared({"baseline": {"main": 0.0000125, "xyz": 0.00000625}, "dex": {"xyz": ["GOLD"]}})
+    run = varcov.Run(computed_micros=varcov.micros(ASOF + timedelta(minutes=15)), code="abc", signal="moments")
+    rows = moments.compute(tmp_path, run, declared).rows
+    btc = {r["measure"]: r for r in rows if r["ticker_i"] == "BTC"}
+    gold = {r["measure"]: r for r in rows if r["ticker_i"] == "GOLD"}
+    assert btc["realized_kurt_1d"]["value"] > 100  # the jump dominates a day with no session
+    # 22:00 to 24:00 holds 24 bars, so 23 returns between them; the jump into 22:05 is not one.
+    assert gold["realized_kurt_1d"]["value"] is None and "23 whole 5-minute returns in the day in the external session" in gold["realized_kurt_1d"]["absent"]
+    assert '"session": "external"' in gold["realized_kurt_1d"]["params"] and "session" not in btc["realized_kurt_1d"]["params"]
+
+
+def a_session_return_spans_two_bars_in_session():
+    monday_3am_ny = varcov.micros(datetime(2026, 9, 28, 7, 0, tzinfo=UTC))
+    sunday_open = varcov.micros(datetime(2026, 9, 27, 22, 0, tzinfo=UTC))
+    assert moments.in_session([monday_3am_ny, sunday_open + 5 * 60_000_000, sunday_open + 10 * 60_000_000]) == [True, False, True]

@@ -411,7 +411,8 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   `galata-signals flow` measures who pushed the price: order-flow imbalance
   at the top of the book and its fit to the 10-s returns, the trade and queue
   imbalances. `galata-signals moments` gives each day's realized skewness and
-  kurtosis from 5-minute returns, and their 7-day means. `galata-signals
+  kurtosis from 5-minute returns, and their 7-day means; an `xyz` perp's
+  from the returns wholly in its Globex session, without the reopening jump. `galata-signals
   cascade` infers each hour's forced closures from open interest falling
   with the price, an upper bound, since the venue flags no liquidation publicly.
   `galata-signals leadlag` measures whether BTC's mid moves before each other
