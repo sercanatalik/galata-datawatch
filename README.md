@@ -376,7 +376,7 @@ whose flows only call the release binaries as subprocesses.
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
-| `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity` and `backtest`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
+| `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity`, `backtest` and `realvol`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
@@ -412,9 +412,13 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   at the top of the book and its fit to the 10-s returns, the trade and queue
   imbalances. `galata-signals moments` gives each day's realized skewness and
   kurtosis from 5-minute returns, and their 7-day means; an `xyz` perp's
-  from the returns wholly in its Globex session, without the reopening jump. `galata-signals
-  cascade` infers each hour's forced closures from open interest falling
+  from the returns wholly in its Globex session, without the reopening jump.
+  `galata-signals cascade` infers each hour's forced closures from open interest falling
   with the price, an upper bound, since the venue flags no liquidation publicly.
+  `galata-signals realvol` forecasts each instrument's volatility tomorrow and
+  over the next week by HARQ on its daily realized variance from hourly bars,
+  and stores the forecast's own out-of-sample loss beside yesterday's RV's and
+  the 30-day mean's.
   `galata-signals leadlag` measures whether BTC's mid moves before each other
   instrument's (shifted Hayashi–Yoshida, to ±30 s). `galata-signals activity`
   judges each hour's trading against the same hour on the same kind of day.

@@ -989,6 +989,16 @@ the hit rate, Kupiec, conditional coverage, DQ and Acerbi–Székely's Z2 for
 the ES; at 99% the hit rate, Kupiec and conditional coverage. It is absent
 until 250 forecasts are stored.
 
+**The volatility forecast — 2026-09-29** (`forecast-the-volatility`, the
+operator's "more signals"). `galata-signals realvol`, each closed UTC day: HARQ
+on each instrument's daily realized variance from hourly bars (whole days
+since 2026-03-01, 211 of them), `sigma_1d` and `sigma_7d`, the day's
+realized σ, `vol_term`, and the last 60 days' out-of-sample QLIKE of HARQ,
+yesterday's RV and the 30-day mean. On the record to 29 September HARQ's loss
+was 0.46–0.81, yesterday's RV's 0.70–2.50 and the 30-day mean's 0.52–0.82
+(better than HARQ on CL alone); HAR's was within 0.04 of HARQ's. The choice of
+HARQ rests on galata-research's item 24 (1d, BTC and ETH, 2020–2026).
+
 **The xyz sessions — 2026-09-29** (`tag-the-sessions`, `keep-to-the-session`,
 the operator's choice). trade.xyz's oracle follows CME Globex hours (Sunday
 18:00 to Friday 17:00 New York, less the daily 17:00–18:00 break and the
