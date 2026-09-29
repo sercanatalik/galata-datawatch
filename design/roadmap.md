@@ -969,6 +969,13 @@ BTC with an LLR below 1: at the resolution limit, unexplained, and flagged
 `within_one_block`. The lead that matters, Binance over Hyperliquid, needs a
 second venue.
 
+**The activity — 2026-09-29** (`derive-the-activity`). `galata-signals
+activity`, each whole hour, per instrument: notional, trade count and average
+size; their robust z and the notional's rank against the same hour of day on
+the same kind of day over 28 stored days; the share of notional in trades above
+the previous day's p95 size. For the hour to 01:00, 31–59% of each
+instrument's notional was in those large trades.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
