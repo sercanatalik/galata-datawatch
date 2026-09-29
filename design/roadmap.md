@@ -998,6 +998,10 @@ yesterday's RV and the 30-day mean. On the record to 29 September HARQ's loss
 was 0.46–0.81, yesterday's RV's 0.70–2.50 and the 30-day mean's 0.52–0.82
 (better than HARQ on CL alone); HAR's was within 0.04 of HARQ's. The choice of
 HARQ rests on galata-research's item 24 (1d, BTC and ETH, 2020–2026).
+SHAR (Patton and Sheppard 2015: bad volatility forecasts more than good) was
+compared on the same 60 days × 6 instruments and does not separate either:
+pooled QLIKE SHAR − HARQ +0.008 (t 0.7), HAR − HARQ −0.0002 (t −0.02). Live
+from the lane's 05:15 run on 2026-09-29.
 
 **Considered and not built — 2026-09-29** (the operator's "more signals").
 Each was measured before being written, and neither earned a signal:
