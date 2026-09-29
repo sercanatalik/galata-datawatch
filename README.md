@@ -404,7 +404,10 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   `galata-signals liquidity` measures each hour's time-weighted quoted spread
   and touch depth, the effective spread and 5 s impact, and Amihud.
   `galata-signals basis` measures each hour's premium over the oracle
-  (time-weighted), mark against oracle and the open interest's change.
+  (time-weighted), mark against oracle and the open interest's change. For
+  an `xyz` perp it also stores the hour's share in the CME Globex session:
+  outside it trade.xyz's oracle follows the venue's own book, so the premium's
+  z is taken only for an hour wholly in session, against others that were.
   `galata-signals flow` measures who pushed the price: order-flow imbalance
   at the top of the book and its fit to the 10-s returns, the trade and queue
   imbalances. `galata-signals moments` gives each day's realized skewness and

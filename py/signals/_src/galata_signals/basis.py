@@ -15,10 +15,11 @@ closed, per instrument:
   hour's end, since a premium that widens while open interest grows is
   crowding (Schmeling, Schrimpf and Todorov, Crypto Carry);
 - a robust z of the premium against this signal's own stored 30 days (median
-  and MAD), on the main dex only. On the xyz dex outside its underlying's
-  hours the oracle chases the venue's own book (trade.xyz, oracle price), so
-  its premium is pulled to zero by construction and has no history to be
-  unusual against; the z is absent there, saying so.
+  and MAD). On the xyz dex outside its underlying's hours the oracle chases
+  the venue's own book (trade.xyz, oracle price), so its premium is pulled to
+  zero by construction: an xyz hour stores `external_share`, the share of it
+  in the Globex session (`sessions.py`), and its z is taken only for an hour
+  wholly external, against the stored hours that were too.
 
 An hour with under 48 minutes covered by samples has no figure.
 """
@@ -34,6 +35,7 @@ import polars as pl
 
 from .carry import Declared
 from .frontier import frontier, period
+from .sessions import external_share
 from .varcov import Run, stored_asof
 
 SIGNAL = "basis"
@@ -72,14 +74,16 @@ def marks(tape: Path, lo: int, hi: int) -> pl.DataFrame:
 
 
 def history(tape: Path, lo: int, hi: int) -> pl.DataFrame:
-    """This signal's stored `premium_twa_bps` with asof in [lo, hi): its own history."""
+    """This signal's stored `premium_twa_bps` with asof in [lo, hi), the latest stored for each hour: its own history."""
     root = tape / "kind=signals"
     if not root.is_dir() or not any(root.rglob("*.parquet")):
         return pl.DataFrame(schema={"ticker_i": pl.String, "asof_micros": pl.Int64, "value": pl.Float64})
     return (
         pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
         .filter((pl.col("signal") == SIGNAL) & (pl.col("measure") == "premium_twa_bps") & (pl.col("asof_micros") >= lo) & (pl.col("asof_micros") < hi))
-        .select("ticker_i", "asof_micros", "value")
+        .sort("computed_micros")
+        .group_by("ticker_i", "asof_micros")
+        .agg(pl.col("value").last())
         .collect()
     )
 
@@ -157,10 +161,17 @@ def _rows(dex: str, ticker: str, asof: int, m: pl.DataFrame, past: pl.DataFrame,
             put("open_interest_log_change", None, "under two open-interest samples in the hour")
             put("open_interest_usd", None, "under two open-interest samples in the hour")
 
-    values = [v for v in past["value"].to_list() if v is not None]
     if dex != "main":
-        put("premium_z_30d", None, f"the {dex} dex's oracle follows its own book outside the underlying's hours: its premium has no history to be unusual against")
-    elif twa is None:
+        share = external_share(lo, asof)
+        put("external_share", share, n=60)
+        if share < 1:
+            put("premium_z_30d", None, f"{share:.0%} of the hour in the external session: in the internal one the oracle follows the {dex} dex's own book")
+            return rows
+        # A stored hour's session follows from its asof alone, so hours stored before the share was are compared too.
+        whole = [a for a in past["asof_micros"].to_list() if external_share(a - HOUR_US, a) == 1]
+        past = past.filter(pl.col("asof_micros").is_in(whole))
+    values = [v for v in past["value"].to_list() if v is not None]
+    if twa is None:
         put("premium_z_30d", None, "no premium this hour")
     elif len(values) < Z_MIN:
         put("premium_z_30d", None, f"{len(values)} stored hours in the {Z_DAYS} days before, under {Z_MIN}")
