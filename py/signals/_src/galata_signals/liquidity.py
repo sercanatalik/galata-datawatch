@@ -28,7 +28,7 @@ import polars as pl
 
 import galata_research as gr
 
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .varcov import Run, micros, stored_asof
 
 SIGNAL = "liquidity"
@@ -101,9 +101,9 @@ def states(quotes_: pl.DataFrame, lo: int, hi: int) -> pl.DataFrame:
 
 def compute(tape: Path, run: Run) -> Run:
     # The last whole period on the tape as well as by the clock (frontier.py).
-    asof = whole(run.computed_micros, HOUR_US, frontier(tape, ("quotes", "trades")))
+    asof = period(run, HOUR_US, frontier(tape, ("quotes", "trades")))
     stored = stored_asof(tape, SIGNAL).get(HORIZON)
-    if stored is not None and asof <= stored:
+    if not run.redo and stored is not None and asof <= stored:
         run.said.append(f"liquidity: nothing new since {_dt(stored):%Y-%m-%d %H:%M}")
         return run
     lo = asof - HOUR_US

@@ -31,7 +31,7 @@ import polars as pl
 
 from .basis import _dt, marks
 from .carry import Declared
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .varcov import Run, stored_asof
 
 SIGNAL = "cascade"
@@ -80,9 +80,9 @@ def _robust(values: list[float]) -> tuple[float, float] | None:
 
 def compute(declared: Declared, tape: Path, run: Run) -> Run:
     # The last whole period on the tape as well as by the clock (frontier.py).
-    asof = whole(run.computed_micros, HOUR_US, frontier(tape, ("marks",)))
+    asof = period(run, HOUR_US, frontier(tape, ("marks",)))
     stored = stored_asof(tape, SIGNAL).get(HORIZON)
-    if stored is not None and asof <= stored:
+    if not run.redo and stored is not None and asof <= stored:
         run.said.append(f"cascade: nothing new since {_dt(stored):%Y-%m-%d %H:%M}")
         return run
     lo = asof - HOUR_US

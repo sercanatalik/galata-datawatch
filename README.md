@@ -432,6 +432,22 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   the same window when `[watch] max_correlation_target_gap` is declared: a
   Python defect shows up against Rust.
 
+- **Repairing a period stored short.** `galata-signals <signal> --asof
+  <period end> --redo` computes that period again from the tape and hands it
+  to `galata-signals-commit`, which appends it beside the short row. The hours
+  stored before `wait-for-the-tape` and `hold-the-tape`:
+
+  ```sh
+  # from the repository's root, with the deployment's configuration
+  export GALATA_CONFIG=var/datawatch.local.toml
+  redo() {  # <signal> <period end>
+    uv run --project py/signals galata-signals "$1" --var var --out var/signals-staging/redo.arrow --asof "$2" --redo \
+      && target/release/galata-signals-commit var/signals-staging/redo.arrow
+  }
+  for h in 19 20 21 22 23; do for s in liquidity basis flow carry; do redo $s 2026-09-28T$h:00Z; done; done
+  for s in liquidity basis flow carry cascade; do redo $s 2026-09-29T00:00Z; done
+  ```
+
 - **The lane has its own cereyan home.** `~/.cereyan` is shared with every
   other cereyan project on the machine, and a server started there would
   schedule their flows too.

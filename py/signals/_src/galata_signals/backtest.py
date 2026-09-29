@@ -30,7 +30,7 @@ from galata_research import Refused
 
 from .bars import WIDTH_US, bars
 from .basis import _dt
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .varcov import Horizon, Run, stored_asof
 
 SIGNAL = "backtest"
@@ -58,11 +58,11 @@ def stored_tails(tape: Path, lo: int, hi: int) -> pl.DataFrame:
 
 
 def compute(horizons: list[Horizon], tape: Path, run: Run) -> Run:
-    asof = whole(run.computed_micros, DAY_US, frontier(tape, ("candles",)))
+    asof = period(run, DAY_US, frontier(tape, ("candles",)))
     stored = stored_asof(tape, SIGNAL)
     tails = stored_tails(tape, asof - WINDOW_DAYS * DAY_US, asof)
     for hz in (h for h in horizons if h.fitted):
-        if hz.name in stored and asof <= stored[hz.name]:
+        if not run.redo and hz.name in stored and asof <= stored[hz.name]:
             run.said.append(f"backtest {hz.name}: nothing new since {_dt(stored[hz.name]):%Y-%m-%d}")
             continue
         mine = tails.filter(pl.col("horizon") == hz.name)

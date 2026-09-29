@@ -32,7 +32,7 @@ from pathlib import Path
 import polars as pl
 
 from .basis import _dt
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .liquidity import trades
 from .varcov import Run, stored_asof
 
@@ -68,9 +68,9 @@ def _bucket(asof: int) -> tuple[int, bool]:
 
 
 def compute(tape: Path, run: Run) -> Run:
-    asof = whole(run.computed_micros, HOUR_US, frontier(tape, ("trades",)))
+    asof = period(run, HOUR_US, frontier(tape, ("trades",)))
     stored = stored_asof(tape, SIGNAL).get(HORIZON)
-    if stored is not None and asof <= stored:
+    if not run.redo and stored is not None and asof <= stored:
         run.said.append(f"activity: nothing new since {_dt(stored):%Y-%m-%d %H:%M}")
         return run
     lo = asof - HOUR_US

@@ -19,6 +19,13 @@ exists so the four above take no vault dependency.
 
 ### Added
 
+- **`galata-signals --asof <period end> [--redo]`**: compute a given whole
+  period, and with `--redo` though it is stored, to repair one stored short.
+  The repair is appended with its true computed time, and readers take the
+  newest computation of an asof.
+
+### Added
+
 - **The stored tails backtested daily** (`galata-signals backtest`,
   Tier 16). For each fitted horizon and instrument, the last 90 days of `tail`
   rows against the bars they forecast: at 97.5%, the hit rate, Kupiec,

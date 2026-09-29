@@ -29,7 +29,7 @@ import polars as pl
 import galata_research as gr
 
 from .bars import bars
-from .frontier import frontier, whole
+from .frontier import frontier, period
 from .varcov import Run, stored_asof
 
 SIGNAL = "moments"
@@ -51,9 +51,9 @@ def _dt(us: int) -> datetime:
 
 def compute(tape: Path, run: Run) -> Run:
     # The last whole period on the tape as well as by the clock (frontier.py).
-    asof = whole(run.computed_micros, DAY_US, frontier(tape, ("candles",)))
+    asof = period(run, DAY_US, frontier(tape, ("candles",)))
     stored = stored_asof(tape, SIGNAL).get(HORIZON)
-    if stored is not None and asof <= stored:
+    if not run.redo and stored is not None and asof <= stored:
         run.said.append(f"moments: nothing new since {_dt(stored):%Y-%m-%d}")
         return run
     lo = asof - WEEK_DAYS * DAY_US

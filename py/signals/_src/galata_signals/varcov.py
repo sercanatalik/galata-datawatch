@@ -78,6 +78,12 @@ class Run:
     signal: str = SIGNAL
     rows: list[dict] = field(default_factory=list)
     said: list[str] = field(default_factory=list)
+    #: A period end to compute instead of the latest whole one (`--asof`), and
+    #: whether to compute it though it is stored (`--redo`): the repair of a
+    #: period stored short. The rows keep the true computed time, so a reader
+    #: taking the newest computation of each asof reads the repair.
+    asof: int | None = None
+    redo: bool = False
 
     @property
     def run_id(self) -> str:
