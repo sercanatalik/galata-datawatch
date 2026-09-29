@@ -18,6 +18,13 @@ exists so the four above take no vault dependency.
 ## [Unreleased]
 
 ### Added
+- **The lead-lag's one-block peak explained and removed** (`resolve-the-block`).
+  With every instrument stamped on the venue's shared block times,
+  Hayashi–Yoshida at a shift of exactly 0 understates the correlation (ETH
+  0.24 against 0.40 at −25 ms), so the peak fell to −100 ms everywhere.
+  `galata-signals leadlag` scans ±1 ms, stores a peak within one block or
+  indistinct from it as `lead_ms` 0, and adds `rho_btc_first`,
+  `rho_other_first` and `block_asymmetry`.
 - **Volatility forecast each day** (`galata-signals realvol`, `forecast-the-volatility`).
   HARQ (Bollerslev, Patton and Quaedvlieg 2016) on each instrument's daily
   realized variance from hourly bars: `sigma_1d`, `sigma_7d`, the day's
