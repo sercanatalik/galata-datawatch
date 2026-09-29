@@ -41,7 +41,7 @@ impl Bazaar {
                 historical: vec![Series::Candles],
                 paging: BTreeMap::from([(Series::Candles, Paging::forward_from_start(100))]),
                 budget: Budget {
-                    requests_per_minute: 60.0,
+                    weight_per_minute: 60.0,
                     min_historical_interval_ms: 1_000,
                 },
                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 30 },

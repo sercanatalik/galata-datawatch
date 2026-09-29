@@ -634,9 +634,10 @@ each tier, is [`design/roadmap.md`](design/roadmap.md).
 
 Also in progress or planned here:
 
-- **`pace-by-the-venue-weight`** (planned, blocks Tier 10). The walk paces
-  Hyperliquid by requests where the venue counts weight. It changes the
-  public `Budget` type, so it lands before the publish. See
+- **`pace-by-the-venue-weight`** (built 2026-09-29, not yet deployed). The
+  walk paces each call by the venue's stated weight, a 429 is a wait, and the
+  declared widths and funding depth are asked after the live subscription.
+  `Budget` is now `weight_per_minute`. See
   [`planning/pace-by-the-venue-weight.md`](planning/pace-by-the-venue-weight.md).
 - **`bound-the-replay`** (planned). A view of the tape *as it stood at time
   T*, so a replay host cannot see data that arrived after its simulated

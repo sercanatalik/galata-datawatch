@@ -262,12 +262,20 @@ different shape from the one planned here.
   began. **And the premium is carried** (`carry-the-settled-premium`): the
   rate is the floor whenever the clamp does not bind, so it cannot say how far
   the perp traded from its oracle, and the premium can.
-- **`pace-by-the-venue-weight`**: **NOT PROPOSED.** Named 2026-09-28, when
-  switching `walk_funding_days` on met 429 on every instrument. `Budget`
-  counts 1,200 *requests* a minute where Hyperliquid allows 1,200 *weight*
-  (`fundingHistory` ~45 a page, `candleSnapshot` ~104), and a failed fetch is
-  reported as covered. Blocks the funding walk and the Tier 10 publish, since
-  `Budget` is public. [Planning](../planning/pace-by-the-venue-weight.md).
+- ~~**`pace-by-the-venue-weight`**~~ **Built 2026-09-29, not deployed.**
+  `Budget.weight_per_minute`, and each `Paging` states a `RequestCost`
+  (Hyperliquid: candles 20 + 1/60 rows, funding 20 + 1/20, quoted from the
+  docs). Every call waits its own expected weight at the share, so a full
+  funding page at 0.25 waits 9 s and a one-bar settle 4.2 s. A 429 is a wait:
+  `Retry-After` or a minute, then the same page, three times at most at boot;
+  a throttled fill holds every fill. **Option B:** the boot walk keeps only
+  the live width, and `walk_candles` and `walk_funding_days` are asked as
+  history fills inside the live loop, capped by `walk_cap` pages and reported
+  on completion, so the restart hole stays seconds whatever the depth.
+  Measured first (option D): 50 full funding pages, 2,250 documented weight,
+  took 24 s with no 429, and the 09-28 walk met its first at ≈2,300 in ≈30 s
+  (`design/measured.md`). The venue's burst is not paced to.
+  [Planning](../planning/pace-by-the-venue-weight.md).
 - **`bound-the-replay`**: **NOT PROPOSED.** Named 2026-09-25. `view()` is
   bounded at the durable frontier, and nothing can say *the view as it stood at
   T*, which a replay host needs. Carries forward legacy's `reader-replay` as a

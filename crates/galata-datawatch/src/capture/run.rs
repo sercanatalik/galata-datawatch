@@ -152,7 +152,69 @@ pub type FillFetch = Arc<
 >;
 
 /// What a fetch came back with.
-pub type FetchResult = Result<Payload, String>;
+pub type FetchResult = Result<Payload, FetchFailure>;
+
+/// How long to wait after a refusal to pace that names no wait: the venue's
+/// limit is stated per minute (Hyperliquid: *"1200 per minute"*), so one
+/// minute empties any window of that length.
+const THROTTLE_WAIT_SECS: u64 = 60;
+/// The longest `Retry-After` the boot walk waits out. Five minutes of the
+/// socket held shut is worse than a page the next boot or a fill asks again.
+const THROTTLE_WAIT_MAX_SECS: u64 = 300;
+/// How many times the boot walk asks a throttled page again. Three waits of a
+/// minute bound the restart hole; the one width left at boot is a few pages,
+/// so a refusal there means another process on the IP is spending.
+const THROTTLE_RETRIES: u32 = 3;
+
+/// Why a historical fetch came back without a page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchFailure {
+    /// The venue's own words, or ours.
+    pub message: String,
+    /// The venue refused to pace (HTTP 429): **a wait, not a skipped range**.
+    pub throttled: bool,
+    /// The venue's `Retry-After`, in seconds, where it sent one. Not seen in
+    /// any Hyperliquid response so far (`design/measured.md`, 2026-09-29).
+    pub retry_after_secs: Option<u64>,
+}
+
+impl FetchFailure {
+    /// A refusal to pace, with the wait the venue asked for if it named one.
+    pub fn throttled(message: impl Into<String>, retry_after_secs: Option<u64>) -> FetchFailure {
+        FetchFailure {
+            message: message.into(),
+            throttled: true,
+            retry_after_secs,
+        }
+    }
+
+    /// How long to wait before asking again: the venue's word, else a minute.
+    pub fn wait_secs(&self) -> u64 {
+        self.retry_after_secs.unwrap_or(THROTTLE_WAIT_SECS)
+    }
+}
+
+impl std::fmt::Display for FetchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<String> for FetchFailure {
+    fn from(message: String) -> FetchFailure {
+        FetchFailure {
+            message,
+            throttled: false,
+            retry_after_secs: None,
+        }
+    }
+}
+
+impl From<&str> for FetchFailure {
+    fn from(message: &str) -> FetchFailure {
+        FetchFailure::from(message.to_string())
+    }
+}
 
 /// One gap still to be asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -168,6 +230,20 @@ struct Fill {
     due_micros: i64,
     /// Failed requests so far. At the walk's cap the fill is dropped by name.
     attempts: u32,
+    /// Set where this fill asks a declared width's reach or the funding depth
+    /// (a **history fill**), rather than a gap or a settle.
+    history: Option<HistoryFill>,
+}
+
+/// What a history fill's chain has done, carried from page to page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HistoryFill {
+    /// Where the chain asked from, for the report.
+    asked_from_micros: i64,
+    /// Pages started across the chain. At the walk's cap it stops by name.
+    pages: u32,
+    /// Whether the page in flight is the last of a most-recent plan.
+    last_step: bool,
 }
 
 /// The live loop's fill queue. See [`Capture::fill_step`].
@@ -179,7 +255,9 @@ struct Filler {
     in_flight: Option<Fill>,
     sender: tokio::sync::mpsc::UnboundedSender<(Fetch, FetchResult)>,
     results: tokio::sync::mpsc::UnboundedReceiver<(Fetch, FetchResult)>,
-    last_start_micros: Option<i64>,
+    /// No fill starts before this: the previous request's weighted pause, or
+    /// the wait a refusal to pace asked for.
+    next_start_micros: Option<i64>,
     /// The settle of bars closed while running, where one was asked for.
     settle: Option<Settle>,
 }
@@ -991,7 +1069,7 @@ impl Capture {
     ) -> Result<Vec<WalkOutcome>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
-        Fut: std::future::Future<Output = Result<Payload, String>>,
+        Fut: std::future::Future<Output = FetchResult>,
     {
         let now = self.wiring.clock.now_micros();
         let venue = self.wiring.adapter.venue().as_str().to_string();
@@ -1003,7 +1081,6 @@ impl Capture {
             request.cold_start_days,
             request.cap,
         );
-        let pace = std::time::Duration::from_millis(planner.request_interval_ms());
 
         let mut outcomes = Vec::new();
         for (series, interval) in &request.items {
@@ -1030,7 +1107,7 @@ impl Capture {
                     let steps =
                         planner.plan(series, ask.from_micros, now, interval.interval_micros);
                     let failed = self
-                        .walk_steps(&steps, &instruments, &label, &ask, now, pace, &fetch)
+                        .walk_steps(&planner, &steps, &instruments, &label, &ask, now, &fetch)
                         .await?;
                     planner
                         .outcome(series, &steps, &ask, now, instruments.len())
@@ -1044,7 +1121,6 @@ impl Capture {
                         &label,
                         &ask,
                         now,
-                        pace,
                         request.cap,
                         &fetch,
                     )
@@ -1101,17 +1177,17 @@ impl Capture {
     #[allow(clippy::too_many_arguments)]
     async fn walk_steps<F, Fut>(
         &mut self,
+        planner: &Walk<'_>,
         steps: &[crate::capture::walk::Step],
         instruments: &[(Ticker, String)],
         label: &Option<String>,
         ask: &crate::capture::walk::Ask,
         to_micros: i64,
-        pace: std::time::Duration,
         fetch: &F,
     ) -> Result<Vec<crate::capture::FailedFetch>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
-        Fut: std::future::Future<Output = Result<Payload, String>>,
+        Fut: std::future::Future<Output = FetchResult>,
     {
         let mut made = 0u32;
         let mut failed = Vec::new();
@@ -1136,7 +1212,7 @@ impl Capture {
                         ticker: ticker.clone(),
                         from_micros: step.from_micros,
                         to_micros: step.to_micros,
-                        error,
+                        error: error.message,
                     });
                 }
                 made += 1;
@@ -1148,7 +1224,14 @@ impl Capture {
                     reached_micros: step.to_micros,
                     requests_made: made,
                 });
-                self.tick_while_walking(pace).await?;
+                let pause = planner.pause_ms(
+                    step.series,
+                    step.interval_micros,
+                    step.from_micros,
+                    step.to_micros,
+                );
+                self.tick_while_walking(std::time::Duration::from_millis(pause))
+                    .await?;
             }
         }
         Ok(failed)
@@ -1168,13 +1251,12 @@ impl Capture {
         label: &Option<String>,
         ask: &crate::capture::walk::Ask,
         to_micros: i64,
-        pace: std::time::Duration,
         cap: u32,
         fetch: &F,
     ) -> Result<WalkOutcome, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
-        Fut: std::future::Future<Output = Result<Payload, String>>,
+        Fut: std::future::Future<Output = FetchResult>,
     {
         let page_rows = planner.page_rows(series);
         let mut made = 0u32;
@@ -1220,7 +1302,7 @@ impl Capture {
                             ticker: ticker.clone(),
                             from_micros: from,
                             to_micros,
-                            error,
+                            error: error.message,
                         });
                         here = from;
                         break;
@@ -1239,6 +1321,7 @@ impl Capture {
                     here = to_micros;
                     break;
                 }
+                let pause = planner.pause_ms(series, ask.interval_micros, from, to_micros);
                 // Past the last row, so the venue does not hand back the same
                 // page forever.
                 from = end.last_micros + 1;
@@ -1251,7 +1334,8 @@ impl Capture {
                     reached_micros: here,
                     requests_made: made,
                 });
-                self.tick_while_walking(pace).await?;
+                self.tick_while_walking(std::time::Duration::from_millis(pause))
+                    .await?;
             }
             reached = Some(match reached {
                 None => here,
@@ -1281,30 +1365,56 @@ impl Capture {
     /// venue refusing one range is not a reason to abandon the rest. The outer
     /// error is ours (the archive); the inner one is the venue's, and the
     /// caller records its range as not covered.
+    ///
+    /// **A refusal to pace is a wait first.** The same page is asked again
+    /// after the venue's `Retry-After`, or a minute, at most
+    /// [`THROTTLE_RETRIES`] times; a wait over [`THROTTLE_WAIT_MAX_SECS`] fails
+    /// the page at once. Asking again at once spends the allowance on
+    /// refusals, which is what a venue that bans (Binance's 418) punishes.
     async fn one_fetch<F, Fut>(
         &mut self,
         fetch: &F,
         request: Fetch,
-    ) -> Result<Result<Payload, String>, CaptureError>
+    ) -> Result<Result<Payload, FetchFailure>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
-        Fut: std::future::Future<Output = Result<Payload, String>>,
+        Fut: std::future::Future<Output = FetchResult>,
     {
-        match fetch(request.clone()).await {
-            Ok(payload) => {
-                let copy = payload.clone();
-                self.take(payload)?;
-                Ok(Ok(copy))
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error,
-                    ticker = request.ticker.as_str(),
-                    from = request.from_micros,
-                    to = request.to_micros,
-                    "a historical fetch failed; the rest of the walk continues"
-                );
-                Ok(Err(error))
+        let mut retries = 0u32;
+        loop {
+            match fetch(request.clone()).await {
+                Ok(payload) => {
+                    let copy = payload.clone();
+                    self.take(payload)?;
+                    return Ok(Ok(copy));
+                }
+                Err(failure)
+                    if failure.throttled
+                        && retries < THROTTLE_RETRIES
+                        && failure.wait_secs() <= THROTTLE_WAIT_MAX_SECS =>
+                {
+                    retries += 1;
+                    tracing::warn!(
+                        error = %failure,
+                        ticker = request.ticker.as_str(),
+                        from = request.from_micros,
+                        wait_secs = failure.wait_secs(),
+                        retry = retries,
+                        "the venue refused to pace; the same page is asked again after the wait"
+                    );
+                    self.tick_while_walking(std::time::Duration::from_secs(failure.wait_secs()))
+                        .await?;
+                }
+                Err(failure) => {
+                    tracing::warn!(
+                        error = %failure,
+                        ticker = request.ticker.as_str(),
+                        from = request.from_micros,
+                        to = request.to_micros,
+                        "a historical fetch failed; the rest of the walk continues"
+                    );
+                    return Ok(Err(failure));
+                }
             }
         }
     }
@@ -1349,9 +1459,69 @@ impl Capture {
             in_flight: None,
             sender,
             results,
-            last_start_micros: None,
+            next_start_micros: None,
             settle: None,
         });
+    }
+
+    /// Queue the widths that ask for a stated need, rather than resuming from
+    /// the record, as **history fills**: one per instrument per item, from
+    /// where the walk would have asked (the venue's reach, or the declared
+    /// funding depth), paced, retried and dropped like any fill.
+    ///
+    /// Why here and not in the boot walk: the walk runs before the live
+    /// subscription, and at the venue's weight a deep walk is 6 to 36 minutes
+    /// of no quotes and no trades after every restart
+    /// (`planning/pace-by-the-venue-weight.md`). A width that never resumed
+    /// from the record cannot be mistaken for coverage the record had, so
+    /// nothing requires it to precede the stream.
+    ///
+    /// Needs [`Capture::fill_with`] first; without a fill, nothing is asked.
+    pub fn fill_history(&mut self, items: &[(Series, WalkInterval)]) {
+        let now = self.wiring.clock.now_micros();
+        let venue = self.wiring.adapter.venue().as_str().to_string();
+        let declaration = self.wiring.adapter.declaration().clone();
+        let Some(request) = self.filler.as_ref().map(|f| f.request.clone()) else {
+            tracing::warn!("no fill was given a fetch, so declared history is not asked");
+            return;
+        };
+        let planner = Walk::new(
+            &declaration,
+            request.share,
+            request.cold_start_days,
+            request.cap,
+        );
+        for (series, interval) in items {
+            let (series, interval) = (*series, *interval);
+            if !declaration.serves_historically(series) {
+                continue;
+            }
+            let ask = planner.ask(&self.archive, &venue, series, interval, now);
+            let instruments = self.instruments_for(series);
+            for (ticker, _) in &instruments {
+                self.enqueue(Fill {
+                    ticker: ticker.clone(),
+                    series,
+                    interval_micros: interval.interval_micros,
+                    from_micros: ask.from_micros,
+                    due_micros: now,
+                    attempts: 0,
+                    history: Some(HistoryFill {
+                        asked_from_micros: ask.asked_from_micros,
+                        pages: 0,
+                        last_step: false,
+                    }),
+                });
+            }
+            tracing::info!(
+                venue,
+                series = series.as_str(),
+                interval_micros = interval.interval_micros,
+                from = ask.from_micros,
+                instruments = instruments.len(),
+                "queued declared history as fills, paced inside the live loop"
+            );
+        }
     }
 
     /// Settle the candle bars closed while running, every `secs`, through the
@@ -1429,6 +1599,7 @@ impl Capture {
                 from_micros: last - width,
                 due_micros: now_micros,
                 attempts: 0,
+                history: None,
             });
             if let Some(settle) = self.filler.as_mut().and_then(|f| f.settle.as_mut()) {
                 settle.settled.insert((ticker, width), closed);
@@ -1454,6 +1625,11 @@ impl Capture {
             Some(queued) => {
                 queued.from_micros = queued.from_micros.min(fill.from_micros);
                 queued.due_micros = queued.due_micros.max(fill.due_micros);
+                // A history fill's report survives a gap or a settle merged
+                // into it: the chain still asks from the earlier start.
+                if queued.history.is_none() {
+                    queued.history = fill.history;
+                }
             }
             None => filler.queue.push(fill),
         }
@@ -1500,6 +1676,7 @@ impl Capture {
             from_micros: gap.from_micros - overlap,
             due_micros: noticed_micros + interval.interval_micros,
             attempts: 0,
+            history: None,
         };
         self.enqueue(fill);
     }
@@ -1540,40 +1717,90 @@ impl Capture {
             Ok(page) => {
                 let copy = page.clone();
                 self.take(page)?;
-                tracing::info!(
-                    ticker = request.ticker.as_str(),
-                    series = request.series.as_str(),
-                    from = request.from_micros,
-                    to = request.to_micros,
-                    "filled a gap published while running"
-                );
+                if fill.history.is_some() {
+                    tracing::info!(
+                        ticker = request.ticker.as_str(),
+                        series = request.series.as_str(),
+                        interval_micros = request.interval_micros,
+                        from = request.from_micros,
+                        to = request.to_micros,
+                        "took a page of declared history"
+                    );
+                } else {
+                    tracing::info!(
+                        ticker = request.ticker.as_str(),
+                        series = request.series.as_str(),
+                        from = request.from_micros,
+                        to = request.to_micros,
+                        "filled a gap published while running"
+                    );
+                }
                 // **A full forward page is not the last one**: continue from
                 // past its last row, as the walk does. The adapter reads where
                 // it ended; the loop parses no venue payload.
                 let declaration = self.wiring.adapter.declaration().clone();
-                if declaration
+                let forward = declaration
                     .paging(fill.series)
-                    .is_some_and(|p| p.direction == PageDirection::ForwardFromStart)
-                    && let Some(end) = self.wiring.adapter.page_end(&copy)
-                    && end.rows
-                        >= declaration
-                            .paging(fill.series)
-                            .map_or(u32::MAX, |p| p.max_rows_per_call)
-                    && let Some(filler) = self.filler.as_mut()
-                {
-                    filler.queue.push(Fill {
-                        from_micros: end.last_micros + 1,
-                        due_micros: now_micros,
-                        attempts: 0,
-                        ..fill
-                    });
+                    .filter(|p| p.direction == PageDirection::ForwardFromStart);
+                let next_from = forward.and_then(|paging| {
+                    self.wiring
+                        .adapter
+                        .page_end(&copy)
+                        .filter(|end| end.rows >= paging.max_rows_per_call)
+                        .map(|end| end.last_micros + 1)
+                });
+                let cap = self.filler.as_ref().map_or(0, |f| f.request.cap);
+                match (next_from, fill.history) {
+                    (Some(_), Some(history)) if history.pages >= cap => {
+                        tracing::error!(
+                            ticker = fill.ticker.as_str(),
+                            series = fill.series.as_str(),
+                            interval_micros = fill.interval_micros,
+                            asked_from = history.asked_from_micros,
+                            reached = request.to_micros.min(next_from.unwrap_or(i64::MAX)),
+                            pages = history.pages,
+                            cap,
+                            "a history fill reached capture.walk_cap and stops; raise it or \
+                             accept the shorter history explicitly. Capture continues"
+                        );
+                    }
+                    (Some(from), _) => {
+                        if let Some(filler) = self.filler.as_mut() {
+                            filler.queue.push(Fill {
+                                from_micros: from,
+                                due_micros: now_micros,
+                                attempts: 0,
+                                ..fill
+                            });
+                        }
+                    }
+                    (None, Some(history)) if forward.is_some() || history.last_step => {
+                        tracing::info!(
+                            ticker = fill.ticker.as_str(),
+                            series = fill.series.as_str(),
+                            interval_micros = fill.interval_micros,
+                            asked_from = history.asked_from_micros,
+                            reached = request.to_micros,
+                            pages = history.pages,
+                            "declared history taken: covered from where it asked to the \
+                             moment of the last request"
+                        );
+                    }
+                    (None, _) => {}
                 }
             }
-            Err(error) => {
+            Err(failure) => {
                 fill.attempts += 1;
                 let Some(filler) = self.filler.as_mut() else {
                     return Ok(());
                 };
+                if failure.throttled {
+                    // **The limit is per IP**: every fill holds off, not only
+                    // this one, or the next asks into the same refusal.
+                    let until = now_micros + failure.wait_secs() as i64 * 1_000_000;
+                    filler.next_start_micros =
+                        Some(filler.next_start_micros.map_or(until, |n| n.max(until)));
+                }
                 if fill.attempts >= filler.request.cap {
                     tracing::error!(
                         ticker = fill.ticker.as_str(),
@@ -1581,19 +1808,25 @@ impl Capture {
                         interval_micros = fill.interval_micros,
                         from = fill.from_micros,
                         attempts = fill.attempts,
-                        error,
-                        "a gap published while running could not be filled and is dropped; its \
-                         gap row stays in the record"
+                        history = fill.history.is_some(),
+                        error = %failure,
+                        "a fill could not be taken and is dropped: a gap's row stays in the \
+                         record, and declared history covers only to `from`"
                     );
                 } else {
                     tracing::warn!(
                         ticker = fill.ticker.as_str(),
                         series = fill.series.as_str(),
                         attempts = fill.attempts,
-                        error,
+                        throttled = failure.throttled,
+                        error = %failure,
                         "a fill's request failed; it is asked again"
                     );
-                    fill.due_micros = now_micros;
+                    fill.due_micros = if failure.throttled {
+                        now_micros + failure.wait_secs() as i64 * 1_000_000
+                    } else {
+                        now_micros
+                    };
                     filler.queue.push(fill);
                 }
             }
@@ -1617,10 +1850,9 @@ impl Capture {
             filler.request.cold_start_days,
             filler.request.cap,
         );
-        let pace_micros = planner.request_interval_ms() as i64 * 1_000;
         if filler
-            .last_start_micros
-            .is_some_and(|last| now_micros < last + pace_micros)
+            .next_start_micros
+            .is_some_and(|next| now_micros < next)
         {
             return;
         }
@@ -1634,7 +1866,16 @@ impl Capture {
         else {
             return;
         };
-        let fill = filler.queue.remove(index);
+        let mut fill = filler.queue.remove(index);
+        let cap = filler.request.cap;
+        // **The reach moves with the clock.** A history fill started a minute
+        // after it was queued would otherwise plan a second step for the
+        // minute, one more full page for a sliver the first already returns.
+        if fill.history.is_some()
+            && let Some(reach) = declaration.reach_micros(fill.series, fill.interval_micros)
+        {
+            fill.from_micros = fill.from_micros.max(now_micros - reach);
+        }
 
         // The first step of the plan now; the rest queued behind it, so a long
         // outage is paged at the walk's pace rather than all at once.
@@ -1647,6 +1888,26 @@ impl Capture {
         let Some(first) = steps.first() else {
             return;
         };
+        if let Some(history) = fill.history.as_mut() {
+            // Counted as each page starts, so a most-recent chain's queued
+            // next step carries the count too.
+            if history.pages >= cap {
+                tracing::error!(
+                    ticker = fill.ticker.as_str(),
+                    series = fill.series.as_str(),
+                    interval_micros = fill.interval_micros,
+                    asked_from = history.asked_from_micros,
+                    reached = fill.from_micros,
+                    pages = history.pages,
+                    cap,
+                    "a history fill reached capture.walk_cap and stops; raise it or accept the \
+                     shorter history explicitly. Capture continues"
+                );
+                return;
+            }
+            history.pages += 1;
+            history.last_step = steps.len() == 1;
+        }
         if let Some(next) = steps.get(1) {
             filler.queue.push(Fill {
                 from_micros: next.from_micros,
@@ -1655,6 +1916,13 @@ impl Capture {
                 ..fill.clone()
             });
         }
+        let pause_micros = planner.pause_ms(
+            fill.series,
+            fill.interval_micros,
+            first.from_micros,
+            first.to_micros,
+        ) as i64
+            * 1_000;
         let Some(symbol) = self.wiring.adapter.venue_symbol(&fill.ticker) else {
             tracing::warn!(
                 ticker = fill.ticker.as_str(),
@@ -1683,7 +1951,7 @@ impl Capture {
             let _ = sender.send((request, result));
         });
         filler.in_flight = Some(fill);
-        filler.last_start_micros = Some(now_micros);
+        filler.next_start_micros = Some(now_micros + pause_micros);
     }
 }
 
@@ -2250,7 +2518,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_walked_page_crosses_the_one_path() {
         // Archived, normalised, emitted — exactly as a live frame is. A second
         // route into the record for history is a second chance to get the
@@ -2293,7 +2561,7 @@ mod tests {
         assert!(candles.is_dir(), "a walked page must be archived");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_forward_walk_stops_on_a_short_page() {
         // The venue pages funding forward: the oldest 500 at or after the
         // start. A short page is the last one, and a walk that kept asking
@@ -2350,7 +2618,7 @@ mod tests {
         starts.into_inner().unwrap()[0]
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_declared_funding_depth_is_asked_past_where_a_resume_reaches() {
         // A resuming walk reaches back at most to the cold start (and, once
         // the record holds funding, to its last receipt): the record is dated
@@ -2369,7 +2637,7 @@ mod tests {
         assert_eq!(deep, now - 30 * DAY, "the declared depth");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_forward_walk_advances_past_the_last_row() {
         // Otherwise the venue hands back the same page forever.
         let mut f = walk_fixture(100 * DAY);
@@ -2397,7 +2665,7 @@ mod tests {
         assert!(starts[1] > starts[0], "{starts:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_backward_walk_here_is_one_step_because_the_reach_is_one_page() {
         // Measured: this venue holds 5,000 bars per (coin, interval) and
         // returns 5,000 per call. The reach is therefore exactly one page, and
@@ -2425,7 +2693,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_capped_walk_says_what_it_reached_and_exits_non_zero() {
         // Our own cap is ours to raise, so it is a failed unit rather than a
         // green one that quietly covered less than it was asked for. Funding is
@@ -2457,7 +2725,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_walk_is_visible_while_it_runs_and_absent_after() {
         // A backfill of several hundred requests is minutes of work, and a
         // process that went silent for it is indistinguishable from a stuck
@@ -2496,7 +2764,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failed_fetch_does_not_abandon_the_rest() {
         // A venue refusing one range is not a reason to stop asking for the
         // others, and the outcome reports what was reached either way.
@@ -2510,7 +2778,7 @@ mod tests {
                 let page = candle_page(&req.symbol, req.from_micros / 1_000);
                 async move {
                     if n == 0 {
-                        Err("the venue answered 500".to_string())
+                        Err("the venue answered 500".into())
                     } else {
                         Ok(page)
                     }
@@ -2535,7 +2803,7 @@ mod tests {
         assert_eq!(outcome.exit_code(), 0, "the venue refused it; not our cap");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failed_forward_page_stops_that_instrument_and_the_coverage() {
         // The next page's start is read from this one, so there is no paging
         // past a page that never came. The other instrument walks on.
@@ -2561,7 +2829,7 @@ mod tests {
                 let page = funding_page(&req.symbol, req.from_micros / 1_000 + 3_600_000, rows);
                 async move {
                     if refuse {
-                        Err("hyperliquid /info: the venue answered 429".to_string())
+                        Err("hyperliquid /info: the venue answered 429".into())
                     } else {
                         Ok(page)
                     }
@@ -2594,7 +2862,7 @@ mod tests {
         assert!(outcome.report().contains("429"), "{}", outcome.report());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_series_the_venue_does_not_serve_historically_is_not_walked() {
         // It stays a gap, published as one, rather than a claim of coverage.
         let mut f = walk_fixture(100 * DAY);
@@ -2618,7 +2886,7 @@ mod tests {
         assert_eq!(calls.into_inner(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_walk_width_asks_for_the_venues_reach() {
         // A width the stream does not push cannot resume from the record, so
         // it asks for everything the venue holds: at 1h on this venue, 5,000
@@ -2671,7 +2939,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_verified_rescue_is_taken_through_the_one_path() {
         // Saved outside the record because the venue was about to stop serving
         // it; taken in through the same constructor the walk's fetch uses, and
@@ -2757,6 +3025,8 @@ mod tests {
         }
     }
 
+    /// The pause after a gap fill's page: its span is under 60 bars here, so
+    /// it weighs the venue's base plus one, 21, whatever its exact length.
     fn the_walks_pace(request: &WalkRequest, capture: &Capture) -> i64 {
         let declaration = capture.wiring.adapter.declaration().clone();
         Walk::new(
@@ -2765,11 +3035,11 @@ mod tests {
             request.cold_start_days,
             request.cap,
         )
-        .request_interval_ms() as i64
+        .pause_ms(Series::Candles, MINUTE, 0, MINUTE) as i64
             * 1_000
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_lost_sessions_candles_are_fetched_after_the_bar_closes() {
         // Until this change the walk ran once, at boot, from the record's
         // latest receipt: a session lost mid-run left candles the venue would
@@ -2849,7 +3119,7 @@ mod tests {
         out
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_live_width_is_settled_each_tick_from_one_bar_back() {
         // Measured 2026-09-25: 11 finals in 15 live hours, because nothing
         // but a boot or a gap asked the venue for a closed bar.
@@ -2879,7 +3149,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_coarse_width_is_settled_once_its_bar_has_closed_and_stays_its_own_fill() {
         let mut f = walk_fixture(100 * DAY + 10 * MINUTE);
         f.capture.report_restart_gap();
@@ -2899,7 +3169,7 @@ mod tests {
                 cold_start_days: 7,
                 cap: 500,
             },
-            |_fetch: Fetch| async { Err::<Payload, String>("not asked".into()) },
+            |_fetch: Fetch| async { Err::<Payload, FetchFailure>("not asked".into()) },
         );
         f.capture.settle_every(300);
         let widths = |f: &Fixture, ticker: &str| -> Vec<i64> {
@@ -2929,7 +3199,7 @@ mod tests {
         assert!(queued(&f).contains(&("BTC".into(), HOUR, 100 * DAY - HOUR)));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn without_a_cadence_nothing_is_settled() {
         let (mut f, _asked) = filling(candles_only(500));
         f.clock.advance_secs(3_600);
@@ -2937,7 +3207,7 @@ mod tests {
         assert!(queued(&f).is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_series_without_history_is_not_filled() {
         // Quotes are pushed and never served back: their gap stays a gap.
         let mut f = fixture(100 * DAY);
@@ -2949,14 +3219,14 @@ mod tests {
                 cold_start_days: 7,
                 cap: 500,
             },
-            |_fetch: Fetch| async { Err::<Payload, String>("not asked".into()) },
+            |_fetch: Fetch| async { Err::<Payload, FetchFailure>("not asked".into()) },
         );
         f.clock.advance_secs(30);
         f.capture.session_lost(f.clock.now_micros());
         assert!(f.capture.filler.as_ref().unwrap().queue.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn two_losses_before_a_fill_widen_one_fill() {
         let (mut f, _asked) = filling(candles_only(500));
         f.clock.advance_secs(30);
@@ -2979,7 +3249,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn frames_are_taken_while_a_fill_is_in_flight() {
         // A venue that never answers must not hold a live frame back.
         let mut f = walk_fixture(100 * DAY);
@@ -3006,7 +3276,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn fills_are_paced_like_the_walk_and_one_at_a_time() {
         let (mut f, asked) = filling(candles_only(500));
         let pace = the_walks_pace(&candles_only(500), &f.capture);
@@ -3033,7 +3303,7 @@ mod tests {
         assert_eq!(asked.lock().unwrap().len(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failing_fill_is_dropped_by_name_after_the_cap() {
         let cap = 3;
         let mut f = walk_fixture(100 * DAY);
@@ -3043,7 +3313,7 @@ mod tests {
         f.capture
             .fill_with(candles_only(cap), move |_fetch: Fetch| {
                 counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async { Err::<Payload, String>("the venue refused".into()) }
+                async { Err::<Payload, FetchFailure>("the venue refused".into()) }
             });
         let pace = the_walks_pace(&candles_only(cap), &f.capture);
         f.clock.advance_secs(30);
@@ -3061,5 +3331,349 @@ mod tests {
             2 * cap,
             "each pair asked exactly the cap's number of times, then dropped"
         );
+    }
+
+    // ---- pacing by the venue's weight ---------------------------------------
+
+    /// A walk whose fetch answers from `respond(n)`, `n` counting the calls.
+    async fn walk_answering(
+        f: &mut Fixture,
+        request: &WalkRequest,
+        respond: impl Fn(u32, &Fetch) -> FetchResult,
+    ) -> (Vec<WalkOutcome>, Vec<Fetch>) {
+        let asked: std::sync::Mutex<Vec<Fetch>> = std::sync::Mutex::new(Vec::new());
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let outcomes = f
+            .capture
+            .walk(request, |req: Fetch| {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = respond(n, &req);
+                asked.lock().unwrap().push(req);
+                async move { answer }
+            })
+            .await
+            .unwrap();
+        (outcomes, asked.into_inner().unwrap())
+    }
+
+    fn one_minute_back() -> WalkRequest {
+        WalkRequest {
+            items: vec![(Series::Candles, WalkInterval::live(MINUTE))],
+            share: 0.25,
+            cold_start_days: 1,
+            cap: 500,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_refusals_then_a_page_cover_the_range() {
+        let mut f = walk_fixture(100 * DAY);
+        let started = tokio::time::Instant::now();
+        let (outcomes, asked) = walk_answering(&mut f, &one_minute_back(), |n, req| {
+            if n < 2 {
+                Err(FetchFailure::throttled("the venue answered 429", None))
+            } else {
+                Ok(candle_page(&req.symbol, req.from_micros / 1_000))
+            }
+        })
+        .await;
+        let btc: Vec<i64> = asked
+            .iter()
+            .filter(|a| a.symbol == "BTC")
+            .map(|a| a.from_micros)
+            .collect();
+        assert_eq!(btc.len(), 3, "the same page, asked three times");
+        assert!(btc.iter().all(|from| *from == btc[0]));
+        assert!(outcomes[0].failed.is_empty(), "{}", outcomes[0].report());
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(120),
+            "two waits of a minute, not two immediate retries"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_that_persists_fails_the_page_by_name() {
+        let mut f = walk_fixture(100 * DAY);
+        let (outcomes, asked) = walk_answering(&mut f, &one_minute_back(), |_, _| {
+            Err(FetchFailure::throttled("the venue answered 429", None))
+        })
+        .await;
+        let btc = asked.iter().filter(|a| a.symbol == "BTC").count();
+        assert_eq!(btc, 1 + THROTTLE_RETRIES as usize);
+        assert!(outcomes[0].came_back_short());
+        assert!(
+            outcomes[0].report().contains("429"),
+            "{}",
+            outcomes[0].report()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_retry_after_fails_the_page_at_once() {
+        let mut f = walk_fixture(100 * DAY);
+        let (outcomes, asked) = walk_answering(&mut f, &one_minute_back(), |_, _| {
+            Err(FetchFailure::throttled(
+                "the venue answered 429",
+                Some(3_600),
+            ))
+        })
+        .await;
+        assert_eq!(asked.iter().filter(|a| a.symbol == "BTC").count(), 1);
+        assert!(outcomes[0].came_back_short());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_walk_call_pauses_for_its_own_weight() {
+        // Two full funding pages then a short one, per instrument, at a
+        // quarter share of 1,200: 9 s after each, since a forward page is
+        // expected to be whole.
+        let mut f = walk_fixture(100 * DAY);
+        let request = WalkRequest {
+            items: vec![(Series::Funding, WalkInterval::needed(MINUTE, 60 * DAY))],
+            share: 0.25,
+            cold_start_days: 1,
+            cap: 500,
+        };
+        let started = tokio::time::Instant::now();
+        let (_, asked) = walk_answering(&mut f, &request, |n, req| {
+            let rows = if n % 3 == 2 { 4 } else { 500 };
+            Ok(funding_page(
+                &req.symbol,
+                req.from_micros / 1_000 + 3_600_000,
+                rows,
+            ))
+        })
+        .await;
+        assert_eq!(asked.len(), 6);
+        // Paused between full pages only: two per instrument.
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(4 * 9));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_throttled_fill_holds_every_fill() {
+        let mut f = walk_fixture(100 * DAY);
+        f.capture.report_restart_gap();
+        let asked: Asked = Arc::default();
+        let log = asked.clone();
+        f.capture.fill_with(candles_only(500), move |fetch: Fetch| {
+            let first = log.lock().unwrap().is_empty();
+            let page = candle_page(&fetch.symbol, fetch.from_micros / 1_000);
+            log.lock().unwrap().push(fetch);
+            async move {
+                if first {
+                    Err(FetchFailure::throttled("the venue answered 429", None))
+                } else {
+                    Ok(page)
+                }
+            }
+        });
+        let pace = the_walks_pace(&candles_only(500), &f.capture);
+        f.clock.advance_secs(30);
+        f.capture.session_lost(f.clock.now_micros());
+        f.clock.advance_secs(61);
+        settle(&mut f).await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+
+        // The pace has passed many times over, and the minute has not.
+        for _ in 0..10 {
+            f.clock.advance(pace);
+            settle(&mut f).await;
+        }
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            1,
+            "a fill started inside the venue's wait"
+        );
+        f.clock.advance_secs(60);
+        settle(&mut f).await;
+        assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fills_are_paced_by_the_weight_of_the_one_before() {
+        // A funding page is expected whole (45); a short candle fill weighs
+        // 21. At share 1.0 of 1,200 that is 2.25 s against 1.05 s.
+        let mut f = walk_fixture(100 * DAY);
+        let asked: Asked = Arc::default();
+        let log = asked.clone();
+        let request = WalkRequest {
+            items: vec![
+                (Series::Candles, WalkInterval::live(MINUTE)),
+                (Series::Funding, WalkInterval::needed(MINUTE, 30 * DAY)),
+            ],
+            share: 1.0,
+            cold_start_days: 1,
+            cap: 500,
+        };
+        f.capture.fill_with(request.clone(), move |fetch: Fetch| {
+            let page = funding_page(&fetch.symbol, fetch.from_micros / 1_000 + 3_600_000, 4);
+            log.lock().unwrap().push(fetch);
+            async move { Ok(page) }
+        });
+        f.capture.fill_history(&request.items[1..]);
+        settle(&mut f).await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        f.clock.advance(2_249_000);
+        settle(&mut f).await;
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            1,
+            "inside a funding page's pause"
+        );
+        f.clock.advance(1_000);
+        settle(&mut f).await;
+        assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    // ---- declared history, asked as fills -----------------------------------
+
+    fn history_filling(
+        items: Vec<(Series, WalkInterval)>,
+        cap: u32,
+        respond: impl Fn(&Fetch) -> FetchResult + Send + Sync + 'static,
+    ) -> (Fixture, Asked) {
+        let mut f = walk_fixture(100 * DAY);
+        let asked: Asked = Arc::default();
+        let log = asked.clone();
+        let mut all = vec![(Series::Candles, WalkInterval::live(MINUTE))];
+        all.extend(items.iter().copied());
+        f.capture.fill_with(
+            WalkRequest {
+                items: all,
+                share: 1.0,
+                cold_start_days: 1,
+                cap,
+            },
+            move |fetch: Fetch| {
+                let answer = respond(&fetch);
+                log.lock().unwrap().push(fetch);
+                async move { answer }
+            },
+        );
+        f.capture.fill_history(&items);
+        (f, asked)
+    }
+
+    /// Turn the fill until nothing is queued or out, advancing by `step`.
+    async fn drain(f: &mut Fixture, step: i64) {
+        for _ in 0..200 {
+            settle(f).await;
+            let filler = f.capture.filler.as_ref().unwrap();
+            if filler.queue.is_empty() && filler.in_flight.is_none() {
+                return;
+            }
+            f.clock.advance(step);
+        }
+        panic!("the fill never drained");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_declared_width_is_asked_after_the_subscription_for_its_reach() {
+        let hour = 60 * MINUTE;
+        let (mut f, asked) = history_filling(
+            vec![(Series::Candles, WalkInterval::needed(hour, 5_000 * hour))],
+            500,
+            |req| Ok(candle_page(&req.symbol, req.from_micros / 1_000)),
+        );
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "nothing is asked until the live loop turns the fill"
+        );
+        drain(&mut f, 10 * SEC).await;
+        let asked = asked.lock().unwrap();
+        assert_eq!(
+            asked.len(),
+            2,
+            "one page per instrument: the reach is one page"
+        );
+        assert_eq!(asked[0].from_micros, 100 * DAY - 5_000 * hour);
+        for a in asked.iter() {
+            assert_eq!(a.interval_label.as_deref(), Some("1h"));
+            assert!(
+                a.from_micros >= 100 * DAY - 5_000 * hour,
+                "never before the reach as it stood when asked"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_funding_depth_is_a_forward_history_fill_from_the_depth() {
+        let (mut f, asked) = history_filling(
+            vec![(Series::Funding, WalkInterval::needed(MINUTE, 1_300 * DAY))],
+            500,
+            |req| {
+                // Full pages until the last row passes 1,300 − 40 days.
+                let last = req.from_micros / 1_000 + 499 * 3_600_000;
+                let rows = if req.from_micros > (100 - 1_300 + 40) * DAY {
+                    4
+                } else {
+                    500
+                };
+                Ok(funding_page(&req.symbol, last, rows))
+            },
+        );
+        drain(&mut f, 10 * SEC).await;
+        let asked = asked.lock().unwrap();
+        let btc: Vec<i64> = asked
+            .iter()
+            .filter(|a| a.symbol == "BTC")
+            .map(|a| a.from_micros)
+            .collect();
+        assert_eq!(btc[0], 100 * DAY - 1_300 * DAY, "from the declared depth");
+        assert!(btc.len() >= 2);
+        assert_eq!(
+            btc[1],
+            btc[0] + 499 * 3_600 * SEC + 1,
+            "each next page starts past the last row returned"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_history_fill_that_completes_asks_nothing_more() {
+        let (mut f, asked) = history_filling(
+            vec![(Series::Funding, WalkInterval::needed(MINUTE, 30 * DAY))],
+            500,
+            |req| {
+                Ok(funding_page(
+                    &req.symbol,
+                    req.from_micros / 1_000 + 3_600_000,
+                    4,
+                ))
+            },
+        );
+        drain(&mut f, 10 * SEC).await;
+        let n = asked.lock().unwrap().len();
+        assert_eq!(n, 2, "one short page per instrument ends each chain");
+        for _ in 0..10 {
+            f.clock.advance(10 * SEC);
+            settle(&mut f).await;
+        }
+        assert_eq!(asked.lock().unwrap().len(), n);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_history_fill_that_reaches_the_cap_stops_by_name() {
+        let cap = 3;
+        let (mut f, asked) = history_filling(
+            vec![(Series::Funding, WalkInterval::needed(MINUTE, 1_300 * DAY))],
+            cap,
+            |req| {
+                Ok(funding_page(
+                    &req.symbol,
+                    req.from_micros / 1_000 + 499 * 3_600_000,
+                    500,
+                ))
+            },
+        );
+        drain(&mut f, 10 * SEC).await;
+        let btc = asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.symbol == "BTC")
+            .count();
+        assert_eq!(btc, cap as usize, "no page past the cap");
+        // And the loop is unharmed: a turn after the stop is still Ok.
+        f.capture.fill_step(f.clock.now_micros()).unwrap();
     }
 }

@@ -38,6 +38,7 @@ pub mod universe;
 pub use chain::{BlockPaging, BlockStep, Frontier, PlanError};
 pub use declaration::{
     Budget, ConnectionPolicy, Declaration, DeclarationError, PageDirection, PageEnd, Paging,
+    RequestCost,
 };
 pub use poll::{Cadence, Polled};
 pub use symbols::Symbols;
@@ -165,7 +166,7 @@ pub struct Reference {
 ///                 historical: vec![],
 ///                 paging: BTreeMap::new(),
 ///                 budget: Budget {
-///                     requests_per_minute: 60.0,
+///                     weight_per_minute: 60.0,
 ///                     min_historical_interval_ms: 1_000,
 ///                 },
 ///                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 30 },

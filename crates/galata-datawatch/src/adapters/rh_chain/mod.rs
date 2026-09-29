@@ -133,7 +133,7 @@ impl RhChain {
                 budget: Budget {
                     // The public node states no rate and enforces one by
                     // refusing. Declared low rather than discovered.
-                    requests_per_minute: 120.0,
+                    weight_per_minute: 120.0,
                     min_historical_interval_ms: 250,
                 },
                 // No socket, so no lifetime and no rotation.

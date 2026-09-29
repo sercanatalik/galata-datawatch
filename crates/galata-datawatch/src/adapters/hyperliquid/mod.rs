@@ -40,7 +40,7 @@ use crate::normalise::{Normalise, NormaliseError};
 use crate::record::{Payload, PayloadAddress};
 use crate::venue::{
     Adapter, Budget, ConnectionPolicy, Construct, ConstructError, Credential, Declaration,
-    Endpoint, Keepalive, Paging, Subscription, Symbols,
+    Endpoint, Keepalive, Paging, RequestCost, Subscription, Symbols,
 };
 
 /// The venue's name, as it appears in a partition and on a subject.
@@ -247,7 +247,14 @@ impl Construct for Hyperliquid {
                     // at 1m came back reaching 3.5 days, at 1h 208 days. Not a
                     // documented figure; if the reach the walk reports stops
                     // matching this, re-measure.
-                    Paging::most_recent(5_000, Some(5_000), None),
+                    // **Weight, from the venue's docs** (*Rate limits and
+                    // user limits*, read 2026-09-29): 20, plus *"additional
+                    // rate limit weight per 60 items returned"* — 104 a full
+                    // page.
+                    Paging::most_recent(5_000, Some(5_000), None).costing(RequestCost {
+                        base: 20,
+                        per_rows: 60,
+                    }),
                 ),
                 (
                     Series::Funding,
@@ -255,13 +262,22 @@ impl Construct for Hyperliquid {
                     // at or after `startTime`, paged forward, the venue's whole
                     // history in reach — a 1,500-day ask answered from 2023.
                     // The OPPOSITE direction to candles, on the same venue.
-                    Paging::forward_from_start(500),
+                    // Weight: 20, plus one *"per 20 items returned"* — 45 a
+                    // full page. On 2026-09-28 ~48 of these in 30 s met 429.
+                    Paging::forward_from_start(500).costing(RequestCost {
+                        base: 20,
+                        per_rows: 20,
+                    }),
                 ),
             ]),
             budget: Budget {
-                // The venue's stated weight allowance, as requests a minute for
-                // an info call. Per IP, and shared across every dex.
-                requests_per_minute: 1_200.0,
+                // *"REST requests share an aggregated weight limit of 1200 per
+                // minute"*, per IP, shared across every dex. Measured
+                // 2026-09-29: the venue took ~1.9x that inside 24 s before a
+                // 429 and refused at about the same total a day earlier
+                // (`design/measured.md`). The pace is the stated figure, not
+                // the observed slack.
+                weight_per_minute: 1_200.0,
                 min_historical_interval_ms: 100,
             },
             connection: ConnectionPolicy::RotateAhead {

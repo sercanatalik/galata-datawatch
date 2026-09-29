@@ -29,7 +29,9 @@ cold_start_days = 7
 # rate: the rate belongs to the venue's declaration.
 walk_share = 0.25
 # The most requests one series' walk will make. Exceeding it exits non-zero,
-# because this bound is ours to raise.
+# because this bound is ours to raise. It also bounds each history fill's pages
+# (a declared width or the funding depth, per instrument); a history fill that
+# reaches it stops with an error and capture continues.
 walk_cap = 200
 # Seconds between settles of the candle bars closed while running. The stream
 # never sends a bar final and the walk runs at boot, so WITHOUT THIS A RUNNING
@@ -45,15 +47,18 @@ candle = "1m"
 # serves the most recent ~5,000 bars of each on a rolling window (measured
 # 2026-09-25: 1h back to 2026-03-01, 4h to 2024-06-14, 1d from listing), so a
 # width not declared here is history leaving the venue uncaptured. Each is
-# asked for its whole reach on every boot: 18 requests across six instruments.
+# asked for its whole reach on every boot, as fills AFTER the live subscription
+# (pace-by-the-venue-weight): 18 pages across six instruments, ~104 weight each,
+# ~6 min at walk_share 0.25.
 walk_candles = ["1h", "4h", "1d"]
 # How many days of SETTLED funding the walk asks for, on every boot. Without it
 # the funding walk resumes from the record's receipt clock and reaches back only
 # to when capture began, while the venue holds every settlement since it began
 # (BTC and ETH from 2023-05-12, 1,233 days on 2026-09-26). At 1,300 days: at most
-# ~60 pages for BTC and ETH, ~194 for six instruments, 44.8 KB a page, ~40 s at
-# walk_share 0.25. REBUILD every binary that reads this file before enabling it:
-# each refuses a key it does not know.
+# ~60 pages for BTC and ETH, ~194 for six instruments, 44.8 KB and 45 weight a
+# page: ~30 min of paced fills at walk_share 0.25, after the live subscription,
+# so the restart hole does not grow with it. REBUILD every binary that reads
+# this file before enabling it: each refuses a key it does not know.
 # walk_funding_days = 1300
 # `quotes` is the venue's `bbo` channel rather than `l2Book`: it carries sizes
 # (it is `l2Book` at one level a side) and it is emitted when the top of book

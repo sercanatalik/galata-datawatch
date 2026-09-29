@@ -11,27 +11,73 @@ use std::collections::BTreeMap;
 use galata_wire::Series;
 
 /// A venue's stated request budget, from which pacing is computed.
+///
+/// **In the venue's own unit of weight.** Hyperliquid counts weight, not
+/// requests: 1,200 a minute per IP, and a page of history weighs 21 to 104.
+/// Until 2026-09-29 this field counted requests, and the walk ran 20–45× over
+/// the allowance unseen until the funding walk met 429 on every instrument
+/// (`planning/pace-by-the-venue-weight.md`). A venue that counts requests
+/// declares each call at weight one, and its number keeps its meaning.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Budget {
-    /// Requests the venue states it will serve, per minute.
-    pub requests_per_minute: f64,
+    /// Weight the venue states it will serve, per minute.
+    pub weight_per_minute: f64,
     /// The minimum the venue *asks* for between historical requests,
     /// independent of the rate.
     pub min_historical_interval_ms: u64,
 }
 
 impl Budget {
-    /// The interval between historical requests at a declared share of the
-    /// budget.
+    /// The pause after a call of `weight`, at a declared share of the budget.
     ///
-    /// The **maximum** of the rate-derived interval and the venue's own stated
-    /// minimum: a venue that asks for a pause gets one, whatever the arithmetic
-    /// says.
-    pub fn walk_interval_ms(&self, share: f64) -> u64 {
+    /// The **maximum** of the weight-derived interval and the venue's own
+    /// stated minimum: a venue that asks for a pause gets one, whatever the
+    /// arithmetic says.
+    pub fn interval_ms(&self, weight: u32, share: f64) -> u64 {
         let share = share.clamp(0.001, 1.0);
-        let per_minute = (self.requests_per_minute * share).max(0.001);
-        let from_rate = (60_000.0 / per_minute).round() as u64;
+        let per_minute = (self.weight_per_minute * share).max(0.001);
+        let from_rate = (60_000.0 * f64::from(weight.max(1)) / per_minute).round() as u64;
         from_rate.max(self.min_historical_interval_ms)
+    }
+
+    /// The interval between calls of weight one at a declared share: the
+    /// cursor loop's pace, and a request-counting venue's.
+    pub fn walk_interval_ms(&self, share: f64) -> u64 {
+        self.interval_ms(1, share)
+    }
+}
+
+/// What one historical call weighs, **as the venue states it**.
+///
+/// `base`, plus one per `per_rows` rows returned, rounded up; `base` alone
+/// where `per_rows` is 0. Hyperliquid: *"All other documented `info` requests
+/// have weight 20"*, plus one *"per 20 items returned"* for `fundingHistory`
+/// and *"per 60 items"* for `candleSnapshot`. Rounded up because that is the
+/// reading that never under-counts: 500 rows is 25 either way, 5,000 bars is
+/// 104 against 103.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestCost {
+    /// The weight of the call itself.
+    pub base: u32,
+    /// Rows per extra unit of weight. 0: the call's weight does not depend on
+    /// its answer.
+    pub per_rows: u32,
+}
+
+impl RequestCost {
+    /// One call, one unit: a venue that counts requests.
+    pub const PER_REQUEST: RequestCost = RequestCost {
+        base: 1,
+        per_rows: 0,
+    };
+
+    /// The weight of a call returning `rows`.
+    pub fn weight(&self, rows: u32) -> u32 {
+        if self.per_rows == 0 {
+            self.base
+        } else {
+            self.base + rows.div_ceil(self.per_rows)
+        }
     }
 }
 
@@ -69,6 +115,9 @@ pub struct Paging {
     pub max_history_days: Option<u32>,
     /// Which rows a page holds.
     pub direction: PageDirection,
+    /// What one call weighs. [`RequestCost::PER_REQUEST`] unless the venue
+    /// states otherwise.
+    pub cost: RequestCost,
 }
 
 /// Where a forward-paged fetch ended, so the walk can issue the next page or
@@ -95,6 +144,7 @@ impl Paging {
             max_rows,
             max_history_days,
             direction: PageDirection::MostRecent,
+            cost: RequestCost::PER_REQUEST,
         }
     }
 
@@ -106,7 +156,18 @@ impl Paging {
             max_rows: None,
             max_history_days: None,
             direction: PageDirection::ForwardFromStart,
+            cost: RequestCost::PER_REQUEST,
         }
+    }
+
+    /// The same shape, with what one call weighs as the venue states it.
+    pub fn costing(self, cost: RequestCost) -> Paging {
+        Paging { cost, ..self }
+    }
+
+    /// The weight of a call expected to return `rows`, capped at a page.
+    pub fn weight(&self, rows: u32) -> u32 {
+        self.cost.weight(rows.min(self.max_rows_per_call))
     }
 
     /// How far back the venue reaches at one bar width, in microseconds.
@@ -272,7 +333,7 @@ mod tests {
             historical,
             paging,
             budget: Budget {
-                requests_per_minute: 60.0,
+                weight_per_minute: 60.0,
                 min_historical_interval_ms: 1_000,
             },
             connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 60 },
@@ -356,7 +417,7 @@ mod tests {
     fn a_venue_that_asks_for_a_pause_gets_one() {
         // The rate alone would allow 50 ms here. The venue asked for 1,000.
         let budget = Budget {
-            requests_per_minute: 1_200.0,
+            weight_per_minute: 1_200.0,
             min_historical_interval_ms: 1_000,
         };
         assert_eq!(budget.walk_interval_ms(1.0), 1_000);
@@ -365,11 +426,54 @@ mod tests {
     #[test]
     fn a_share_of_the_budget_paces_slower_than_all_of_it() {
         let budget = Budget {
-            requests_per_minute: 1_200.0,
+            weight_per_minute: 1_200.0,
             min_historical_interval_ms: 0,
         };
         assert_eq!(budget.walk_interval_ms(1.0), 50);
         assert_eq!(budget.walk_interval_ms(0.5), 100);
+    }
+
+    #[test]
+    fn a_full_funding_page_weighs_45() {
+        let funding = Paging::forward_from_start(500).costing(RequestCost {
+            base: 20,
+            per_rows: 20,
+        });
+        assert_eq!(funding.weight(500), 45);
+        assert_eq!(funding.weight(10_000), 45, "never more than a page");
+    }
+
+    #[test]
+    fn a_full_candle_page_rounds_up() {
+        let candles = Paging::most_recent(5_000, Some(5_000), None).costing(RequestCost {
+            base: 20,
+            per_rows: 60,
+        });
+        assert_eq!(candles.weight(5_000), 104);
+        assert_eq!(candles.weight(1), 21);
+    }
+
+    #[test]
+    fn a_venue_that_counts_requests_keeps_its_numbers() {
+        let paging = Paging::most_recent(720, Some(720), None);
+        assert_eq!(paging.weight(720), 1);
+        let budget = Budget {
+            weight_per_minute: 60.0,
+            min_historical_interval_ms: 0,
+        };
+        assert_eq!(budget.interval_ms(paging.weight(720), 1.0), 1_000);
+        assert_eq!(budget.walk_interval_ms(1.0), 1_000);
+    }
+
+    #[test]
+    fn a_full_funding_page_at_a_quarter_share_waits_nine_seconds() {
+        let budget = Budget {
+            weight_per_minute: 1_200.0,
+            min_historical_interval_ms: 100,
+        };
+        // 300 weight a minute; 45 of it is 9 s, ~6.7 pages a minute.
+        assert_eq!(budget.interval_ms(45, 0.25), 9_000);
+        assert_eq!(budget.interval_ms(104, 0.25), 20_800);
     }
 
     #[test]
