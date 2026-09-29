@@ -954,6 +954,13 @@ flags liquidations only per address, so, as the cascade studies do, it
 observes their consequences. Over 09-25 to 09-28: 5 events, all on the xyz
 perps, none on BTC, ETH or HYPE.
 
+**Waiting for the tape — 2026-09-29** (`wait-for-the-tape`). A period is
+computed only when the tape holds it whole: at :15 the tape ends at the
+previous :40, so every hourly calculator had been computing the hour to :00
+from 40 minutes (`basis` absent every hour since the deploy). They now bound
+their asof by the tape's newest receipt time, so the :45 run computes the hour
+whole.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,

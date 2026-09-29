@@ -17,6 +17,16 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The hourly and daily signals computed periods the tape did not yet hold
+  whole** (`wait-for-the-tape`). The tape is projected at :40, so a run at
+  :15 saw the hour to :00 without its last 20 minutes, stored it, and never
+  recomputed it. `basis` was absent every hour, and `flow`, `liquidity`,
+  `carry` and `moments` were computed short. Each now takes the latest period
+  whole on the tape as well as by the clock (`galata_signals.frontier`). Rows
+  already stored are not rewritten.
+
 ### Added
 
 - **Forced closures inferred every hour** (`galata-signals cascade`,
