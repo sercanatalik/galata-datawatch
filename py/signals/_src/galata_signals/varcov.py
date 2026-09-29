@@ -295,7 +295,7 @@ def derived(hz: Horizon, returns: pl.DataFrame, joint: pl.DataFrame, tickers: li
         except (Refused, matrix.Undefined) as why:
             rows += [_row(base, m, EVERYONE, None, None, str(why), bar_open, (None, None)) for m in measures]
 
-    return rows + regime_rows(hz, returns, asof, params, span, run) + turbulence_rows(hz, joint, tickers, run)
+    return rows + regime_rows(hz, returns, asof, params, span, run, sigma, tickers) + turbulence_rows(hz, joint, tickers, run)
 
 
 #: The constancy test's trailing window, in days of the horizon's bars, and its lags.
@@ -317,15 +317,54 @@ MONITOR_T = 1.5
 MONITOR = ("wied_galeano_ratio", "wied_galeano_alarm")
 
 
-def regime_rows(hz: Horizon, returns: pl.DataFrame, asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
-    """`constancy` and `monitor`, from one in-sample fit of the declared margins."""
+def regime_rows(hz: Horizon, returns: pl.DataFrame, asof: int, params: dict, span: tuple, run: Run, sigma=None, tickers=()) -> list[dict]:
+    """`constancy`, `monitor` and `tail`, from one in-sample fit of the declared margins."""
     if not hz.fitted:
         return []
     try:
         f = _margins(hz, returns)
     except Refused as why:
-        return _absent_regime(hz, run, asof, params, span, str(why))
-    return constancy_rows(hz, f, asof, params, span, run) + monitor_rows(hz, f, asof, params, span, run)
+        return _absent_regime(hz, run, asof, params, span, str(why), tickers)
+    rows = constancy_rows(hz, f, asof, params, span, run) + monitor_rows(hz, f, asof, params, span, run)
+    return rows + (tail_rows(hz, f, sigma, list(tickers), asof, params, span, run) if sigma is not None else [])
+
+
+#: Filtered historical simulation (Barone-Adesi, Giannopoulos and Vosper 1999):
+#: a year of the margins' standardised residuals, or all there are, and at least
+#: 1,000 of them, so the 1% tail holds 10 or more.
+TAIL_YEAR_DAYS = 365
+TAIL_MIN = 1000
+TAIL = ("sigma_next", "var_99", "var_975", "es_975", "es_to_var")
+
+
+def tail_rows(hz: Horizon, f, sigma, tickers: list[str], asof: int, params: dict, span: tuple, run: Run) -> list[dict]:
+    """Each instrument's one-bar-ahead VaR and ES by filtered historical simulation, as positive log-return losses.
+
+    VaR_α = −σ̂ₜ₊₁·q_α(ẑ) and ES_α = −σ̂ₜ₊₁·mean(ẑ | ẑ ≤ q_α), with σ̂ₜ₊₁ the
+    walk's own one-bar forecast (Σᵢᵢ, the seasonal factor of the next bar
+    included) and ẑ the margins' standardised residuals. The fat tail is the
+    data's, not a distribution's: Kuester, Mittnik and Paolella (2006) find FHS
+    a close second to GARCH with EVT, and ahead of normal GARCH. ES at 97.5%
+    is Basel's FRTB measure; `es_to_var` = ES97.5/VaR99, 1.005 under a normal,
+    is how much heavier the tail is. Per bar only: √h scaling understates a
+    fat-tailed, clustered risk (Danielsson and Zigrand).
+    """
+    base = _base(hz, run, asof, {**params, "method": "fhs", "year_days": TAIL_YEAR_DAYS, "min_residuals": TAIL_MIN}, "tail")
+    rows = []
+    window = TAIL_YEAR_DAYS * 86_400_000_000 // WIDTH_US[hz.name]
+    for i, t in enumerate(tickers):
+        z = f.fits[t].series["z"].drop_nulls().to_numpy()[-window:] if t in f.fits else np.array([])
+        s2 = sigma[i, i] if i < len(sigma) else float("nan")
+        if len(z) < TAIL_MIN or not np.isfinite(s2) or s2 <= 0:
+            why = f"{len(z)} standardised residuals, under {TAIL_MIN}" if len(z) < TAIL_MIN else "no variance forecast for the next bar"
+            rows += [_row(base, m, t, None, None, why, asof, span) for m in TAIL]
+            continue
+        sd = float(np.sqrt(s2))
+        q99, q975 = np.quantile(z, 0.01), np.quantile(z, 0.025)
+        var99, var975, es975 = -sd * q99, -sd * q975, -sd * float(z[z <= q975].mean())
+        figures = {"sigma_next": sd, "var_99": var99, "var_975": var975, "es_975": es975, "es_to_var": es975 / var99 if var99 > 0 else None}
+        rows += [{**_row(base, m, t, None, v, None if v is not None else "VaR 99% is not a loss", asof, span), "n_eff": float(len(z))} for m, v in figures.items()]
+    return rows
 
 
 def _margins(hz: Horizon, returns: pl.DataFrame):
@@ -340,8 +379,9 @@ def _margins(hz: Horizon, returns: pl.DataFrame):
     return gr.models.corr.fit(returns, model=hz.model, dist=hz.dist, corr=hz.corr, column=column, min_obs=hz.min_obs)
 
 
-def _absent_regime(hz: Horizon, run: Run, asof: int, params: dict, span: tuple, reason: str) -> list[dict]:
+def _absent_regime(hz: Horizon, run: Run, asof: int, params: dict, span: tuple, reason: str, tickers=()) -> list[dict]:
     rows = [_row(_base(hz, run, asof, {**params, "lags": CONSTANCY_LAGS, "days": CONSTANCY_DAYS}, "constancy"), m, EVERYONE, None, None, reason, asof, span) for m in CONSTANCY]
+    rows += [_row(_base(hz, run, asof, params, "tail"), m, t, None, None, reason, asof, span) for t in tickers for m in TAIL]
     return rows + [_row(_base(hz, run, asof, params, "monitor"), m, EVERYONE, None, None, reason, asof, span) for m in MONITOR]
 
 
@@ -431,6 +471,8 @@ def derived_absent(hz: Horizon, tickers: list[str], asof: int, reason: str, run:
         derived_signals.append(("constancy", CONSTANCY))
         if hz.name in MONITOR_EPOCH_DAYS:
             derived_signals.append(("monitor", MONITOR))
+        base = _base(hz, run, asof, _params(hz), "tail")
+        rows += [_row(base, m, t, None, None, reason, asof, none) for t in tickers for m in TAIL]
     for signal, measures in derived_signals:
         base = _base(hz, run, asof, _params(hz), signal)
         rows += [_row(base, m, EVERYONE, None, None, reason, asof, none) for m in measures]

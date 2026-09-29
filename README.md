@@ -414,6 +414,8 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   `galata-signals leadlag` measures whether BTC's mid moves before each other
   instrument's (shifted Hayashi–Yoshida, to ±30 s). `galata-signals activity`
   judges each hour's trading against the same hour on the same kind of day.
+  Each fitted horizon also states each instrument's next-bar VaR and ES
+  (`tail`, filtered historical simulation).
   The fitted horizons (5m, 1h, 4h) declare constant correlation (CCC), the
   operator's choice, with the evidence in `signals.toml`. Each also writes
   `constancy`, Engle and Sheppard's test that its correlation has stayed
