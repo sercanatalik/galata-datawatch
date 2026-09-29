@@ -18,6 +18,13 @@ exists so the four above take no vault dependency.
 ## [Unreleased]
 
 ### Added
+- **The xyz perps' sessions** (`tag-the-sessions`). `galata-signals basis`
+  stores `external_share` for each `xyz` hour, the share of its minutes in the
+  CME Globex session that trade.xyz's oracle follows (Sunday 18:00 to Friday
+  17:00 New York, less the daily 17:00–18:00 break and the futures holidays,
+  which come from the CMES calendar). The premium's `premium_z_30d`, refused
+  for `xyz` until now, is taken for an hour wholly in session, against the
+  stored hours that were too.
 
 - **`galata-signals --asof <period end> [--redo]`**: compute a given whole
   period, and with `--redo` though it is stored, to repair one stored short.

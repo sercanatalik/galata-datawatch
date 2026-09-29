@@ -18,7 +18,7 @@ version = "0.1.0"
 description = "Market-data signals computed over galata-datawatch's tape"
 requires-python = ">=3.11"
 dependencies = [
-    "galata-research[models]",
+    "galata-research[models,calendars]",
     "pyarrow>=17",
     "polars>=1.30",
 ]
