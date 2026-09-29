@@ -999,6 +999,26 @@ was 0.46–0.81, yesterday's RV's 0.70–2.50 and the 30-day mean's 0.52–0.82
 (better than HARQ on CL alone); HAR's was within 0.04 of HARQ's. The choice of
 HARQ rests on galata-research's item 24 (1d, BTC and ETH, 2020–2026).
 
+**Considered and not built — 2026-09-29** (the operator's "more signals").
+Each was measured before being written, and neither earned a signal:
+
+- **VPIN** (Easley, López de Prado and O'Hara 2012). Andersen and Bondarenko
+  (2014) find it predicts volatility only through bulk-volume classification
+  errors, and not at all once trading intensity is controlled for. The tape's
+  trades carry the true aggressor side, so the classification error is gone.
+  On the record's ~88 hours per instrument, VPIN (50 volume buckets a day,
+  over 50) gave next-hour |return| no positive incremental power beside the
+  hour's volume and |return| on any instrument: BTC t −2.55, the other five
+  within ±1.2. The hour's volume did predict it (t 2.0–3.1 on five). A 2026
+  Bitcoin study (Research in International Business and Finance 81) finds
+  VPIN predicts jumps; with nine days of trades, that cannot be tested yet.
+- **Time-series momentum** (Liu and Tsyvinski 2021: 1–4 weeks). On Binance's
+  BTC and ETH daily closes 2020–2026 (`gr.reference`, 350 non-overlapping
+  weeks), 7-day momentum is absent (t 0.43, −0.48). 28-day momentum's sign
+  strategy is marginal (t 2.06, 2.35) and decaying: BTC earned +2.02% a week
+  in the first third of the sample and +0.12% in the last. With six cells
+  tested, that is not a signal to store as if it predicted.
+
 **The xyz sessions — 2026-09-29** (`tag-the-sessions`, `keep-to-the-session`,
 the operator's choice). trade.xyz's oracle follows CME Globex hours (Sunday
 18:00 to Friday 17:00 New York, less the daily 17:00–18:00 break and the
