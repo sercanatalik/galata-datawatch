@@ -989,6 +989,21 @@ the hit rate, Kupiec, conditional coverage, DQ and Acerbi–Székely's Z2 for
 the ES; at 99% the hit rate, Kupiec and conditional coverage. It is absent
 until 250 forecasts are stored.
 
+**The xyz sessions — 2026-09-29** (`tag-the-sessions`, `keep-to-the-session`,
+the operator's choice). trade.xyz's oracle follows CME Globex hours (Sunday
+18:00 to Friday 17:00 New York, less the daily 17:00–18:00 break and the
+futures holidays), and the venue's own book outside them. The recorded data
+carries no session flag, so `sessions.py` encodes the documented hours and
+takes only the closures from the CMES calendar, whose sessions have no daily
+break. `basis` stores each xyz hour's `external_share` and takes the premium z
+for an hour wholly in session, against the stored hours that were too.
+`moments` keeps an xyz return only when both its bars are in session: the
+jump at Sunday's reopen held 93% of XYZ100's Σr⁴ on 27 September (kurtosis
+45; 7.2 on Monday without it). Left as they are, on purpose: `jumps` (the
+reopen is a real discontinuity of the perp), `varcov` (a position's weekend
+risk is the perp's own), and `cascade`. Of its 5 events replayed over 94
+hours, 2 fell after Friday's close, where a thin book can force real closures.
+
 **Still open:**
 - ~~the default model for fitted horizons the study never decided (1h, 30m,
   5m, and every xyz instrument). Proposed: GARCH-t, deseasonalised below 4h,
