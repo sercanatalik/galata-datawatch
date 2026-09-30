@@ -4369,3 +4369,7 @@ for i in range(50):
   number the walk needs is one it can rely on*.
 - So the walk paces at the **stated** 1,200, by each call's stated weight. The
   burst is slack a restart's small walk may use; nothing is paced to it.
+
+**Deployed 2026-09-29 19:29Z.** The venue took 2,250 documented weight in 24 s
+without a 429. Capture restarted with `walk_funding_days = 1300` enabled; the
+funding walk is running as paced fills inside the live loop, no 429.
