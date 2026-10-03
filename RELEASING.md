@@ -6,9 +6,9 @@ Four crates go to crates.io together. One command sends them:
 cargo publish --workspace
 ```
 
-**Nothing here has been published yet.** The names do not exist on crates.io,
-which is why the first run needs a token (below) and every run after it should
-not.
+**0.1.0 was published on 2026-09-29**, from `4ad9350`. The names exist on
+crates.io now, so the token the first run needed (below) should not be needed
+again once a trusted publisher is configured.
 
 ## What goes, and what does not
 
@@ -80,8 +80,8 @@ find it.
 ## The first publish needs a token
 
 Trusted publishing cannot create a crate that does not exist yet. All four
-names are new, so the first `cargo publish --workspace` authenticates with
-`CARGO_REGISTRY_TOKEN`, and a trusted publisher takes over once the names
+names were new, so the first `cargo publish --workspace` authenticated with
+`CARGO_REGISTRY_TOKEN`, and a trusted publisher takes over now that the names
 exist — which is exactly the path galata-vault took for its own 0.1.0, recorded
 in its `RELEASING.md`.
 
