@@ -100,10 +100,10 @@ pub fn write(
     crate::ledger::accounts::check_root(root)?;
     let mut written = Vec::new();
     for kind in PROJECTED {
-        let expanded: Vec<Envelope>;
+        let expanded: Vec<std::borrow::Cow<'_, Envelope>>;
         let of_kind: Vec<&Envelope> = if kind == Kind::LedgerUpdates {
             expanded = per_effect(rows);
-            expanded.iter().collect()
+            expanded.iter().map(|e| e.as_ref()).collect()
         } else {
             rows.iter().filter(|e| e.kind() == kind).collect()
         };
@@ -210,6 +210,67 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
     Some(Arc::new(Schema::new(fields)))
 }
 
+// **Borrowing accessors**, as plain functions so their lifetimes are the
+// envelope's. Each column's closure used to clone the whole event out of the
+// envelope — a fill's strings, a ledger update's effects — once per column,
+// some thirteen times a row, on every pass over the account's history.
+fn fill_of(e: &Envelope) -> Option<&Fill> {
+    match &e.event {
+        Event::Fill(f) => Some(f),
+        _ => None,
+    }
+}
+fn funding_of(e: &Envelope) -> Option<&FundingPayment> {
+    match &e.event {
+        Event::FundingPayment(p) => Some(p),
+        _ => None,
+    }
+}
+fn margin_of(e: &Envelope) -> Option<&Margin> {
+    match &e.event {
+        Event::Margin(m) => Some(m),
+        _ => None,
+    }
+}
+fn position_of(e: &Envelope) -> Option<&Position> {
+    match &e.event {
+        Event::Position(p) => Some(p),
+        _ => None,
+    }
+}
+fn update_of(e: &Envelope) -> Option<&galata_wire::LedgerUpdate> {
+    match &e.event {
+        Event::LedgerUpdate(u) => Some(u),
+        _ => None,
+    }
+}
+
+fn dex_of(e: &Envelope) -> Option<&str> {
+    match &e.event {
+        Event::Fill(f) => f.dex.as_deref(),
+        Event::FundingPayment(p) => p.dex.as_deref(),
+        Event::Margin(m) => m.dex.as_deref(),
+        Event::Position(p) => p.dex.as_deref(),
+        // Expanded to one effect per row by `per_effect`.
+        Event::LedgerUpdate(u) => match &u.effect {
+            Effect::Known(effects) => effects.first().and_then(|d| d.dex.as_deref()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The instrument the event names: an account-addressed envelope carries no
+/// instrument address of its own.
+fn ticker_of(e: &Envelope) -> Option<&str> {
+    match &e.event {
+        Event::Fill(f) => Some(f.ticker.as_str()),
+        Event::FundingPayment(p) => Some(p.ticker.as_str()),
+        Event::Position(p) => Some(p.ticker.as_str()),
+        _ => None,
+    }
+}
+
 fn batch_for(
     kind: Kind,
     venue: &str,
@@ -217,31 +278,11 @@ fn batch_for(
     rows: &[&Envelope],
 ) -> Result<RecordBatch, ProjectError> {
     let schema = schema_for(kind).expect("only projected kinds are built");
-    let dex = |e: &Envelope| match &e.event {
-        Event::Fill(f) => f.dex.clone(),
-        Event::FundingPayment(p) => p.dex.clone(),
-        Event::Margin(m) => m.dex.clone(),
-        Event::Position(p) => p.dex.clone(),
-        // Expanded to one effect per row by `per_effect`.
-        Event::LedgerUpdate(u) => match &u.effect {
-            Effect::Known(effects) => effects.first().and_then(|d| d.dex.clone()),
-            _ => None,
-        },
-        _ => None,
-    };
-    // The instrument the event names: an account-addressed envelope carries
-    // no instrument address of its own.
-    let ticker = |e: &Envelope| match &e.event {
-        Event::Fill(f) => Some(f.ticker.as_str().to_string()),
-        Event::FundingPayment(p) => Some(p.ticker.as_str().to_string()),
-        Event::Position(p) => Some(p.ticker.as_str().to_string()),
-        _ => None,
-    };
     let mut columns: Vec<ArrayRef> = vec![
-        text(rows, |_| Some(venue.to_string())),
-        text(rows, |_| Some(account.to_string())),
-        text(rows, dex),
-        text(rows, ticker),
+        constant(rows.len(), venue),
+        constant(rows.len(), account),
+        text(rows, dex_of),
+        text(rows, ticker_of),
         int(rows, |e| e.at_micros),
         int(rows, |e| Some(e.recv_micros)),
         {
@@ -253,37 +294,33 @@ fn batch_for(
     ];
     match kind {
         Kind::Fills => {
-            let f = |e: &Envelope| match &e.event {
-                Event::Fill(f) => Some(f.clone()),
-                _ => None,
-            };
-            let each = |g: fn(&Fill) -> Option<Num>| move |e: &Envelope| f(e).and_then(|x| g(&x));
-            columns.push(text(rows, |e| f(e).map(|x| x.side.as_str().to_string())));
+            let each = |g: fn(&Fill) -> Option<Num>| move |e: &Envelope| fill_of(e).and_then(g);
+            columns.push(text(rows, |e| fill_of(e).map(|x| x.side.as_str())));
             columns.push(dec(rows, each(|x| Some(x.price)))?);
             columns.push(dec(rows, each(|x| Some(x.size)))?);
             columns.push(dec(rows, each(|x| x.start_position))?);
-            columns.push(text(rows, |e| f(e).and_then(|x| x.direction)));
+            columns.push(text(rows, |e| {
+                fill_of(e).and_then(|x| x.direction.as_deref())
+            }));
             columns.push(dec(rows, each(|x| x.closed_pnl))?);
             columns.push(dec(rows, each(|x| x.fee))?);
-            columns.push(text(rows, |e| f(e).and_then(|x| x.fee_token)));
+            columns.push(text(rows, |e| {
+                fill_of(e).and_then(|x| x.fee_token.as_deref())
+            }));
             columns.push(dec(rows, each(|x| x.builder_fee))?);
             columns.push({
                 let mut b = BooleanBuilder::with_capacity(rows.len());
                 rows.iter()
-                    .for_each(|e| b.append_option(f(e).and_then(|x| x.crossed)));
+                    .for_each(|e| b.append_option(fill_of(e).and_then(|x| x.crossed)));
                 Arc::new(b.finish())
             });
-            columns.push(u64s(rows, |e| f(e).map(|x| x.order_id)));
-            columns.push(u64s(rows, |e| f(e).map(|x| x.trade_id)));
-            columns.push(u64s(rows, |e| f(e).and_then(|x| x.twap_id)));
+            columns.push(u64s(rows, |e| fill_of(e).map(|x| x.order_id)));
+            columns.push(u64s(rows, |e| fill_of(e).map(|x| x.trade_id)));
+            columns.push(u64s(rows, |e| fill_of(e).and_then(|x| x.twap_id)));
         }
         Kind::FundingPayments => {
-            let p = |e: &Envelope| match &e.event {
-                Event::FundingPayment(p) => Some(p.clone()),
-                _ => None,
-            };
             let each = |g: fn(&FundingPayment) -> Option<Num>| {
-                move |e: &Envelope| p(e).and_then(|x| g(&x))
+                move |e: &Envelope| funding_of(e).and_then(g)
             };
             columns.push(dec(rows, each(|x| Some(x.usdc)))?);
             columns.push(dec(rows, each(|x| Some(x.size)))?);
@@ -291,21 +328,33 @@ fn batch_for(
             columns.push({
                 let mut b = UInt32Builder::with_capacity(rows.len());
                 rows.iter()
-                    .for_each(|e| b.append_option(p(e).and_then(|x| x.samples)));
+                    .for_each(|e| b.append_option(funding_of(e).and_then(|x| x.samples)));
                 Arc::new(b.finish())
             });
         }
         Kind::Margin => {
-            let m = |e: &Envelope| match &e.event {
-                Event::Margin(m) => Some(m.clone()),
-                _ => None,
+            let each = |g: fn(&Margin) -> Option<Num>| move |e: &Envelope| margin_of(e).and_then(g);
+            // The mode's wire spelling, read once per distinct mode rather
+            // than serialised per row.
+            let mut spelled: Vec<(galata_wire::AccountMode, Option<String>)> = Vec::new();
+            let mut spell = |mode: galata_wire::AccountMode| -> Option<String> {
+                if let Some((_, s)) = spelled.iter().find(|(m, _)| *m == mode) {
+                    return s.clone();
+                }
+                let s = serde_json::to_value(mode)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string));
+                spelled.push((mode, s.clone()));
+                s
             };
-            let each = |g: fn(&Margin) -> Option<Num>| move |e: &Envelope| m(e).and_then(|x| g(&x));
+            let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 8);
+            for e in rows {
+                b.append_option(margin_of(e).and_then(|x| spell(x.mode)));
+            }
+            columns.push(Arc::new(b.finish()));
             columns.push(text(rows, |e| {
-                m(e).and_then(|x| serde_json::to_value(x.mode).ok())
-                    .and_then(|v| v.as_str().map(str::to_string))
+                margin_of(e).and_then(|x| x.equity_not_held.as_deref())
             }));
-            columns.push(text(rows, |e| m(e).and_then(|x| x.equity_not_held)));
             columns.push(dec(rows, each(|x| x.account_value))?);
             columns.push(dec(rows, each(|x| x.total_notional))?);
             columns.push(dec(rows, each(|x| x.total_raw_usd))?);
@@ -314,12 +363,8 @@ fn batch_for(
             columns.push(dec(rows, each(|x| x.withdrawable))?);
         }
         Kind::Positions => {
-            let p = |e: &Envelope| match &e.event {
-                Event::Position(p) => Some(p.clone()),
-                _ => None,
-            };
             let each =
-                |g: fn(&Position) -> Option<Num>| move |e: &Envelope| p(e).and_then(|x| g(&x));
+                |g: fn(&Position) -> Option<Num>| move |e: &Envelope| position_of(e).and_then(g);
             columns.push(dec(rows, each(|x| Some(x.size)))?);
             columns.push(dec(rows, each(|x| x.entry_price))?);
             columns.push(dec(rows, each(|x| x.mark))?);
@@ -328,11 +373,13 @@ fn batch_for(
             columns.push(dec(rows, each(|x| x.return_on_equity))?);
             columns.push(dec(rows, each(|x| x.liquidation_price))?);
             columns.push(dec(rows, each(|x| x.leverage))?);
-            columns.push(text(rows, |e| p(e).and_then(|x| x.leverage_type)));
+            columns.push(text(rows, |e| {
+                position_of(e).and_then(|x| x.leverage_type.as_deref())
+            }));
             columns.push({
                 let mut b = UInt32Builder::with_capacity(rows.len());
                 rows.iter()
-                    .for_each(|e| b.append_option(p(e).and_then(|x| x.max_leverage)));
+                    .for_each(|e| b.append_option(position_of(e).and_then(|x| x.max_leverage)));
                 Arc::new(b.finish())
             });
             columns.push(dec(rows, each(|x| x.margin_used))?);
@@ -341,37 +388,39 @@ fn batch_for(
             columns.push(dec(rows, each(|x| x.funding_since_change))?);
         }
         Kind::LedgerUpdates => {
-            let u = |e: &Envelope| match &e.event {
-                Event::LedgerUpdate(u) => Some(u.clone()),
-                _ => None,
-            };
-            columns.push(text(rows, |e| u(e).map(|x| x.kind)));
+            columns.push(text(rows, |e| update_of(e).map(|x| x.kind.as_str())));
             columns.push({
                 let mut b = BooleanBuilder::with_capacity(rows.len());
                 rows.iter().for_each(|e| {
-                    b.append_option(u(e).map(|x| matches!(x.effect, Effect::Known(_))))
+                    b.append_option(update_of(e).map(|x| matches!(x.effect, Effect::Known(_))))
                 });
                 Arc::new(b.finish())
             });
-            columns.push(dec(rows, |e| match u(e).map(|x| x.effect) {
+            columns.push(dec(rows, |e| match update_of(e).map(|x| &x.effect) {
                 Some(Effect::Known(effects)) => effects.first().map(|d| d.usdc),
                 _ => None,
             })?);
             columns.push(text(rows, |e| {
-                u(e).and_then(|x| x.counterparty).map(|c| match c {
-                    Counterparty::Account(_) => "account".to_string(),
-                    Counterparty::Fingerprint(_) => "fingerprint".to_string(),
-                })
+                update_of(e)
+                    .and_then(|x| x.counterparty.as_ref())
+                    .map(|c| match c {
+                        Counterparty::Account(_) => "account",
+                        Counterparty::Fingerprint(_) => "fingerprint",
+                    })
             }));
             columns.push(text(rows, |e| {
-                u(e).and_then(|x| x.counterparty).map(|c| match c {
-                    Counterparty::Account(alias) => alias.as_str().to_string(),
-                    Counterparty::Fingerprint(fp) => fp,
-                })
+                update_of(e)
+                    .and_then(|x| x.counterparty.as_ref())
+                    .map(|c| match c {
+                        Counterparty::Account(alias) => alias.as_str(),
+                        Counterparty::Fingerprint(fp) => fp.as_str(),
+                    })
             }));
-            columns.push(text(rows, |e| u(e).and_then(|x| x.token)));
-            columns.push(dec(rows, |e| u(e).and_then(|x| x.amount))?);
-            columns.push(dec(rows, |e| u(e).and_then(|x| x.fee))?);
+            columns.push(text(rows, |e| {
+                update_of(e).and_then(|x| x.token.as_deref())
+            }));
+            columns.push(dec(rows, |e| update_of(e).and_then(|x| x.amount))?);
+            columns.push(dec(rows, |e| update_of(e).and_then(|x| x.fee))?);
         }
         _ => unreachable!("only projected kinds are built"),
     }
@@ -384,7 +433,10 @@ fn batch_for(
 /// Ledger updates, one per dex effect: an update that moved margin on two
 /// dexes becomes two, one that moved nothing (or in a way this build does not
 /// know) stays one.
-fn per_effect(rows: &[Envelope]) -> Vec<Envelope> {
+///
+/// Borrowed where it is already one row; only an update that splits is copied.
+fn per_effect(rows: &[Envelope]) -> Vec<std::borrow::Cow<'_, Envelope>> {
+    use std::borrow::Cow;
     let mut out = Vec::new();
     for row in rows {
         let Event::LedgerUpdate(update) = &row.event else {
@@ -397,10 +449,10 @@ fn per_effect(rows: &[Envelope]) -> Vec<Envelope> {
                     if let Event::LedgerUpdate(u) = &mut one.event {
                         u.effect = Effect::Known(vec![effect.clone()]);
                     }
-                    out.push(one);
+                    out.push(Cow::Owned(one));
                 }
             }
-            _ => out.push(row.clone()),
+            _ => out.push(Cow::Borrowed(row)),
         }
     }
     out
@@ -437,9 +489,18 @@ fn dec(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<Num>) -> Result<Array
     Ok(Arc::new(b.finish()))
 }
 
-fn text(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<String>) -> ArrayRef {
-    let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 8);
+/// A string column borrowed from the rows, sized by a first pass.
+fn text(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<&str>) -> ArrayRef {
+    let bytes: usize = rows.iter().filter_map(|e| f(e)).map(str::len).sum();
+    let mut b = StringBuilder::with_capacity(rows.len(), bytes);
     rows.iter().for_each(|e| b.append_option(f(e)));
+    Arc::new(b.finish())
+}
+
+/// One value on every row.
+fn constant(rows: usize, value: &str) -> ArrayRef {
+    let mut b = StringBuilder::with_capacity(rows, rows * value.len());
+    (0..rows).for_each(|_| b.append_value(value));
     Arc::new(b.finish())
 }
 

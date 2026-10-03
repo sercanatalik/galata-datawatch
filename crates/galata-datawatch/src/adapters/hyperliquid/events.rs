@@ -61,6 +61,17 @@ pub fn page_end(bytes: &[u8]) -> Option<(i64, usize)> {
     Some((millis_to_micros(rows.last()?.time), rows.len()))
 }
 
+/// The earliest and latest venue times on a page, and its row count, from
+/// **one** parse — asking `page_start` and `page_end` parsed the page twice.
+pub fn page_span(bytes: &[u8]) -> Option<(i64, i64, usize)> {
+    let rows: Vec<Timed> = serde_json::from_slice(bytes).ok()?;
+    Some((
+        millis_to_micros(rows.first()?.time),
+        millis_to_micros(rows.last()?.time),
+        rows.len(),
+    ))
+}
+
 /// The earliest venue time on a page.
 pub fn page_start(bytes: &[u8]) -> Option<i64> {
     let rows: Vec<Timed> = serde_json::from_slice(bytes).ok()?;

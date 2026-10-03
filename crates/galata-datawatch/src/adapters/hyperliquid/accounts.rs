@@ -135,7 +135,6 @@ impl AccountVenue for HyperliquidAccounts {
     }
 
     fn page_span(&self, page: &[u8]) -> Option<(i64, i64, usize)> {
-        let (last, rows) = events::page_end(page)?;
-        Some((events::page_start(page)?, last, rows))
+        events::page_span(page)
     }
 }
