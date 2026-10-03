@@ -237,6 +237,7 @@ Also worth deciding on (they depend on intent or input):
 | Iteration | Items | Status |
 |---|---|---|
 | 1 | C1 retention validation · C5 fill timeout + bounded HTTP client · C6 throttled poll adds to cadence · C7 reconnect waits after an empty session | done |
+| 2 | 1.1 incremental ledger history (`events::History`, read from the last receipt) · 1.2 kind-scoped reads · C10 unreadable account skipped and named · C11 first fill anchors after funding | done |
 
 ## Suggested order
 

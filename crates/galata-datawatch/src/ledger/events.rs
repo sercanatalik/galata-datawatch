@@ -23,7 +23,7 @@
 //! Also here, pure: the reach judged by evidence, and the check that says a
 //! page after a break starts beyond what the venue still holds.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use galata_wire::{Account, Counterparty, Envelope, Event, Kind, Reach};
@@ -62,36 +62,120 @@ pub fn read(
     normaliser: &dyn Normalise,
     ours: &BTreeMap<String, Account>,
 ) -> Result<Vec<Envelope>, LedgerError> {
-    let scope = format!("venue={venue}/account={account}");
-    let wanted: BTreeSet<&str> = kinds.iter().map(|k| k.as_str()).collect();
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for replayed in crate::replay::read_range(root, Some(&[scope.as_str()]), i64::MIN, i64::MAX)? {
-        let payload = replayed.payload();
-        if !wanted.contains(payload.kind.as_str()) {
-            continue;
+    let mut history = History::default();
+    history.extend(root, venue, account, kinds, normaliser, ours)?;
+    Ok(history.rows)
+}
+
+/// One account's history, kept between reads and **extended** rather than
+/// read again.
+///
+/// The fold runs every events cadence over the account's whole history, and
+/// reading that back from the record each time — every margin and position
+/// snapshot since the account was first polled — made each pass slower than
+/// the last, without bound. The ledger commits every answer as it arrives
+/// (`Origin::Fetched`), so by the time a pass runs, everything received up to
+/// the last pass is on disk and nothing new is older than it: the next pass
+/// reads only receipts from that point on.
+///
+/// Rebuilt from nothing when the kinds asked for or the aliases of our own
+/// accounts change, since cached rows carry the aliasing they were read with.
+#[derive(Debug, Default)]
+pub struct History {
+    rows: Vec<Envelope>,
+    seen: HashSet<String>,
+    /// The newest receipt read. The next read starts **at** it, inclusive:
+    /// two payloads can share a microsecond, and identity drops the repeat.
+    through_micros: Option<i64>,
+    kinds: Vec<Kind>,
+    ours: BTreeMap<String, Account>,
+}
+
+impl History {
+    /// The rows so far, venue time then receipt.
+    pub fn rows(&self) -> &[Envelope] {
+        &self.rows
+    }
+
+    /// Read what the record gained since the last call, and merge it in.
+    ///
+    /// **All or nothing**: a read that fails leaves the history as it was, so
+    /// the next call asks the same range again.
+    pub fn extend(
+        &mut self,
+        root: &Path,
+        venue: &str,
+        account: &str,
+        kinds: &[Kind],
+        normaliser: &dyn Normalise,
+        ours: &BTreeMap<String, Account>,
+    ) -> Result<usize, LedgerError> {
+        if self.kinds != kinds || &self.ours != ours {
+            *self = History {
+                kinds: kinds.to_vec(),
+                ours: ours.clone(),
+                ..History::default()
+            };
         }
-        // A page that would not normalise is still in the record, with a
-        // failure row naming it; it contributes no rows here.
-        let Ok(rows) = normaliser.normalise(payload) else {
-            continue;
-        };
-        for mut row in rows {
-            if !wanted.contains(row.kind().as_str()) || !seen.insert(identity(&row)) {
+        // **One scope per kind**, so a partition of a kind not asked for is
+        // never opened. Reading the account's whole subtree and dropping
+        // kinds afterwards decoded every snapshot to answer a question about
+        // fills.
+        let scopes: Vec<String> = kinds
+            .iter()
+            .map(|k| format!("venue={venue}/account={account}/kind={}", k.as_str()))
+            .collect();
+        let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+        let from = self.through_micros.unwrap_or(i64::MIN);
+        let replayed = crate::replay::read_range(root, Some(&scopes), from, i64::MAX)?;
+
+        let wanted: BTreeSet<&str> = kinds.iter().map(|k| k.as_str()).collect();
+        let mut through = self.through_micros;
+        let mut fresh = Vec::new();
+        let mut fresh_ids: HashSet<String> = HashSet::new();
+        for replayed in replayed {
+            let payload = replayed.payload();
+            through = Some(through.map_or(payload.recv_micros, |t| t.max(payload.recv_micros)));
+            if !wanted.contains(payload.kind.as_str()) {
                 continue;
             }
-            if let Event::LedgerUpdate(update) = &mut row.event
-                && let Some(Counterparty::Fingerprint(fp)) = &update.counterparty
-                && let Some(alias) = ours.get(fp)
-            {
-                update.counterparty = Some(Counterparty::Account(alias.clone()));
+            // A page that would not normalise is still in the record, with a
+            // failure row naming it; it contributes no rows here.
+            let Ok(rows) = normaliser.normalise(payload) else {
+                continue;
+            };
+            for mut row in rows {
+                if !wanted.contains(row.kind().as_str()) {
+                    continue;
+                }
+                let id = identity(&row);
+                if self.seen.contains(&id) || !fresh_ids.insert(id) {
+                    continue;
+                }
+                if let Event::LedgerUpdate(update) = &mut row.event
+                    && let Some(Counterparty::Fingerprint(fp)) = &update.counterparty
+                    && let Some(alias) = ours.get(fp)
+                {
+                    update.counterparty = Some(Counterparty::Account(alias.clone()));
+                }
+                fresh.push(row);
             }
-            out.push(row);
         }
+
+        let added = fresh.len();
+        self.seen.extend(fresh_ids);
+        self.through_micros = through;
+        if added > 0 {
+            self.rows.extend(fresh);
+            // Venue time, then receipt: the order the events happened in. The
+            // rows already held are sorted, so this is a sorted run plus a
+            // short tail — which the standard library's stable sort detects
+            // and merges in close to linear time.
+            self.rows
+                .sort_by_key(|e| (e.at_micros.unwrap_or(e.recv_micros), e.recv_micros));
+        }
+        Ok(added)
     }
-    // Venue time, then receipt: the order the events happened in.
-    out.sort_by_key(|e| (e.at_micros.unwrap_or(e.recv_micros), e.recv_micros));
-    Ok(out)
 }
 
 /// The newest venue time recorded for one account and kind: where the next

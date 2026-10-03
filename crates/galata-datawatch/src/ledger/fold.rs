@@ -205,6 +205,10 @@ pub struct FoldReport {
     pub relative_tolerance: Num,
     /// By alias.
     pub accounts: BTreeMap<String, AccountFold>,
+    /// Accounts whose record would not read this pass, by alias: left out of
+    /// `accounts` rather than reported as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<String>,
 }
 
 /// The kinds a fold reads.
@@ -335,8 +339,11 @@ fn apply(
     tolerances: &Tolerances,
 ) {
     let key = (fill.dex.clone(), fill.ticker.clone());
-    let fresh = !books.contains_key(&key);
     let book = books.entry(key).or_default();
+    // **The first fill, not the first row.** A funding payment ahead of the
+    // first held fill — exactly when the fill history starts mid-position —
+    // makes the book first, and must not turn the anchor into a break.
+    let fresh = book.seen.is_empty();
     let id = (fill.trade_id, fill.order_id);
 
     if book.poisoned_by.is_some() {
@@ -553,6 +560,27 @@ mod tests {
     }
     fn book(f: &AccountFold) -> &BookReport {
         &f.books[0]
+    }
+
+    #[test]
+    fn funding_before_the_first_fill_does_not_turn_the_anchor_into_a_break() {
+        // The fill history starts mid-position: the venue paid funding on a
+        // position opened before the earliest fill it still holds.
+        let paid = env(
+            1,
+            Event::FundingPayment(galata_wire::FundingPayment {
+                dex: None,
+                ticker: Ticker::new("BTC").unwrap(),
+                usdc: n("-0.1"),
+                size: n("5"),
+                rate: n("0.0001"),
+                samples: None,
+            }),
+        );
+        let f = fold(&[paid, fill(1, 2, "1", "100", "5")], &tol());
+        assert!(f.breaks.is_empty(), "{:?}", f.breaks);
+        assert_eq!(book(&f).position, Some(n("6")));
+        assert_eq!(book(&f).funding, n("-0.1"));
     }
 
     #[test]
