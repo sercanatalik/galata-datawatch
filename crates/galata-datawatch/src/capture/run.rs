@@ -165,6 +165,9 @@ const THROTTLE_WAIT_MAX_SECS: u64 = 300;
 /// minute bound the restart hole; the one width left at boot is a few pages,
 /// so a refusal there means another process on the IP is spending.
 const THROTTLE_RETRIES: u32 = 3;
+/// Longest a fill's fetch may run before it counts as a failed attempt. The
+/// HTTP client's own bound plus the slack a pause-aware fetch may add.
+const FILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Why a historical fetch came back without a page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,7 +878,12 @@ impl Capture {
                 }
                 continue;
             }
-            backoff.reset();
+            // **Not reset here.** A venue that accepts the connection and then
+            // closes it straight away — too many subscriptions, a per-IP limit
+            // — would otherwise be reconnected to with no wait at all, which
+            // spends exactly the new-connection budget the backoff protects.
+            // The backoff resets once the session has delivered something.
+            let mut delivered = false;
             self.open_session(self.wiring.clock.now_micros());
 
             // Level-triggered: converge toward the declared set rather than
@@ -985,7 +993,13 @@ impl Capture {
                 self.fill_step(now)?;
 
                 match source.next_frame().await {
-                    Ok(Frame::Bytes(bytes)) => self.take_frame(&bytes)?,
+                    Ok(Frame::Bytes(bytes)) => {
+                        if !delivered {
+                            delivered = true;
+                            backoff.reset();
+                        }
+                        self.take_frame(&bytes)?
+                    }
                     // **Not a gap.** A quiet market and a silently dead
                     // connection are the same shape from here, so nothing is
                     // inferred from it.
@@ -1002,6 +1016,16 @@ impl Capture {
                 }
             }
             source.close().await;
+            // A session that delivered nothing waits before the next connect,
+            // as a failed connect does. One that delivered reconnects at once:
+            // every millisecond here is a millisecond of gap.
+            if !delivered && !shutdown.is_cancelled() {
+                let wait = backoff.next_wait();
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(wait) => {}
+                }
+            }
         }
 
         self.shutdown()
@@ -1945,7 +1969,17 @@ impl Capture {
         let future = (filler.fetch)(request.clone());
         let sender = filler.sender.clone();
         tokio::spawn(async move {
-            let result = future.await;
+            // **Bounded here as well as in the client.** `in_flight` clears
+            // only when an answer comes back, so a fetch that never returns
+            // would stop every later fill for the life of the process.
+            let result = tokio::time::timeout(FILL_TIMEOUT, future)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(FetchFailure::from(format!(
+                        "no answer within {}s",
+                        FILL_TIMEOUT.as_secs()
+                    )))
+                });
             // A loop that has stopped is not listening, and that is fine: the
             // gap row is already in the record.
             let _ = sender.send((request, result));

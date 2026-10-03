@@ -178,8 +178,13 @@ impl Capture {
                     // **Throttled backs off; unreachable does not.** Asking too
                     // often is ours to fix and gets worse if we keep the rate;
                     // a venue that is down does not improve by waiting longer.
+                    //
+                    // **Added to the cadence, never instead of it.** The
+                    // backoff starts at a quarter second, so replacing a
+                    // five-second interval with it would answer a 429 by
+                    // asking twenty times faster.
                     if refusal == Refusal::Throttled {
-                        wait = backoff.next_wait();
+                        wait = wait.saturating_add(backoff.next_wait());
                     }
                 }
             }
@@ -441,6 +446,45 @@ mod tests {
         // The gap is in the record, not only on the wire.
         let gaps = f._root.path().join("archive/venue=rh-crypto/kind=gaps");
         assert!(gaps.is_dir(), "the gap never reached the record");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_throttled_poll_never_asks_faster_than_its_cadence() {
+        // A 429 must slow the loop down. The backoff's first wait is shorter
+        // than the cadence, so it can only ever be added to it.
+        let mut f = fixture();
+        let (shutdown, left) = after(5);
+        let stop = shutdown.clone();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        f.capture
+            .run_poll(shutdown, &[Ticker::new("BTC").unwrap()], |_| {
+                asked.lock().unwrap().push(tokio::time::Instant::now());
+                if left.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) <= 1 {
+                    stop.cancel();
+                }
+                async { Err(Refusal::Throttled) }
+            })
+            .await
+            .unwrap();
+
+        let asked = asked.lock().unwrap();
+        let interval = match f.capture.venue_transport() {
+            Transport::Poll {
+                interval_micros, ..
+            } => std::time::Duration::from_micros(interval_micros as u64),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(asked.len(), 5);
+        for pair in asked.windows(2) {
+            let between = pair[1] - pair[0];
+            assert!(
+                between > interval,
+                "asked again after {between:?}, cadence {interval:?}"
+            );
+        }
+        // And it grows: the last wait is longer than the first.
+        assert!(asked[4] - asked[3] > asked[1] - asked[0]);
     }
 
     #[test]

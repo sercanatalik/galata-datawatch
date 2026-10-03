@@ -898,8 +898,52 @@ impl Config {
                 }
             }
         }
+        self.validate_retention(origin, adapters)?;
         if let Some(ledger) = &self.ledger {
             self.validate_ledger(ledger, origin, adapters)?;
+        }
+        Ok(())
+    }
+
+    /// **A horizon of 0 days is not "keep nothing new", it is "delete every
+    /// past day".** `galata-retain --delete` takes it literally, and for a
+    /// venue that is the unrecoverable record. So zero is refused, and so is a
+    /// venue name no adapter knows: a typo there silently keeps forever.
+    ///
+    /// A known venue that is no longer declared under `[venue.*]` is allowed —
+    /// its record outlives its capture.
+    fn validate_retention(
+        &self,
+        origin: &Origin,
+        adapters: &dyn Adapters,
+    ) -> Result<(), ConfigError> {
+        const BOUND: std::ops::RangeInclusive<u32> = 1..=36_500;
+        for (name, days) in &self.retention.venue {
+            if !adapters.known(name) {
+                return Err(ConfigError::UnknownVenue {
+                    origin: origin.clone(),
+                    venue: name.clone(),
+                    known: adapters.known_names().join(", "),
+                });
+            }
+            if !BOUND.contains(days) {
+                return Err(ConfigError::OutOfBounds {
+                    origin: origin.clone(),
+                    field: "retention.venue",
+                    value: format!("{days} for {name}"),
+                    bound: "1..=36500 days — 0 would delete every past day of the record",
+                });
+            }
+        }
+        if let Some(days) = self.retention.tape_days
+            && !BOUND.contains(&days)
+        {
+            return Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "retention.tape_days",
+                value: days.to_string(),
+                bound: "1..=36500 days — 0 would delete every past day of the tape",
+            });
         }
         Ok(())
     }
@@ -1637,6 +1681,25 @@ dexes = ["", "xyz"]
         // A venue absent from the block is kept forever rather than assigned a
         // number nobody chose.
         assert_eq!(policy.venues.get("rh-crypto"), None);
+    }
+
+    #[test]
+    fn a_zero_day_horizon_is_refused() {
+        // `galata-retain --delete` would take 0 as "every past day".
+        for block in ["tape_days = 0\n", "\n[retention.venue]\nhyperliquid = 0\n"] {
+            let err = load(&format!("{GOOD}\n[retention]\n{block}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("retention"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_retention_for_an_unknown_venue_is_refused() {
+        // A typo would otherwise keep that venue forever, silently.
+        let text = format!("{GOOD}\n[retention.venue]\nhyperliqiud = 90\n");
+        let err = load(&text).unwrap_err().to_string();
+        assert!(err.contains("hyperliqiud"), "{err}");
     }
 
     #[test]

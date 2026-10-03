@@ -85,7 +85,7 @@ impl Client {
     /// A client for a venue's REST root.
     pub fn new(rest_url: &str) -> Client {
         Client {
-            http: reqwest::Client::new(),
+            http: crate::source::http_client(),
             info_url: format!("{rest_url}/info"),
         }
     }

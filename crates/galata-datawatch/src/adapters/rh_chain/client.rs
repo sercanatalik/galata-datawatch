@@ -132,7 +132,7 @@ impl ChainClient {
     /// A client for an endpoint.
     pub fn new(endpoint: Endpoint) -> ChainClient {
         ChainClient {
-            http: reqwest::Client::new(),
+            http: crate::source::http_client(),
             endpoint,
         }
     }
