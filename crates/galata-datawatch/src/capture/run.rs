@@ -21,7 +21,7 @@ use crate::ingest::{ingest, record_generated};
 use crate::record::{Archive, Payload, RecordError};
 use crate::sink::Sink;
 use crate::source::{Frame, SourceError, StreamSource};
-use crate::venue::{Adapter, PageDirection, Subscription};
+use crate::venue::{Adapter, PageDirection, PageEnd, Subscription};
 
 /// What this build is, for the status surface.
 const BUILD: &str = concat!("galata-datawatch ", env!("CARGO_PKG_VERSION"));
@@ -1229,6 +1229,7 @@ impl Capture {
                             from_micros: step.from_micros,
                             to_micros: step.to_micros,
                         },
+                        false,
                     )
                     .await?
                 {
@@ -1311,6 +1312,7 @@ impl Capture {
                             from_micros: from,
                             to_micros,
                         },
+                        true,
                     )
                     .await?;
                 pages += 1;
@@ -1319,8 +1321,8 @@ impl Capture {
                 // **A page that never came is not coverage**, and there is no
                 // paging past it: where the next page starts is read from this
                 // one. The instrument stops here, at where it asked from.
-                let payload = match payload {
-                    Ok(payload) => payload,
+                let end = match payload {
+                    Ok(end) => end,
                     Err(error) => {
                         failed.push(crate::capture::FailedFetch {
                             ticker: ticker.clone(),
@@ -1335,7 +1337,7 @@ impl Capture {
                 // Where the page ended is the ADAPTER's reading: the loop does
                 // not parse a venue's payload. `None` stops the walk rather
                 // than paging forever from a time it invented.
-                let Some(end) = self.wiring.adapter.page_end(&payload) else {
+                let Some(end) = end else {
                     here = to_micros;
                     break;
                 };
@@ -1399,7 +1401,8 @@ impl Capture {
         &mut self,
         fetch: &F,
         request: Fetch,
-    ) -> Result<Result<Payload, FetchFailure>, CaptureError>
+        read_end: bool,
+    ) -> Result<Result<Option<PageEnd>, FetchFailure>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
         Fut: std::future::Future<Output = FetchResult>,
@@ -1408,9 +1411,17 @@ impl Capture {
         loop {
             match fetch(request.clone()).await {
                 Ok(payload) => {
-                    let copy = payload.clone();
+                    // **Where it ended, read before the page is taken**, not a
+                    // copy of the whole page kept to read it from afterwards —
+                    // up to 5,000 candles copied per walked page to answer two
+                    // numbers, and dropped unread by a caller that wanted none.
+                    let end = if read_end {
+                        self.wiring.adapter.page_end(&payload)
+                    } else {
+                        None
+                    };
                     self.take(payload)?;
-                    return Ok(Ok(copy));
+                    return Ok(Ok(end));
                 }
                 Err(failure)
                     if failure.throttled
@@ -1685,7 +1696,7 @@ impl Capture {
         else {
             return;
         };
-        let declaration = self.wiring.adapter.declaration().clone();
+        let declaration = self.wiring.adapter.declaration();
         let overlap = Walk::new(
             &declaration,
             filler.request.share,
@@ -1739,7 +1750,25 @@ impl Capture {
         };
         match result {
             Ok(page) => {
-                let copy = page.clone();
+                // **A full forward page is not the last one**: continue from
+                // past its last row, as the walk does. The adapter reads where
+                // it ended — before the page is taken, rather than from a copy
+                // of the whole page kept for it; the loop parses no venue
+                // payload.
+                let forward_rows = self
+                    .wiring
+                    .adapter
+                    .declaration()
+                    .paging(fill.series)
+                    .filter(|p| p.direction == PageDirection::ForwardFromStart)
+                    .map(|p| p.max_rows_per_call);
+                let next_from = forward_rows.and_then(|full| {
+                    self.wiring
+                        .adapter
+                        .page_end(&page)
+                        .filter(|end| end.rows >= full)
+                        .map(|end| end.last_micros + 1)
+                });
                 self.take(page)?;
                 if fill.history.is_some() {
                     tracing::info!(
@@ -1759,20 +1788,6 @@ impl Capture {
                         "filled a gap published while running"
                     );
                 }
-                // **A full forward page is not the last one**: continue from
-                // past its last row, as the walk does. The adapter reads where
-                // it ended; the loop parses no venue payload.
-                let declaration = self.wiring.adapter.declaration().clone();
-                let forward = declaration
-                    .paging(fill.series)
-                    .filter(|p| p.direction == PageDirection::ForwardFromStart);
-                let next_from = forward.and_then(|paging| {
-                    self.wiring
-                        .adapter
-                        .page_end(&copy)
-                        .filter(|end| end.rows >= paging.max_rows_per_call)
-                        .map(|end| end.last_micros + 1)
-                });
                 let cap = self.filler.as_ref().map_or(0, |f| f.request.cap);
                 match (next_from, fill.history) {
                     (Some(_), Some(history)) if history.pages >= cap => {
@@ -1798,7 +1813,7 @@ impl Capture {
                             });
                         }
                     }
-                    (None, Some(history)) if forward.is_some() || history.last_step => {
+                    (None, Some(history)) if forward_rows.is_some() || history.last_step => {
                         tracing::info!(
                             ticker = fill.ticker.as_str(),
                             series = fill.series.as_str(),
@@ -1861,7 +1876,7 @@ impl Capture {
     /// Start the earliest due fill, as its own task, if none is out and the
     /// walk's pace allows.
     fn start_due_fill(&mut self, now_micros: i64) {
-        let declaration = self.wiring.adapter.declaration().clone();
+        let declaration = self.wiring.adapter.declaration();
         let Some(filler) = self.filler.as_mut() else {
             return;
         };

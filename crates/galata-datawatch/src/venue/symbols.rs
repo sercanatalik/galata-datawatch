@@ -16,10 +16,17 @@ use galata_wire::{Ticker, TokenError};
 /// The venue's own strings, per channel, and the one ticker they mean.
 #[derive(Debug, Clone, Default)]
 pub struct Symbols {
-    /// `(channel, venue symbol) -> ticker`.
-    by_channel: BTreeMap<(String, String), Ticker>,
+    /// `channel -> venue symbol -> ticker`.
+    ///
+    /// **Nested, so a lookup borrows.** A `(String, String)` key made every
+    /// resolve allocate both strings to ask the question — twice per trade,
+    /// quote and candle on the busiest path in the process.
+    by_channel: BTreeMap<String, BTreeMap<String, Ticker>>,
     /// The fallback: a venue symbol that means the same on every channel.
     everywhere: BTreeMap<String, Ticker>,
+    /// `ticker -> venue symbol`, the reverse of `everywhere`, so a subscribe
+    /// frame's symbol is a lookup rather than a scan.
+    reverse: BTreeMap<Ticker, String>,
 }
 
 impl Symbols {
@@ -31,8 +38,34 @@ impl Symbols {
     /// A venue symbol that means one ticker on every channel — the ordinary
     /// case.
     pub fn everywhere(&mut self, venue_symbol: &str, ticker: &str) -> Result<(), TokenError> {
-        self.everywhere
-            .insert(venue_symbol.to_string(), Ticker::new(ticker)?);
+        let ticker = Ticker::new(ticker)?;
+        // The first declared spelling, as the scan over `everywhere` found.
+        if !self.reverse.contains_key(&ticker)
+            || self
+                .reverse
+                .get(&ticker)
+                .is_some_and(|held| venue_symbol < held.as_str())
+        {
+            self.reverse
+                .insert(ticker.clone(), venue_symbol.to_string());
+        }
+        // A spelling re-pointed at another ticker: the old ticker's reverse
+        // entry may have been this spelling, so it is found again.
+        if let Some(old) = self
+            .everywhere
+            .insert(venue_symbol.to_string(), ticker.clone())
+            && old != ticker
+            && self.reverse.get(&old).is_some_and(|s| s == venue_symbol)
+        {
+            match self.everywhere.iter().find(|(_, t)| **t == old) {
+                Some((spelling, _)) => {
+                    self.reverse.insert(old, spelling.clone());
+                }
+                None => {
+                    self.reverse.remove(&old);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -43,10 +76,10 @@ impl Symbols {
         venue_symbol: &str,
         ticker: &str,
     ) -> Result<(), TokenError> {
-        self.by_channel.insert(
-            (channel.to_string(), venue_symbol.to_string()),
-            Ticker::new(ticker)?,
-        );
+        self.by_channel
+            .entry(channel.to_string())
+            .or_default()
+            .insert(venue_symbol.to_string(), Ticker::new(ticker)?);
         Ok(())
     }
 
@@ -56,17 +89,15 @@ impl Symbols {
     /// the case it exists for.
     pub fn resolve(&self, channel: &str, venue_symbol: &str) -> Option<&Ticker> {
         self.by_channel
-            .get(&(channel.to_string(), venue_symbol.to_string()))
+            .get(channel)
+            .and_then(|symbols| symbols.get(venue_symbol))
             .or_else(|| self.everywhere.get(venue_symbol))
     }
 
     /// The venue's own string for a ticker, which is what a subscribe frame
     /// carries.
     pub fn venue_symbol_for(&self, ticker: &Ticker) -> Option<&str> {
-        self.everywhere
-            .iter()
-            .find(|(_, t)| *t == ticker)
-            .map(|(s, _)| s.as_str())
+        self.reverse.get(ticker).map(String::as_str)
     }
 
     /// Every venue symbol declared.
@@ -78,6 +109,25 @@ impl Symbols {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reverse_lookup_answers_as_the_scan_did() {
+        let mut symbols = Symbols::new();
+        symbols.everywhere("b:BTC", "BTC").unwrap();
+        symbols.everywhere("a:BTC", "BTC").unwrap();
+        symbols.everywhere("ETH", "ETH").unwrap();
+        let btc = Ticker::new("BTC").unwrap();
+        assert_eq!(
+            symbols.venue_symbol_for(&btc),
+            Some("a:BTC"),
+            "the first spelling in order"
+        );
+        // Re-pointed: the old ticker falls back to its remaining spelling.
+        symbols.everywhere("a:BTC", "ETH").unwrap();
+        assert_eq!(symbols.venue_symbol_for(&btc), Some("b:BTC"));
+        symbols.everywhere("b:BTC", "ETH").unwrap();
+        assert_eq!(symbols.venue_symbol_for(&btc), None);
+    }
 
     #[test]
     fn two_venue_strings_resolve_to_one_ticker() {
