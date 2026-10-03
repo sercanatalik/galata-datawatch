@@ -262,7 +262,8 @@ different shape from the one planned here.
   began. **And the premium is carried** (`carry-the-settled-premium`): the
   rate is the floor whenever the clamp does not bind, so it cannot say how far
   the perp traded from its oracle, and the premium can.
-- ~~**`pace-by-the-venue-weight`**~~ **Built 2026-09-29, not deployed.**
+- ~~**`pace-by-the-venue-weight`**~~ **Built 2026-09-29, deployed 19:29Z the
+  same day** with `walk_funding_days = 1300` on and no 429 (`design/measured.md`).
   `Budget.weight_per_minute`, and each `Paging` states a `RequestCost`
   (Hyperliquid: candles 20 + 1/60 rows, funding 20 + 1/20, quoted from the
   docs). Every call waits its own expected weight at the share, so a full
@@ -894,7 +895,8 @@ writes one row set per closed hour, per instrument:
 A trailing figure is absent under 90% settled coverage, naming the last
 settled hour. On its first run every settled figure was absent ("covers 0 of
 24 hours; the last settled hour is 2026-09-25T06:00") because the funding walk
-is off (todo P1), so the signal states that the walk is off. The flow runs
+was off, so the signal stated that the walk was off. The walk has been on
+since 2026-09-29 19:29Z (`pace-by-the-venue-weight`). The flow runs
 `varcov` then `carry`, and one refusal does not stop the other.
 
 **Jumps — 2026-09-28** (`derive-the-jumps`). `galata-signals jumps`, at each
