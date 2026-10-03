@@ -35,7 +35,7 @@ def _bars(ticker, days=8, every_day=288, seed=1, shock=None):
 @pytest.fixture(name="served")
 def _served(monkeypatch):
     held = {"bars": _bars("BTC")}
-    monkeypatch.setattr(moments, "fivemin", lambda: held["bars"])
+    monkeypatch.setattr(moments, "fivemin", lambda start=None: held["bars"])
     return held
 
 

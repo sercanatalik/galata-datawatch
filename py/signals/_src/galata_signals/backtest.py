@@ -28,9 +28,9 @@ import polars as pl
 import galata_research as gr
 from galata_research import Refused
 
-from .bars import WIDTH_US, bars
+from .bars import WIDTH_US, bars, since
 from .basis import _dt
-from .frontier import frontier, period
+from .frontier import frontier, period, signal_files
 from .varcov import Horizon, Run, stored_asof
 
 SIGNAL = "backtest"
@@ -42,16 +42,15 @@ MEASURES = ("n", "hit_rate_975", "kupiec_p_975", "cc_p_975", "dq_p_975", "z2_975
 
 def stored_tails(tape: Path, lo: int, hi: int) -> pl.DataFrame:
     """The stored `tail` rows with asof in [lo, hi), the newest computation of each: `horizon, ticker, asof, measure, value`."""
-    root = tape / "kind=signals"
     empty = pl.DataFrame(schema={"horizon": pl.String, "ticker": pl.String, "asof": pl.Int64, "measure": pl.String, "value": pl.Float64})
-    if not root.is_dir() or not any(root.rglob("*.parquet")):
+    files = signal_files(tape, lo, hi)
+    if not files:
         return empty
     return (
-        pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
+        pl.scan_parquet(files, hive_partitioning=False)
         .filter((pl.col("signal") == "tail") & pl.col("measure").is_in(["var_99", "var_975", "es_975"]) & (pl.col("asof_micros") >= lo) & (pl.col("asof_micros") < hi))
-        .sort("computed_micros")
         .group_by("horizon", "ticker_i", "asof_micros", "measure")
-        .agg(pl.col("value").last())
+        .agg(pl.col("value").sort_by("computed_micros").last())
         .select("horizon", pl.col("ticker_i").alias("ticker"), pl.col("asof_micros").alias("asof"), "measure", "value")
         .collect()
     )
@@ -70,7 +69,10 @@ def compute(horizons: list[Horizon], tape: Path, run: Run) -> Run:
             run.said.append(f"backtest {hz.name}: no stored tail yet")
             continue
         wide = mine.pivot(on="measure", index=["ticker", "asof"], values="value")
-        r = gr.timeseries.returns(bars(hz.name, hz.bars), kind="log").drop_nulls("return").select(
+        # Only the window's returns can match a stored tail: three widths before
+        # it cover the bar each return is taken from, and a partial first bucket.
+        start = since(asof - WINDOW_DAYS * DAY_US - 3 * WIDTH_US[hz.name])
+        r = gr.timeseries.returns(bars(hz.name, hz.bars, start), kind="log").drop_nulls("return").select(
             "ticker", (pl.col("close_ts").dt.epoch("us") - WIDTH_US[hz.name]).alias("asof"), "return"
         )
         # A tail at asof forecast the bar that closes one width later: its return is keyed by that bar's start.

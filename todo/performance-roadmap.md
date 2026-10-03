@@ -238,6 +238,7 @@ Also worth deciding on (they depend on intent or input):
 |---|---|---|
 | 1 | C1 retention validation · C5 fill timeout + bounded HTTP client · C6 throttled poll adds to cadence · C7 reconnect waits after an empty session | done |
 | 2 | 1.1 incremental ledger history (`events::History`, read from the last receipt) · 1.2 kind-scoped reads · C10 unreadable account skipped and named · C11 first fill anchors after funding | done |
+| 3 | 1.3 bounded candle reads for `moments` and `backtest` (`bars(.., start)`) · 1.4 signal history reads only the window's `date=` dirs (`frontier.signal_files`) · C12 newest computation per hour in `activity`/`liquidity` · C13 empty or mixed-width 1m handled in `bars.build`. **Left unbounded on purpose:** `jumps` and `varcov` fit over the whole history, so bounding them changes the estimate — a modelling decision, not a refactor | done |
 
 ## Suggested order
 

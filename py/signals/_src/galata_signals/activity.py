@@ -32,7 +32,7 @@ from pathlib import Path
 import polars as pl
 
 from .basis import _dt
-from .frontier import frontier, period
+from .frontier import frontier, period, signal_files
 from .liquidity import trades
 from .varcov import Run, stored_asof
 
@@ -49,13 +49,18 @@ RAW = ("notional_usd", "trade_count", "avg_trade_usd")
 
 def history(tape: Path, lo: int, hi: int) -> pl.DataFrame:
     """This signal's stored raw figures with asof in [lo, hi): `ticker_i, asof_micros, measure, value`."""
-    root = tape / "kind=signals"
     empty = pl.DataFrame(schema={"ticker_i": pl.String, "asof_micros": pl.Int64, "measure": pl.String, "value": pl.Float64})
-    if not root.is_dir() or not any(root.rglob("*.parquet")):
+    files = signal_files(tape, lo, hi)
+    if not files:
         return empty
+    # The newest computation of each hour: a `--redo` adds a row beside the one
+    # it repairs (the dataset is additive-only), and both in the baseline would
+    # keep the wrong figure in the median it was redone to replace.
     return (
-        pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
+        pl.scan_parquet(files, hive_partitioning=False)
         .filter((pl.col("signal") == SIGNAL) & pl.col("measure").is_in(list(RAW)) & (pl.col("asof_micros") >= lo) & (pl.col("asof_micros") < hi))
+        .group_by("ticker_i", "asof_micros", "measure")
+        .agg(pl.col("value").sort_by("computed_micros").last())
         .select("ticker_i", "asof_micros", "measure", "value")
         .collect()
     )
