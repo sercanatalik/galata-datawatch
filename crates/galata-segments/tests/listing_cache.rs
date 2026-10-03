@@ -136,3 +136,40 @@ fn prune_forgets_a_directory_that_is_gone() {
     cache.prune();
     assert_eq!(cache.partitions_with_segments(t.path()), uncached(t.path()));
 }
+
+#[test]
+fn one_walk_lists_what_partitions_and_list_segments_list() {
+    let t = tree();
+    assert_eq!(
+        galata_segments::partitions_listed(t.path()),
+        uncached(t.path())
+    );
+}
+
+#[test]
+fn a_pruned_walk_lists_only_the_directories_it_descends() {
+    let t = tree();
+    let one_day = |name: &str| !name.starts_with("date=") || name == "date=2020-01-02";
+    let listed = galata_segments::partitions_listed_where(t.path(), &one_day);
+    let dirs: Vec<_> = listed.iter().map(|(d, _)| d.clone()).collect();
+    assert_eq!(dirs, vec![t.path().join("date=2020-01-02")]);
+    assert_eq!(listed[0].1.len(), 1, "the partial write is not a segment");
+}
+
+#[test]
+fn the_newest_position_of_a_subtree_is_read_from_the_listing() {
+    let t = tree();
+    let listing = galata_segments::partitions_listed(t.path());
+    assert_eq!(
+        galata_segments::last_durable_in(&listing, t.path()),
+        galata_segments::last_durable(t.path())
+    );
+    assert_eq!(
+        galata_segments::last_durable_in(&listing, &t.path().join("date=2020-01-01")),
+        galata_segments::last_durable(&t.path().join("date=2020-01-01"))
+    );
+    assert_eq!(
+        galata_segments::last_durable_in(&listing, &t.path().join("date=1999-01-01")),
+        None
+    );
+}

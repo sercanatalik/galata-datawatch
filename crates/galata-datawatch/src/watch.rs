@@ -148,8 +148,13 @@ pub fn watch(
         });
     }
 
-    let partitions = galata_segments::partitions(archive_root);
-    report.checked = partitions.len();
+    // **Each store listed once**, and every question below asked of that
+    // listing. Asking `partitions`, then `nested` per partition, then
+    // `overdue_closed`, then each venue's newest segment walked the archive
+    // three or four times a run.
+    let archive = galata_segments::partitions_listed(archive_root);
+    let tape = galata_segments::partitions_listed(tape_root);
+    report.checked = archive.len();
 
     // **Nesting, unconditionally, and on BOTH stores** — which is not the
     // overlap rule refused above.
@@ -164,9 +169,9 @@ pub fn watch(
     // Compaction repairs it on its next sweep. This is the window before that,
     // in which a rebuild would double those rows **silently**: the duplicated
     // payloads keep their sequences, so nothing downstream overlaps either.
-    for root in [archive_root, tape_root] {
-        for partition in galata_segments::partitions(root) {
-            let nested = galata_segments::nested(&partition);
+    for listing in [&archive, &tape] {
+        for (partition, segments) in listing {
+            let nested = galata_segments::nested_in(segments);
             if !nested.is_empty() {
                 report.findings.push(Finding {
                     observed: format!(
@@ -185,7 +190,7 @@ pub fn watch(
     if let Some(max) = thresholds.max_segments_in_closed_partition {
         // **Closed only.** A partition still being written to is supposed to
         // hold many small segments; that is what `flush_secs = 2` buys.
-        for (path, segments) in galata_segments::overdue_closed(archive_root, today, max) {
+        for (path, segments) in galata_segments::overdue_in(&archive, today, max) {
             report.findings.push(Finding {
                 observed: format!("{segments} segments in a closed partition"),
                 expected: format!("at most {max}"),
@@ -204,7 +209,7 @@ pub fn watch(
         for venue in venues {
             let scope = format!("venue={venue}");
             let at = archive_root.join(&scope);
-            match galata_segments::last_durable_for_scope(archive_root, &scope) {
+            match galata_segments::last_durable_in(&archive, &at) {
                 // The most stale a declared venue can be — and it used to
                 // read as clean.
                 None => report.findings.push(Finding {

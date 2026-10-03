@@ -72,6 +72,100 @@ pub fn list_segments(dir: &Path) -> Vec<(Cursor, PathBuf)> {
     out
 }
 
+/// Every partition under a root with its segments, oldest first — what
+/// [`partitions`] and [`list_segments`] answer together, **reading each
+/// directory once**.
+///
+/// Asking `partitions` and then `list_segments` of each reads every partition
+/// directory twice, and a watcher that also asks for nesting, overdue
+/// partitions and each venue's newest segment walked the archive four times
+/// over. One listing answers all of them; the `*_in` functions take it.
+pub fn partitions_listed(root: &Path) -> Vec<(PathBuf, Vec<(Cursor, PathBuf)>)> {
+    partitions_listed_where(root, &|_| true)
+}
+
+/// [`partitions_listed`], descending only into directories `descend` accepts
+/// by name. A pass about one day prunes every other `date=` directory without
+/// listing it.
+pub fn partitions_listed_where(
+    root: &Path,
+    descend: &dyn Fn(&str) -> bool,
+) -> Vec<(PathBuf, Vec<(Cursor, PathBuf)>)> {
+    let mut out = Vec::new();
+    walk_listed(root, descend, &mut out);
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn walk_listed(
+    dir: &Path,
+    descend: &dyn Fn(&str) -> bool,
+    out: &mut Vec<(PathBuf, Vec<(Cursor, PathBuf)>)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut segments = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        // As `list_segments` and `walk_partitions`: the type readdir returned,
+        // and a `stat` only for a symlink.
+        let (is_dir, is_file) = if file_type.is_symlink() {
+            (path.is_dir(), path.is_file())
+        } else {
+            (file_type.is_dir(), file_type.is_file())
+        };
+        if is_dir {
+            if entry.file_name().to_str().is_some_and(descend) {
+                walk_listed(&path, descend, out);
+            }
+        } else if is_file && let Some(cursor) = entry.file_name().to_str().and_then(Cursor::parse) {
+            segments.push((cursor, path));
+        }
+    }
+    if !segments.is_empty() {
+        segments.sort_by_key(|(c, _)| (c.variant(), c.sort_key()));
+        out.push((dir.to_path_buf(), segments));
+    }
+}
+
+/// The furthest position of the listed segments under `under`: what
+/// [`last_durable`] answers for that subtree, from a listing already made.
+pub fn last_durable_in(
+    listing: &[(PathBuf, Vec<(Cursor, PathBuf)>)],
+    under: &Path,
+) -> Option<(Variant, i128)> {
+    let mut best: Option<(Variant, i128)> = None;
+    for (_, segments) in listing.iter().filter(|(dir, _)| dir.starts_with(under)) {
+        for (cursor, _) in segments {
+            let here = (cursor.variant(), cursor.last_position());
+            best = Some(match best {
+                None => here,
+                Some((v, p)) if v == here.0 => (v, p.max(here.1)),
+                Some(existing) => existing,
+            });
+        }
+    }
+    best
+}
+
+/// The two variants in one partition's listing, where it holds more than
+/// one. [`mixed_cursors`], without listing again.
+pub fn mixed_in(listed: &[(Cursor, PathBuf)]) -> Option<(Variant, Variant)> {
+    let mut seen: Option<Variant> = None;
+    for (cursor, _) in listed {
+        match seen {
+            None => seen = Some(cursor.variant()),
+            Some(first) if first != cursor.variant() => return Some((first, cursor.variant())),
+            Some(_) => {}
+        }
+    }
+    None
+}
+
 /// The two variants found in a partition, where it holds more than one.
 ///
 /// `None` is the healthy case.

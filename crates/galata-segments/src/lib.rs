@@ -24,14 +24,15 @@ pub mod writer;
 
 pub use compact::{
     Compacted, HOUR_MICROS, compact_closed, compact_closed_hours, compact_partition, nested,
-    overdue_closed,
+    nested_in, overdue_closed, overdue_in,
 };
 pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;
 pub use hold::{HOLD_FILE, Hold, Mode, hold, hold_shared, wait};
 pub use listing::{
-    ListingCache, RACY_MARGIN, frontier, last_durable, last_durable_for_scope, list_segments,
-    mixed_cursors, overlapping_ranges, overlapping_ranges_by_label, partitions, scannable,
+    ListingCache, RACY_MARGIN, frontier, last_durable, last_durable_for_scope, last_durable_in,
+    list_segments, mixed_cursors, mixed_in, overlapping_ranges, overlapping_ranges_by_label,
+    partitions, partitions_listed, partitions_listed_where, scannable,
 };
 pub use reader::{label, read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{

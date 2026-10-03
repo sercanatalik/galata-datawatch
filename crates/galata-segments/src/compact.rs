@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 
 use crate::cursor::Cursor;
 use crate::error::SegmentError;
-use crate::listing::{list_segments, mixed_cursors, partitions};
+use crate::listing::{
+    list_segments, mixed_in, partitions, partitions_listed, partitions_listed_where,
+};
 use crate::reader::read_segment;
 use crate::writer::{Codec, SegmentWriter};
 
@@ -44,15 +46,17 @@ pub struct Compacted {
 /// A partition already holding one segment is left alone — rewriting it would
 /// churn disk for nothing.
 pub fn compact_partition(dir: &Path, codec: Codec) -> Result<Compacted, SegmentError> {
-    if let Some((a, b)) = mixed_cursors(dir) {
+    // Listed once, and the mixed-variant refusal asked of that listing: asking
+    // `mixed_cursors` first read the directory a second time to learn nothing
+    // the listing does not say.
+    let listed = list_segments(dir);
+    if let Some((a, b)) = mixed_in(&listed) {
         return Err(SegmentError::MixedCursors {
             path: dir.to_path_buf(),
             a,
             b,
         });
     }
-
-    let listed = list_segments(dir);
     let started_with = listed.len();
     let rows = compact_set(dir, listed, codec)?.1;
 
@@ -140,7 +144,11 @@ pub fn compact_closed_hours(
     use std::collections::BTreeMap;
     let mut total = Compacted::default();
     let day = format!("date={today}");
-    for dir in partitions(root) {
+    // **Every other day pruned by name, unlisted.** Walking every partition
+    // to keep today's read the whole history — 2,230 `date=` directories —
+    // every hour, for the few written today.
+    let today_only = |name: &str| !name.starts_with("date=") || name == day;
+    for (dir, listed) in partitions_listed_where(root, &today_only) {
         if !dir
             .components()
             .any(|c| c.as_os_str().to_str() == Some(day.as_str()))
@@ -148,7 +156,7 @@ pub fn compact_closed_hours(
             continue;
         }
         let mut hours: BTreeMap<i64, Vec<(Cursor, PathBuf)>> = BTreeMap::new();
-        for (cursor, path) in list_segments(&dir) {
+        for (cursor, path) in listed {
             if let Cursor::Time { last_micros, .. } = cursor
                 && last_micros < cutoff_micros
             {
@@ -202,12 +210,19 @@ pub fn compact_closed(root: &Path, today: &str, codec: Codec) -> Result<Compacte
 ///
 /// The listing is cheap — directory entries only, no parquet decode.
 pub fn overdue_closed(root: &Path, today: &str, max_segments: usize) -> Vec<(PathBuf, usize)> {
-    let mut out: Vec<(PathBuf, usize)> = closed_partitions(root, today)
-        .into_iter()
-        .map(|dir| {
-            let count = list_segments(&dir).len();
-            (dir, count)
-        })
+    overdue_in(&partitions_listed(root), today, max_segments)
+}
+
+/// [`overdue_closed`], from a listing already made.
+pub fn overdue_in(
+    listing: &[(PathBuf, Vec<(Cursor, PathBuf)>)],
+    today: &str,
+    max_segments: usize,
+) -> Vec<(PathBuf, usize)> {
+    let mut out: Vec<(PathBuf, usize)> = listing
+        .iter()
+        .filter(|(dir, _)| is_closed(dir, today))
+        .map(|(dir, segments)| (dir.clone(), segments.len()))
         .filter(|(_, count)| *count > max_segments)
         .collect();
     // Worst first: an operator reading this wants the partition that has been
@@ -223,16 +238,17 @@ pub fn overdue_closed(root: &Path, today: &str, max_segments: usize) -> Vec<(Pat
 fn closed_partitions(root: &Path, today: &str) -> Vec<PathBuf> {
     partitions(root)
         .into_iter()
-        .filter(|dir| {
-            dir.components()
-                .filter_map(|c| c.as_os_str().to_str())
-                .filter_map(|level| level.strip_prefix("date="))
-                // Lexicographic on YYYY-MM-DD is chronological, which is the
-                // one thing the partition format buys that a shorter one would
-                // not.
-                .any(|date| date < today)
-        })
+        .filter(|dir| is_closed(dir, today))
         .collect()
+}
+
+fn is_closed(dir: &Path, today: &str) -> bool {
+    dir.components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .filter_map(|level| level.strip_prefix("date="))
+        // Lexicographic on YYYY-MM-DD is chronological, which is the one
+        // thing the partition format buys that a shorter one would not.
+        .any(|date| date < today)
 }
 
 /// **Segments an interrupted compaction left behind**, in one partition.
@@ -259,6 +275,11 @@ fn closed_partitions(root: &Path, today: &str) -> Vec<PathBuf> {
 /// either.
 pub fn nested(dir: &Path) -> Vec<PathBuf> {
     superseded(&list_segments(dir))
+}
+
+/// [`nested`], from one partition's listing already made.
+pub fn nested_in(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
+    superseded(listed)
 }
 
 /// Of the segments a wider one contains by range, the ones whose **every row
