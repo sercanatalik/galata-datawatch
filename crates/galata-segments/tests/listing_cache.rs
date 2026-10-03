@@ -44,19 +44,14 @@ fn tree() -> tempfile::TempDir {
     t
 }
 
-fn uncached(
-    root: &Path,
-) -> Vec<(
-    std::path::PathBuf,
-    Vec<(galata_segments::Cursor, std::path::PathBuf)>,
-)> {
+fn uncached(root: &Path) -> Vec<(std::path::PathBuf, galata_segments::SharedSegments)> {
     partitions(root)
         .into_iter()
         .map(|p| {
-            let s = list_segments(&p);
+            let s = list_segments(&p).into();
             (p, s)
         })
-        .filter(|(_, s)| !s.is_empty())
+        .filter(|(_, s): &(_, galata_segments::SharedSegments)| !s.is_empty())
         .collect()
 }
 
@@ -140,10 +135,11 @@ fn prune_forgets_a_directory_that_is_gone() {
 #[test]
 fn one_walk_lists_what_partitions_and_list_segments_list() {
     let t = tree();
-    assert_eq!(
-        galata_segments::partitions_listed(t.path()),
-        uncached(t.path())
-    );
+    let listed: Vec<_> = galata_segments::partitions_listed(t.path())
+        .into_iter()
+        .map(|(p, s)| (p, galata_segments::SharedSegments::from(s)))
+        .collect();
+    assert_eq!(listed, uncached(t.path()));
 }
 
 #[test]

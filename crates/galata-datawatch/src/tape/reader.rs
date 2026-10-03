@@ -214,12 +214,12 @@ impl Bound {
 ///
 /// Whose a segment is comes from its label, never from a column statistic.
 fn venue_frontiers(
-    partitions: &[(PathBuf, Vec<(galata_segments::Cursor, PathBuf)>)],
+    partitions: &[(PathBuf, galata_segments::SharedSegments)],
     labels: &LabelCache,
 ) -> Result<BTreeMap<String, i64>, ReadError> {
     let mut out: BTreeMap<String, i64> = BTreeMap::new();
     for (_, segments) in partitions {
-        for (cursor, path) in segments {
+        for (cursor, path) in segments.iter() {
             let galata_segments::Cursor::Seq { last, .. } = *cursor else {
                 return Err(ReadError::Incomparable);
             };

@@ -30,9 +30,9 @@ pub use cursor::{Cursor, Variant};
 pub use error::SegmentError;
 pub use hold::{HOLD_FILE, Hold, Mode, hold, hold_shared, wait};
 pub use listing::{
-    ListingCache, RACY_MARGIN, frontier, last_durable, last_durable_for_scope, last_durable_in,
-    list_segments, mixed_cursors, mixed_in, overlapping_ranges, overlapping_ranges_by_label,
-    partitions, partitions_listed, partitions_listed_where, scannable,
+    ListingCache, RACY_MARGIN, SharedSegments, frontier, last_durable, last_durable_for_scope,
+    last_durable_in, list_segments, mixed_cursors, mixed_in, overlapping_ranges,
+    overlapping_ranges_by_label, partitions, partitions_listed, partitions_listed_where, scannable,
 };
 pub use reader::{Prune, Segment, label, read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{

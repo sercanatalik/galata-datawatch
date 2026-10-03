@@ -401,9 +401,16 @@ struct Listed {
     /// Older than the newest mtime of the walk that read it by more than the
     /// margin: safe to reuse while `modified` is unchanged.
     trusted: bool,
-    subdirs: Vec<PathBuf>,
-    segments: Vec<(Cursor, PathBuf)>,
+    /// Shared, not owned: a warm walk hands these out by reference count.
+    /// Owning them deep-copied every path of every cached directory on every
+    /// hit — some 128,000 a second on a watch of today's partitions.
+    subdirs: std::sync::Arc<[PathBuf]>,
+    segments: std::sync::Arc<[(Cursor, PathBuf)]>,
 }
+
+/// One partition's segments as [`ListingCache`] hands them out: shared with
+/// the cache, oldest first.
+pub type SharedSegments = std::sync::Arc<[(Cursor, PathBuf)]>;
 
 impl ListingCache {
     /// Every partition under `root` that holds a segment, with its segments
@@ -412,7 +419,7 @@ impl ListingCache {
     ///
     /// **An unreadable directory is an empty listing**, as elsewhere in this
     /// module; see [`scannable`].
-    pub fn partitions_with_segments(&self, root: &Path) -> Vec<(PathBuf, Vec<(Cursor, PathBuf)>)> {
+    pub fn partitions_with_segments(&self, root: &Path) -> Vec<(PathBuf, SharedSegments)> {
         let mut seen: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         let mut out = Vec::new();
         self.walk(root, &mut seen, &mut out);
@@ -422,7 +429,13 @@ impl ListingCache {
             && let Ok(mut dirs) = self.dirs.lock()
         {
             for (dir, modified) in &seen {
-                if let Some(listed) = dirs.get_mut(dir) {
+                // **Only the listing this walk read.** Two walks can share the
+                // cache: one that settles last must not mark trusted an entry
+                // a later walk replaced, by the earlier walk's timing — the
+                // newer listing may be racily clean and miss a segment.
+                if let Some(listed) = dirs.get_mut(dir)
+                    && listed.modified == *modified
+                {
                     listed.trusted = modified
                         .checked_add(RACY_MARGIN)
                         .is_some_and(|edge| edge < newest);
@@ -437,7 +450,7 @@ impl ListingCache {
         &self,
         dir: &Path,
         seen: &mut Vec<(PathBuf, std::time::SystemTime)>,
-        out: &mut Vec<(PathBuf, Vec<(Cursor, PathBuf)>)>,
+        out: &mut Vec<(PathBuf, SharedSegments)>,
     ) {
         let Ok(modified) = std::fs::metadata(dir).and_then(|m| m.modified()) else {
             return;
@@ -461,7 +474,7 @@ impl ListingCache {
         if !listed.segments.is_empty() {
             out.push((dir.to_path_buf(), listed.segments));
         }
-        for sub in &listed.subdirs {
+        for sub in listed.subdirs.iter() {
             self.walk(sub, seen, out);
         }
     }
@@ -496,8 +509,8 @@ impl ListingCache {
         Listed {
             modified,
             trusted: false,
-            subdirs,
-            segments,
+            subdirs: subdirs.into(),
+            segments: segments.into(),
         }
     }
 
