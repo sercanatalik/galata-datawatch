@@ -39,6 +39,8 @@ use crate::calendar::date_of;
 /// only one of them is our own loss, and the discipline that makes a gap
 /// trustworthy applies to our loss too.
 const CLEAN_SHUTDOWN: &str = ".clean-shutdown";
+/// The earliest receipt a failed flush could not make durable.
+const UNFLUSHED: &str = ".unflushed";
 
 /// Why a payload could not be recorded.
 #[derive(Debug, thiserror::Error)]
@@ -363,33 +365,104 @@ impl Archive {
     }
 
     /// Commit everything buffered. Called on the flush timer, and at shutdown.
+    ///
+    /// **A flush that fails part-way loses nothing it still holds.** One
+    /// segment is written per partition, so a write failing on the third
+    /// partition used to drop the third onward, and every failure row, with
+    /// the first two already on disk. Those first two then dated the restart
+    /// gap from *after* the rows that were lost, so the loss was not even
+    /// reported. Now what was not written goes back in the buffer, and the
+    /// earliest receipt it holds is marked on disk, so a restart dates its gap
+    /// from there.
     pub fn flush(&mut self) -> Result<Vec<PathBuf>, RecordError> {
         let payloads = std::mem::take(&mut self.buffered);
         let failures = std::mem::take(&mut self.failures);
-        let mut written = self.commit(payloads)?;
-        written.extend(self.commit_failures(failures)?);
+        let mut written = Vec::new();
+        if let Err((error, unwritten)) = self.commit_or_return(payloads, &mut written) {
+            self.buffered = unwritten;
+            self.failures = failures;
+            self.mark_unflushed();
+            return Err(error);
+        }
+        match self.commit_failures(failures.clone()) {
+            Ok(more) => written.extend(more),
+            Err(error) => {
+                self.failures = failures;
+                self.mark_unflushed();
+                return Err(error);
+            }
+        }
+        // Everything held is durable: a marker from an earlier failure no
+        // longer bounds anything.
+        let _ = std::fs::remove_file(self.scope_path().join(UNFLUSHED));
         Ok(written)
+    }
+
+    /// Commit partition by partition; on a failure, hand back every payload
+    /// not yet written — the failing partition's included.
+    fn commit_or_return(
+        &mut self,
+        payloads: Vec<Payload>,
+        written: &mut Vec<PathBuf>,
+    ) -> Result<(), (RecordError, Vec<Payload>)> {
+        let mut groups = group_by_partition(payloads).into_iter();
+        while let Some((partition, group)) = groups.next() {
+            match self.commit_group(partition, &group) {
+                Ok(path) => written.push(path),
+                Err(error) => {
+                    let mut unwritten = group;
+                    unwritten.extend(groups.flat_map(|(_, g)| g));
+                    unwritten.sort_by_key(|p| p.seq);
+                    return Err((error, unwritten));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Best effort, like the clean-shutdown marker: the earliest receipt held
+    /// and not durable, for [`Archive::restart_window`] to date a gap from.
+    fn mark_unflushed(&self) {
+        let earliest = self
+            .buffered
+            .iter()
+            .map(|p| p.recv_micros)
+            .chain(self.failures.iter().map(|f| f.recv_micros))
+            .min();
+        if let Some(earliest) = earliest {
+            let scope = self.scope_path();
+            let _ = std::fs::create_dir_all(&scope);
+            let _ = std::fs::write(scope.join(UNFLUSHED), earliest.to_string());
+        }
     }
 
     fn commit(&mut self, payloads: Vec<Payload>) -> Result<Vec<PathBuf>, RecordError> {
         let mut written = Vec::new();
         for (partition, group) in group_by_partition(payloads) {
-            let dir = self.root.join(partition);
-            let batch = payload_batch(&group).map_err(|e| RecordError::Arrow(e.to_string()))?;
-            let cursor = self.cursor_for(group.iter().map(|p| p.recv_micros));
-            // One partition is one address, so the first payload's labels are
-            // every payload's.
-            let labels = group[0].address.labels();
-            written.push(write_segment_labelled(
-                &dir,
-                cursor,
-                &batch,
-                self.codec,
-                &[PRUNE_COLUMN],
-                &labels,
-            )?);
+            written.push(self.commit_group(partition, &group)?);
         }
         Ok(written)
+    }
+
+    fn commit_group(
+        &mut self,
+        partition: PathBuf,
+        group: &[Payload],
+    ) -> Result<PathBuf, RecordError> {
+        let dir = self.root.join(partition);
+        let batch = payload_batch(group).map_err(|e| RecordError::Arrow(e.to_string()))?;
+        let cursor = self.cursor_for(group.iter().map(|p| p.recv_micros));
+        // One partition is one address, so the first payload's labels are
+        // every payload's.
+        let labels = group[0].address.labels();
+        Ok(write_segment_labelled(
+            &dir,
+            cursor,
+            &batch,
+            self.codec,
+            &[PRUNE_COLUMN],
+            &labels,
+        )?)
     }
 
     fn commit_failures(&mut self, failures: Vec<Failure>) -> Result<Vec<PathBuf>, RecordError> {
@@ -471,6 +544,7 @@ impl Archive {
     /// Called once at startup, **after** the restart window has been read.
     pub fn clear_clean_shutdown(&self) {
         let _ = std::fs::remove_file(self.scope_path().join(CLEAN_SHUTDOWN));
+        let _ = std::fs::remove_file(self.scope_path().join(UNFLUSHED));
     }
 
     /// The interval this process was not capturing, and why.
@@ -483,6 +557,12 @@ impl Archive {
     /// from, and a gap back to the beginning of time is not a fact.
     pub fn restart_window(&self, now_micros: i64) -> Option<(i64, i64, GapCause)> {
         let from = self.last_durable()?;
+        // A flush that failed part-way left newer segments than what it lost:
+        // the gap starts at the earliest receipt it could not write.
+        let unflushed = std::fs::read_to_string(self.scope_path().join(UNFLUSHED))
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok());
+        let from = unflushed.map_or(from, |u| from.min(u));
         if from >= now_micros {
             return None;
         }

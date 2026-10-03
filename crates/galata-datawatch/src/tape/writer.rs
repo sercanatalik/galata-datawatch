@@ -163,24 +163,34 @@ impl Tape {
     }
 
     /// Write and commit everything buffered.
+    ///
+    /// **Every batch is built before any is written.** Building is where a
+    /// row is refused (a price past the column's precision), and that refusal
+    /// is deterministic: when it came after some partitions were already
+    /// written, a `--replace` rebuild returned before removing what those
+    /// replaced, and every retry failed the same way — leaving the old and new
+    /// copies side by side for good. Now a refused row writes nothing.
     pub fn commit(&mut self) -> Result<Vec<PathBuf>, TapeError> {
         let rows = std::mem::take(&mut self.buffered);
-        let mut written = Vec::new();
+        let mut built = Vec::new();
 
         for (partition, kind, venue, source_day, mut group) in group(rows) {
-            // **Sorted by venue, then ticker, then venue time.** In that order
-            // because it is decreasing cardinality and increasing selectivity:
-            // a venue predicate skips whole row groups, a ticker predicate
-            // skips within what is left, a time predicate within that. Sorting
-            // by time first would interleave every ticker and leave a ticker
-            // predicate nothing to prune on.
+            // **Sorted by ticker, then venue time** — and by venue first in
+            // principle, but a group is one venue by construction (see
+            // `group`), so comparing it on every step bought nothing. In that
+            // order because it is decreasing cardinality and increasing
+            // selectivity: a venue predicate skips whole row groups, a ticker
+            // predicate skips within what is left, a time predicate within
+            // that. Sorting by time first would interleave every ticker and
+            // leave a ticker predicate nothing to prune on.
             //
             // `stream_seq` last, so the order is TOTAL and a rebuild over the
-            // same rows produces byte-identical output.
+            // same rows produces byte-identical output. Stable, because rows
+            // of one payload share a `stream_seq` and keep the order the
+            // payload gave them.
             group.sort_by(|a, b| {
-                venue_of(&a.envelope)
-                    .cmp(venue_of(&b.envelope))
-                    .then_with(|| ticker_of(&a.envelope).cmp(ticker_of(&b.envelope)))
+                ticker_of(&a.envelope)
+                    .cmp(ticker_of(&b.envelope))
                     .then(a.envelope.at_micros.cmp(&b.envelope.at_micros))
                     .then(a.stream_seq.cmp(&b.stream_seq))
             });
@@ -188,12 +198,24 @@ impl Tape {
             let first = group.iter().map(|r| r.stream_seq).min().unwrap_or(0);
             let last = group.iter().map(|r| r.stream_seq).max().unwrap_or(0);
             let batch = batch_for(kind, &group)?;
+            drop(group);
             if batch.num_rows() == 0 {
                 continue;
             }
+            built.push((
+                partition,
+                Cursor::Seq { first, last },
+                batch,
+                venue,
+                source_day,
+            ));
+        }
+
+        let mut written = Vec::with_capacity(built.len());
+        for (partition, cursor, batch, venue, source_day) in built {
             written.push(write_segment_labelled(
                 &self.root.join(partition),
-                Cursor::Seq { first, last },
+                cursor,
                 &batch,
                 self.codec,
                 &PRUNE_ON,
@@ -762,6 +784,27 @@ mod tests {
         let error = tape.commit().unwrap_err();
         assert!(matches!(error, TapeError::Precision { .. }), "{error}");
         assert!(error.to_string().contains("archive"), "{error}");
+    }
+
+    #[test]
+    fn a_refused_row_writes_nothing_not_even_the_partitions_before_it() {
+        // A `--replace` rebuild removes what it replaces only after a commit
+        // succeeds; a partition written ahead of a refusal stayed beside the
+        // copy it was meant to replace, and every retry refused the same way.
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(quote_row(1, "hyperliquid", "BTC", Some(DAY)));
+        let mut bad = quote_row(2, "hyperliquid", "BTC", Some(3 * DAY));
+        if let Event::Quote(q) = &mut bad.envelope.event {
+            q.bid_px = Some(Num::from_str("0.00000000000000000001").unwrap());
+        }
+        tape.take(bad);
+        assert!(matches!(tape.commit(), Err(TapeError::Precision { .. })));
+        let written: Vec<_> = galata_segments::partitions_listed(root.path())
+            .into_iter()
+            .flat_map(|(_, segments)| segments)
+            .collect();
+        assert!(written.is_empty(), "{written:?}");
     }
 
     #[test]
