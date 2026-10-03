@@ -793,10 +793,12 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         // **Ledger updates only.** Only they carry an effect this build may
         // not know; normalising a fills or funding page here as well as in
         // `ingest` parsed every page of a catch-up twice for nothing.
-        let unknown: Vec<String> = match (kind == Kind::LedgerUpdates)
-            .then(|| self.venue.normaliser().normalise(&payload))
-            .unwrap_or_else(|| Ok(Vec::new()))
-        {
+        let normalised = if kind == Kind::LedgerUpdates {
+            self.venue.normaliser().normalise(&payload)
+        } else {
+            Ok(Vec::new())
+        };
+        let unknown: Vec<String> = match normalised {
             Ok(rows) => rows
                 .into_iter()
                 .filter_map(|e| match e.event {
