@@ -34,7 +34,7 @@ pub use listing::{
     list_segments, mixed_cursors, mixed_in, overlapping_ranges, overlapping_ranges_by_label,
     partitions, partitions_listed, partitions_listed_where, scannable,
 };
-pub use reader::{label, read_segment, read_segment_range, row_groups_for_range};
+pub use reader::{Prune, Segment, label, read_segment, read_segment_range, row_groups_for_range};
 pub use writer::{
     Codec, MAX_ROW_GROUP_ROWS, PRUNE_COLUMN, SegmentWriter, write_file, write_segment,
     write_segment_labelled, write_segment_pruned,

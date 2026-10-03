@@ -417,9 +417,16 @@ impl Reader {
         let mut out = Vec::new();
         for partition in self.partitions_for(window) {
             for (cursor, path) in galata_segments::list_segments(&partition) {
+                // **Opened once.** Its venue label and its row groups come from
+                // the one footer read; asking for the label and then reading
+                // the segment parsed every footer twice.
+                let segment = galata_segments::Segment::open(&path)?;
+                let venue = segment
+                    .label(crate::tape::VENUE_LABEL)
+                    .ok_or_else(|| ReadError::Unlabelled { path: path.clone() })?;
                 // **Bounded by its own venue's position.** A segment of a venue
                 // the declared scopes hold nothing of is withheld whole.
-                let Some(position) = self.bound.of_venue(&segment_venue(&path)?) else {
+                let Some(position) = self.bound.of_venue(&venue) else {
                     continue;
                 };
                 // A segment whose every row is past the bound need not be
@@ -430,7 +437,25 @@ impl Reader {
                 {
                     continue;
                 }
-                for batch in galata_segments::read_segment(&path)? {
+                // **Only the row groups that can hold the window are decoded.**
+                // The writer sorts by ticker then venue time and keeps
+                // statistics on exactly those columns; a one-ticker,
+                // one-minute view used to decode the whole day regardless. A
+                // group with a row of no venue time is read whatever its
+                // bounds, since such a row is kept (see `keep`).
+                let mut prunes = vec![galata_segments::Prune::Int64Range {
+                    column: "at_micros",
+                    from: window.from_micros,
+                    to: window.to_micros,
+                    keep_nulls: true,
+                }];
+                if let Some(ticker) = &window.ticker {
+                    prunes.push(galata_segments::Prune::Equals {
+                        column: "ticker",
+                        value: ticker,
+                    });
+                }
+                for batch in segment.read_where(&prunes)? {
                     let kept = self.keep(&batch, window, position)?;
                     if kept.num_rows() > 0 {
                         out.push(kept);
@@ -460,8 +485,11 @@ impl Reader {
         window: &Window,
         position: i64,
     ) -> Result<RecordBatch, ReadError> {
-        use arrow::array::{Array, BooleanArray, Int64Array, StringArray, UInt64Array};
+        use arrow::array::{Array, BooleanArray, Int64Array, Scalar, StringArray, UInt64Array};
+        use arrow::compute::kernels::{boolean, cmp};
 
+        let arrow_error = |e: arrow::error::ArrowError| ReadError::Arrow(e.to_string());
+        let rows = batch.num_rows();
         let at = batch
             .column_by_name("at_micros")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
@@ -472,37 +500,55 @@ impl Reader {
             .column_by_name("stream_seq")
             .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
 
-        let mask: BooleanArray = (0..batch.num_rows())
-            .map(|i| {
-                let in_window = match at {
-                    Some(at) if !at.is_null(i) => {
-                        at.value(i) >= window.from_micros && at.value(i) < window.to_micros
-                    }
-                    // No venue time: not excludable on the evidence.
-                    _ => true,
-                };
-                let permitted = match seq {
-                    Some(seq) => i64::try_from(seq.value(i)).is_ok_and(|seq| seq <= position),
-                    // A tape row without a stream sequence cannot be placed
-                    // relative to the bound, so it is NOT shown. The safe
-                    // direction is to withhold, not to reveal.
-                    None => false,
-                };
-                // **The opposite of the time rule above, deliberately.** A
-                // row with no venue time is kept, because it is not AT any
-                // time and a window cannot exclude it on the evidence. A row
-                // with no ticker is not the instrument the caller asked for,
-                // and that IS evidence. Matched whole: `BTC` is not `BTCUSD`,
-                // and a prefix match returns a superset while reading as a
-                // subset.
-                let is_the_instrument = match (&window.ticker, ticker) {
-                    (None, _) => true,
-                    (Some(wanted), Some(column)) if !column.is_null(i) => column.value(i) == wanted,
-                    (Some(_), _) => false,
-                };
-                Some(in_window && permitted && is_the_instrument)
-            })
-            .collect();
+        // Whole columns at a time, through arrow's kernels, rather than a
+        // closure per row. Null comparisons come out null, and a null in the
+        // final mask is a row not kept — the rules below are written so that
+        // is exactly the right answer wherever it happens.
+
+        // In the window — or no venue time, which is not excludable on the
+        // evidence.
+        let in_window = match at {
+            Some(at) => {
+                let from = Scalar::new(Int64Array::from(vec![window.from_micros]));
+                let to = Scalar::new(Int64Array::from(vec![window.to_micros]));
+                let inside = boolean::and(
+                    &cmp::gt_eq(at, &from).map_err(arrow_error)?,
+                    &cmp::lt(at, &to).map_err(arrow_error)?,
+                )
+                .map_err(arrow_error)?;
+                boolean::or_kleene(&inside, &arrow::compute::is_null(at).map_err(arrow_error)?)
+                    .map_err(arrow_error)?
+            }
+            None => BooleanArray::from(vec![true; rows]),
+        };
+        // At or before the bound. A tape row without a stream sequence cannot
+        // be placed relative to the bound, so it is NOT shown. The safe
+        // direction is to withhold, not to reveal.
+        let permitted = match (seq, u64::try_from(position)) {
+            (Some(seq), Ok(position)) => {
+                cmp::lt_eq(seq, &Scalar::new(UInt64Array::from(vec![position])))
+                    .map_err(arrow_error)?
+            }
+            _ => BooleanArray::from(vec![false; rows]),
+        };
+        let mut mask = boolean::and_kleene(&in_window, &permitted).map_err(arrow_error)?;
+        // **The opposite of the time rule above, deliberately.** A row with no
+        // venue time is kept, because it is not AT any time and a window
+        // cannot exclude it on the evidence. A row with no ticker is not the
+        // instrument the caller asked for, and that IS evidence: its null
+        // comparison drops it. Matched whole: `BTC` is not `BTCUSD`, and a
+        // prefix match returns a superset while reading as a subset.
+        if let Some(wanted) = &window.ticker {
+            let is_the_instrument = match ticker {
+                Some(column) => cmp::eq(
+                    column,
+                    &Scalar::new(StringArray::from(vec![wanted.as_str()])),
+                )
+                .map_err(arrow_error)?,
+                None => BooleanArray::from(vec![false; rows]),
+            };
+            mask = boolean::and_kleene(&mask, &is_the_instrument).map_err(arrow_error)?;
+        }
 
         arrow::compute::filter_record_batch(batch, &mask)
             .map_err(|e| ReadError::Arrow(e.to_string()))
