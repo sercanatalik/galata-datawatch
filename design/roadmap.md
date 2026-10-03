@@ -598,6 +598,8 @@ each flow against a copy of the real record before it was called done.
 
 ## Tier 10 — publish
 
+*Done 2026-09-29 19:50Z: `0.1.0` of all four crates, from `4ad9350`.*
+
 - `galata-wire`, `galata-segments`, `galata-broker`, `galata-datawatch` to
   crates.io, MIT, lockstep.
 - `galata-segments` could publish **early**, after Tier 0 — it is standalone,

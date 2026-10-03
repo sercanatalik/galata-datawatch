@@ -17,9 +17,10 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-09-29
 
-First release. Nothing is on crates.io yet, so everything is new.
+First release, published from `4ad9350`. Nothing was on crates.io before it, so
+everything is new.
 
 ### Added
 
