@@ -1466,6 +1466,35 @@ impl Capture {
     }
 }
 
+/// Queue a fill, **one per pair**: a fill for a (ticker, series, width)
+/// already queued widens that one rather than standing beside it.
+///
+/// Every queueing goes through here. A multi-page fill queued its next step
+/// straight onto the queue, and a failed first step was queued again the same
+/// way and re-planned from its start — so each failure added another copy of
+/// the next step, each a full page of the venue's weight.
+fn merge_into(queue: &mut Vec<Fill>, fill: Fill) {
+    match queue.iter_mut().find(|queued| {
+        queued.ticker == fill.ticker
+            && queued.series == fill.series
+            && queued.interval_micros == fill.interval_micros
+    }) {
+        Some(queued) => {
+            queued.from_micros = queued.from_micros.min(fill.from_micros);
+            queued.due_micros = queued.due_micros.max(fill.due_micros);
+            // Failures carried by either still count toward the cap, or a
+            // merge would reset a failing fill's attempts and ask forever.
+            queued.attempts = queued.attempts.max(fill.attempts);
+            // A history fill's report survives a gap or a settle merged
+            // into it: the chain still asks from the earlier start.
+            if queued.history.is_none() {
+                queued.history = fill.history;
+            }
+        }
+        None => queue.push(fill),
+    }
+}
+
 /// Filling the gaps this process publishes while running.
 ///
 /// The boot walk resumes from the record's latest receipt, so it never looks
@@ -1652,22 +1681,7 @@ impl Capture {
         let Some(filler) = self.filler.as_mut() else {
             return;
         };
-        match filler.queue.iter_mut().find(|queued| {
-            queued.ticker == fill.ticker
-                && queued.series == fill.series
-                && queued.interval_micros == fill.interval_micros
-        }) {
-            Some(queued) => {
-                queued.from_micros = queued.from_micros.min(fill.from_micros);
-                queued.due_micros = queued.due_micros.max(fill.due_micros);
-                // A history fill's report survives a gap or a settle merged
-                // into it: the chain still asks from the earlier start.
-                if queued.history.is_none() {
-                    queued.history = fill.history;
-                }
-            }
-            None => filler.queue.push(fill),
-        }
+        merge_into(&mut filler.queue, fill);
     }
 
     /// Queue a gap published while running, if its series is one the venue
@@ -1805,12 +1819,15 @@ impl Capture {
                     }
                     (Some(from), _) => {
                         if let Some(filler) = self.filler.as_mut() {
-                            filler.queue.push(Fill {
-                                from_micros: from,
-                                due_micros: now_micros,
-                                attempts: 0,
-                                ..fill
-                            });
+                            merge_into(
+                                &mut filler.queue,
+                                Fill {
+                                    from_micros: from,
+                                    due_micros: now_micros,
+                                    attempts: 0,
+                                    ..fill
+                                },
+                            );
                         }
                     }
                     (None, Some(history)) if forward_rows.is_some() || history.last_step => {
@@ -1866,7 +1883,12 @@ impl Capture {
                     } else {
                         now_micros
                     };
-                    filler.queue.push(fill);
+                    // A page that never came is not a page the chain took:
+                    // only `attempts` counts it, against the cap it is for.
+                    if let Some(history) = &mut fill.history {
+                        history.pages = history.pages.saturating_sub(1);
+                    }
+                    merge_into(&mut filler.queue, fill);
                 }
             }
         }
@@ -1948,12 +1970,15 @@ impl Capture {
             history.last_step = steps.len() == 1;
         }
         if let Some(next) = steps.get(1) {
-            filler.queue.push(Fill {
-                from_micros: next.from_micros,
-                due_micros: now_micros,
-                attempts: 0,
-                ..fill.clone()
-            });
+            merge_into(
+                &mut filler.queue,
+                Fill {
+                    from_micros: next.from_micros,
+                    due_micros: now_micros,
+                    attempts: 0,
+                    ..fill.clone()
+                },
+            );
         }
         let pause_micros = planner.pause_ms(
             fill.series,
@@ -2007,6 +2032,37 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_first_step_merges_with_its_queued_next_step() {
+        // Step 2 was queued when step 1 started; step 1 failed and is queued
+        // again. One fill for the pair, from step 1, still counting the
+        // failure — not two, each asking a page.
+        let fill = |from, attempts| Fill {
+            ticker: Ticker::new("BTC").unwrap(),
+            series: Series::Candles,
+            interval_micros: 60_000_000,
+            from_micros: from,
+            due_micros: 0,
+            attempts,
+            history: None,
+        };
+        let mut queue = Vec::new();
+        merge_into(&mut queue, fill(2_000, 0));
+        merge_into(&mut queue, fill(1_000, 1));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].from_micros, 1_000);
+        assert_eq!(queue[0].attempts, 1, "a merge does not forgive a failure");
+        // Another width of the same pair is its own fill.
+        merge_into(
+            &mut queue,
+            Fill {
+                interval_micros: 3_600_000_000,
+                ..fill(1_000, 0)
+            },
+        );
+        assert_eq!(queue.len(), 2);
+    }
     use crate::adapters::hyperliquid::{Config as HlConfig, Hyperliquid, Instrument, Market};
     use crate::capture::clock::TestClock;
     use crate::sink::testing::RecordingSink;
