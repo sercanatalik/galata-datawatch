@@ -107,6 +107,9 @@ pub fn bars_from_tape(root: &Path, venue: &str) -> Result<(Vec<Bar>, Option<i64>
     Ok(by_venue.pop().unwrap_or_default())
 }
 
+/// One venue's bars and its durable bound.
+pub type VenueBars = (Vec<Bar>, Option<i64>);
+
 /// Several venues' candles in `[from, to)` venue time, **from one read**, in
 /// the order the venues are given, each with its durable bound.
 ///
@@ -119,9 +122,9 @@ pub fn bars_by_venue(
     venues: &[&str],
     from_micros: i64,
     to_micros: i64,
-) -> Result<Vec<(Vec<Bar>, Option<i64>)>, DeriveError> {
+) -> Result<Vec<VenueBars>, DeriveError> {
     let venues_wanted = venues;
-    let mut out: Vec<(Vec<Bar>, Option<i64>)> = venues.iter().map(|_| (Vec::new(), None)).collect();
+    let mut out: Vec<VenueBars> = venues.iter().map(|_| (Vec::new(), None)).collect();
     if !venues.is_empty() && unwritten(root, &["kind=candles"]).is_empty() {
         let (batches, reader) = read(root, Kind::Candles, from_micros, to_micros)?;
         for (slot, venue) in out.iter_mut().zip(venues) {
