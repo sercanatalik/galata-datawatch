@@ -243,6 +243,7 @@ Also worth deciding on (they depend on intent or input):
 | 5 | C2 a part-failed flush re-buffers what it did not write and marks `.unflushed`, which dates the restart gap · C3 `Tape::commit` builds every batch before writing any · C15 directory sync errors propagate (EBADF/EINVAL ignored, as PostgreSQL's `fsync_fname`) · 2.8 `same_bytes` compares 64 KiB blocks, `finish` syncs the open handle · 8 the tape sort drops its per-step venue compare | done |
 | 6 | 2.1 `book_batch` expands levels as `&Row`, no clone per level · 3 (tape string columns) every `text` column borrows `&str` from the row, sized in a first pass, no `String` per row per column; all column helpers take `&[impl Borrow<Row>]`. Dictionary-typed columns were considered and left: the tape schema is public API, and parquet already dictionary-encodes strings on disk | done |
 | 7 | 2.2 tape `Reader::view` opens each segment once (`galata_segments::Segment`: label and row groups from one footer), decodes only row groups whose `at_micros` (or any null in it) and `ticker` statistics can hold the window (`Prune`), and builds its row mask with arrow `cmp`/`boolean` kernels instead of a closure per row | done |
+| 8 | 2.3 duplicate proof reads the container only over the contained segments' receipt range (time cursors), keeps rows in arrow's row format by reference (one buffer per batch, no `Vec<u8>` per row) · S3 proof by **count**: a contained segment's rows must be held as often, and each proof spends the copies it used | done |
 
 ## Suggested order
 

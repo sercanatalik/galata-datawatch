@@ -728,3 +728,45 @@ fn a_label_round_trips_and_an_absent_key_is_absent() {
     );
     assert_eq!(galata_segments::label(&path, "galata.other").unwrap(), None);
 }
+
+/// **A copy is proven by count, not by presence.** A contained page holding a
+/// row twice, against a container holding it once, has a row of its own: the
+/// second copy. Set membership called it a duplicate and removed it unmerged.
+#[test]
+fn a_contained_segment_holding_a_row_more_often_than_its_container_is_merged() {
+    use arrow::compute::concat_batches;
+    let dir = tempfile::tempdir().unwrap();
+    write_segment(
+        dir.path(),
+        time(100, 299, 1),
+        &batch(100, 4, 50),
+        Codec::Zstd,
+    )
+    .unwrap();
+    // The container's row at 150, twice.
+    let twice = concat_batches(&schema(), &[batch(150, 1, 1), batch(150, 1, 1)]).unwrap();
+    write_segment(dir.path(), time(150, 150, 1), &twice, Codec::Zstd).unwrap();
+    assert!(
+        galata_segments::nested(dir.path()).is_empty(),
+        "one copy in the container does not prove two"
+    );
+
+    // And a contained page whose one row the container holds once is still a
+    // duplicate, as before.
+    let other = tempfile::tempdir().unwrap();
+    write_segment(
+        other.path(),
+        time(100, 299, 1),
+        &batch(100, 4, 50),
+        Codec::Zstd,
+    )
+    .unwrap();
+    write_segment(
+        other.path(),
+        time(150, 150, 2),
+        &batch(150, 1, 1),
+        Codec::Zstd,
+    )
+    .unwrap();
+    assert_eq!(galata_segments::nested(other.path()).len(), 1);
+}
