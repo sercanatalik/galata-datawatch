@@ -14,18 +14,32 @@ use std::fmt;
 use galata_wire::{Kind, Ticker, Venue};
 
 /// A subject a message is published on.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Subject(String);
+///
+/// **Held as the client's own subject type**, which is a shared byte buffer:
+/// publishing hands the client a reference-counted clone, where a `String`
+/// had to be copied into a fresh one for every message — the subject built
+/// twice to publish once.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Subject(async_nats::Subject);
+
+impl std::hash::Hash for Subject {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
 
 impl Subject {
     /// One instrument's one dataset: `markets.<venue>.<ticker>.<kind>`.
     pub fn market(venue: &Venue, ticker: &Ticker, kind: Kind) -> Subject {
-        Subject(format!(
-            "markets.{}.{}.{}",
-            venue.as_str(),
-            ticker.as_str(),
-            kind.as_str()
-        ))
+        Subject(
+            format!(
+                "markets.{}.{}.{}",
+                venue.as_str(),
+                ticker.as_str(),
+                kind.as_str()
+            )
+            .into(),
+        )
     }
 
     /// What one capture process says about itself: `status.<venue>`.
@@ -34,7 +48,7 @@ impl Subject {
     /// status, and a dashboard watching every process subscribes `status.>`
     /// without also receiving the firehose.
     pub fn status(venue: &Venue) -> Subject {
-        Subject(format!("status.{}", venue.as_str()))
+        Subject(format!("status.{}", venue.as_str()).into())
     }
 
     /// The subject an envelope belongs on, where it names an instrument.
@@ -52,7 +66,12 @@ impl Subject {
 
     /// As the wire wants it.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
+    }
+
+    /// The client's subject, shared rather than copied.
+    pub fn to_nats(&self) -> async_nats::Subject {
+        self.0.clone()
     }
 }
 
