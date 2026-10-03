@@ -34,6 +34,7 @@ import polars as pl
 from .basis import _dt
 from .frontier import frontier, period, signal_files
 from .liquidity import trades
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "activity"
@@ -84,9 +85,10 @@ def compute(tape: Path, run: Run) -> Run:
         t = t.with_columns((pl.col("price") * pl.col("size")).alias("usd"), pl.col("ts").dt.epoch("us").alias("_t"))
     past = history(tape, asof - HISTORY_DAYS * DAY_US, asof)
     tickers = sorted(set(t["ticker"].to_list())) if t.height else []
+    trades_of, past_of = by(t), by(past, "ticker_i")
     for ticker in tickers:
-        mine = t.filter(pl.col("ticker") == ticker)
-        run.rows.extend(_rows(ticker, asof, mine.filter(pl.col("_t") >= lo), mine.filter(pl.col("_t") < lo), past.filter(pl.col("ticker_i") == ticker), run))
+        mine = trades_of(ticker)
+        run.rows.extend(_rows(ticker, asof, mine.filter(pl.col("_t") >= lo), mine.filter(pl.col("_t") < lo), past_of(ticker), run))
     run.said.append(f"activity: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

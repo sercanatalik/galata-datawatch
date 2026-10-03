@@ -32,6 +32,7 @@ import polars as pl
 from .basis import _dt, marks
 from .carry import Declared
 from .frontier import frontier, period
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "cascade"
@@ -88,8 +89,9 @@ def compute(declared: Declared, tape: Path, run: Run) -> Run:
     lo = asof - HOUR_US
     mins = minutes(marks(tape, lo - (TRAIL_MIN + 2) * MIN_US, asof))
     tickers = sorted(set(mins["ticker"].to_list()))
+    mins_of = by(mins)
     for t in tickers:
-        run.rows.extend(_rows(declared.dex(t), t, asof, mins.filter(pl.col("ticker") == t), run))
+        run.rows.extend(_rows(declared.dex(t), t, asof, mins_of(t), run))
     run.said.append(f"cascade: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

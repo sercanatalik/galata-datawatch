@@ -51,6 +51,7 @@ import galata_research as gr
 from .basis import _dt
 from .frontier import frontier, period
 from .liquidity import quotes
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "leadlag"
@@ -77,9 +78,10 @@ def compute(tape: Path, run: Run) -> Run:
         q = q.filter((pl.col("ask_px") > pl.col("bid_px")) & (pl.col("ts").dt.epoch("us") >= lo)).with_columns(((pl.col("bid_px") + pl.col("ask_px")) / 2).alias("price"))
     tickers = sorted(set(q["ticker"].to_list())) if q.height else []
     lead = q.filter(pl.col("ticker") == LEADER).select("ts", "price") if q.height else q
+    quotes_of = by(q)
     for t in tickers:
         if t != LEADER:
-            run.rows.extend(_rows(t, asof, lead, q.filter(pl.col("ticker") == t).select("ts", "price"), run))
+            run.rows.extend(_rows(t, asof, lead, quotes_of(t).select("ts", "price"), run))
     run.said.append(f"leadlag: {LEADER} against {max(len(tickers) - 1, 0)} for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

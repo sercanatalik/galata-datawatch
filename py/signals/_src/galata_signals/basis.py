@@ -36,6 +36,7 @@ import polars as pl
 from .carry import Declared
 from .frontier import frontier, period, signal_files
 from .sessions import external_share
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "basis"
@@ -117,8 +118,9 @@ def compute(declared: Declared, tape: Path, run: Run) -> Run:
     m = marks(tape, lo - MAX_STAND_US, asof)
     past = history(tape, asof - Z_DAYS * 24 * HOUR_US, asof)
     tickers = sorted(set(m["ticker"].to_list()))
+    marks_of, past_of = by(m), by(past, "ticker_i")
     for t in tickers:
-        run.rows.extend(_rows(declared.dex(t), t, asof, m.filter(pl.col("ticker") == t), past.filter(pl.col("ticker_i") == t), run))
+        run.rows.extend(_rows(declared.dex(t), t, asof, marks_of(t), past_of(t), run))
     run.said.append(f"basis: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

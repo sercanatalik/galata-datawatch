@@ -29,6 +29,7 @@ import polars as pl
 import galata_research as gr
 
 from .frontier import frontier, period, signal_files
+from .split import by
 from .varcov import Run, micros, stored_asof
 
 SIGNAL = "liquidity"
@@ -115,8 +116,9 @@ def compute(tape: Path, run: Run) -> Run:
     day = trades(asof - 24 * HOUR_US, asof)
     past = history(tape, asof - Z_DAYS * 24 * HOUR_US, asof)
     tickers = sorted(set(q["ticker"].to_list()) | set(day["ticker"].to_list()))
+    quotes_of, day_of, past_of = by(q), by(day), by(past, "ticker_i")
     for t in tickers:
-        run.rows.extend(_rows(t, asof, q.filter(pl.col("ticker") == t), day.filter(pl.col("ticker") == t), past.filter(pl.col("ticker_i") == t), run))
+        run.rows.extend(_rows(t, asof, quotes_of(t), day_of(t), past_of(t), run))
     run.said.append(f"liquidity: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 
