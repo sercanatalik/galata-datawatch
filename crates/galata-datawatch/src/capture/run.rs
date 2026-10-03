@@ -1698,7 +1698,7 @@ impl Capture {
         };
         let declaration = self.wiring.adapter.declaration();
         let overlap = Walk::new(
-            &declaration,
+            declaration,
             filler.request.share,
             filler.request.cold_start_days,
             filler.request.cap,
@@ -1884,7 +1884,7 @@ impl Capture {
             return;
         }
         let planner = Walk::new(
-            &declaration,
+            declaration,
             filler.request.share,
             filler.request.cold_start_days,
             filler.request.cap,
