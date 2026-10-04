@@ -8,7 +8,7 @@
 [![check](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml/badge.svg)](https://github.com/sercanatalik/galata-datawatch/actions/workflows/check.yml)
 [![MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE-MIT)
 [![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-b7410e.svg)](rust-toolchain.toml)
-[![status: pre-0.1.0](https://img.shields.io/badge/status-pre--0.1.0-orange.svg)](#roadmap)
+[![crates.io](https://img.shields.io/crates/v/galata-datawatch.svg)](https://crates.io/crates/galata-datawatch)
 
 **Multi-venue market data capture and Parquet archival, in Rust.**
 
@@ -18,10 +18,10 @@ events, and a queryable Parquet tape can be rebuilt from that archive at any
 time. It is the data layer of **Galata**, a low-latency algorithmic trading
 framework.
 
-> **Status: pre-0.1.0.** Capture, the archive, the tape, the broker, vault
-> integration and scheduled maintenance are all built, and the reference
-> deployment runs them as launchd services. Nothing is on crates.io yet. Publishing 0.1.0 is the
-> next milestone. See the [Roadmap](#roadmap).
+> **Status: 0.1.0, published 2026-09-29.** Capture, the archive, the tape,
+> the broker, vault integration and scheduled maintenance are all built, and
+> the reference deployment runs them as launchd services. The four crates are
+> on crates.io. See the [Roadmap](#roadmap).
 
 ---
 
@@ -630,14 +630,16 @@ each tier, is [`design/roadmap.md`](design/roadmap.md).
 | 7 | **`rh-chain`**: Robinhood Chain via finalized `eth_getLogs`, with reorgs recorded as rows | done |
 | 8 | **`rh-crypto`**: the signed REST poll | built; first live poll pending credentials |
 | 9 | **Scheduling**: the cereyan lane, `galata-watch`, launchd services | done |
-| 10 | **Publish 0.1.0** of the four crates to crates.io | **next** |
+| 10 | **Publish 0.1.0** of the four crates to crates.io | done, 2026-09-29 |
 
 Also in progress or planned here:
 
-- **`pace-by-the-venue-weight`** (built 2026-09-29, not yet deployed). The
-  walk paces each call by the venue's stated weight, a 429 is a wait, and the
-  declared widths and funding depth are asked after the live subscription.
-  `Budget` is now `weight_per_minute`. See
+- **`pace-by-the-venue-weight`** (built 2026-09-29, deployed 2026-09-29
+  19:29Z with `walk_funding_days = 1300` on, no 429). The walk paces each call
+  by the venue's stated weight, a 429 is a wait, and the declared widths and
+  funding depth are asked after the live subscription. `Budget` is now
+  `weight_per_minute`. Still open: the limiter's true shape, whether a 429
+  carries `Retry-After`, and history fills on the status surface. See
   [`planning/pace-by-the-venue-weight.md`](planning/pace-by-the-venue-weight.md).
 - **`bound-the-replay`** (planned). A view of the tape *as it stood at time
   T*, so a replay host cannot see data that arrived after its simulated
@@ -654,7 +656,7 @@ Each later layer reads from the record kept here and never writes to it.
 
 | Phase | Layer | Scope | Status |
 |---|---|---|---|
-| 1 | **Data foundation** | multi-venue capture, the archive and tape, the broker, the vault, the operator UI | built; publishing |
+| 1 | **Data foundation** | multi-venue capture, the archive and tape, the broker, the vault, the operator UI | built; 0.1.0 published |
 | 2 | **Research** | `galata-research`: candles, trades, quotes, marks, funding and gaps loaded on the clock each has, gaps marked, my margin snapshots decoded; the Deflated Sharpe Ratio and PBO by CSCV, pinned to their papers; next-bar backtests and pre-registered studies | built; 0.x |
 | 3 | **Signal generation** | features and signals computed from the tape, published over the same broker, versioned and reproducible from the archive | planned |
 | 4 | **Deterministic risk controls** | exposure, limit and loss checks in plain, deterministic code, between every decision and every order; no model can override them | planned |

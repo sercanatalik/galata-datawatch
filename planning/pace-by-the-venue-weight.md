@@ -1,7 +1,8 @@
 # pace-by-the-venue-weight
 
-**BUILT 2026-09-29** (`pace-by-the-venue-weight`, archived), not yet
-deployed. Named 2026-09-28, from switching on `walk_funding_days` in the
+**BUILT 2026-09-29** (`pace-by-the-venue-weight`, archived), **deployed
+2026-09-29 19:29Z** with `walk_funding_days = 1300` on and no 429
+(`design/measured.md`). Named 2026-09-28, from switching on `walk_funding_days` in the
 deployment (the last step of `walk-the-funding-history`), which the venue
 answered with 429 on every instrument.
 
