@@ -77,12 +77,10 @@ impl NatsSubscriber {
     /// The next payload with the subject it arrived on — for a wildcard
     /// subscriber fanning one subscription across many speakers, as a dashboard
     /// does over `status.>`.
-    ///
-    /// The payload as the client received it, shared rather than copied out.
-    pub async fn next_addressed(&mut self) -> Option<(String, bytes::Bytes)> {
+    pub async fn next_addressed(&mut self) -> Option<(String, Vec<u8>)> {
         self.inner
             .next()
             .await
-            .map(|m| (m.subject.to_string(), m.payload))
+            .map(|m| (m.subject.to_string(), m.payload.to_vec()))
     }
 }

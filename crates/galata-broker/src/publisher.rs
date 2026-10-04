@@ -206,7 +206,7 @@ impl Publisher for NatsPublisher {
     ) -> Pin<Box<dyn Future<Output = Result<(), PublishError>> + Send + 'a>> {
         Box::pin(async move {
             self.client
-                .publish(subject.to_nats(), bytes::Bytes::copy_from_slice(body))
+                .publish(subject.to_nats(), body.to_vec().into())
                 .await
                 .map_err(|e| PublishError::Failed {
                     subject: subject.as_str().to_string(),

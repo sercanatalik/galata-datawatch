@@ -56,9 +56,6 @@ rust_decimal = { version = "1", features = ["serde-str"] }
 # without waiting for the wire, which is what lets a bounded channel in front of
 # it be the only place backpressure is decided.
 async-nats = "0.50"
-# The client's own buffer type: a subject and a payload shared with it
-# rather than copied. Already in the tree through async-nats.
-bytes = "1"
 # Request signing for a venue that authenticates every call. Not a default
 # feature: a signature is a pure function, and a tape reader has no use for one.
 ed25519-dalek = "3"
