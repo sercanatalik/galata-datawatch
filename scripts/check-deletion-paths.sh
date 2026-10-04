@@ -49,7 +49,8 @@ crates/galata-segments/src/compact.rs	std::fs::remove_file(path).map_err(|source
 crates/galata-segments/src/writer.rs	let _ = std::fs::remove_file(&self.temp_path);	a segment writer's own temporary file, dropped unfinished; never a committed name
 crates/galata-segments/src/writer.rs	let _ = std::fs::remove_file(&temp);	write_file's own temporary, after a failed write; never the committed file
 crates/galata-datawatch/src/record/mod.rs	let _ = std::fs::remove_file(self.scope_path().join(CLEAN_SHUTDOWN));	the clean-shutdown marker, cleared at boot; holds no rows
-crates/galata-datawatch/src/tape/rebuild.rs	std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {	the tape, a rebuildable cache: this venue's segments of the receipt days this run rewrites, by label, only after the run's own segments are committed, and never a path it wrote (a-replacement-never-leaves-a-hole)
+crates/galata-datawatch/src/record/mod.rs	let _ = std::fs::remove_file(self.scope_path().join(UNFLUSHED));	the unflushed marker (the earliest receipt a failed flush could not write), cleared at boot and after a flush that wrote everything; holds no rows
+crates/galata-datawatch/src/tape/rebuild.rs	std::fs::remove_file(segment).map_err(|source| RebuildError::Replace {	the tape, a rebuildable cache: this venue's segments of the receipt days this run rewrites, by label, only after the run's own segments are committed, and never a path it wrote (a-replacement-never-leaves-a-hole)
 crates/galata-datawatch/src/bin/galata-retain.rs	match std::fs::remove_dir_all(&candidate.path) {	retention: only with --delete, only partitions past a horizon the operator declared, holding both stores
 crates/galata-datawatch/src/signals.rs	std::fs::remove_file(file).map_err(|source| SegmentError::Write {	the signals hand-off: py/signals' Arrow IPC file under var/signals-staging, removed only after signals::write committed every row it held; never a segment, never the record
 LIST

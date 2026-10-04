@@ -532,7 +532,7 @@ fn a_flush_that_fails_part_way_keeps_what_it_did_not_write_and_dates_the_gap_fro
     assert_eq!(cause, GapCause::CrashUnflushed);
 
     // The cause cleared, the next flush writes it and the marker goes.
-    std::fs::remove_file(&blocked).unwrap();
+    std::fs::rename(&blocked, root.path().join("moved-aside")).unwrap();
     archive.flush().unwrap();
     assert_eq!(archive.buffered(), 0);
     assert_eq!(archive.restart_window(DAY * 2).unwrap().0, DAY + 9);
