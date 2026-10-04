@@ -148,6 +148,21 @@ impl BlockTrail {
         outcome
     }
 
+    /// The heights held below `height`, newest first, with their hashes: what
+    /// a search for where a fork began walks back through.
+    pub fn held_below(&self, height: u64) -> Vec<(u64, String)> {
+        self.seen
+            .range(..height)
+            .rev()
+            .map(|(h, hash)| (*h, hash.clone()))
+            .collect()
+    }
+
+    /// Forget every height at or above `height`: the chain has replaced them.
+    pub fn forget_from(&mut self, height: u64) {
+        self.seen.retain(|h, _| *h < height);
+    }
+
     fn trim(&mut self) {
         let Some(tip) = self.tip() else { return };
         let floor = tip.saturating_sub(self.depth);
@@ -174,6 +189,40 @@ mod tests {
         trail.advance(&block(11, "0xbb", "0xaa"));
         trail.advance(&block(12, "0xcc", "0xbb"));
         trail
+    }
+
+    /// The cursor's pattern: a step of many blocks, its first and last
+    /// header taken. A fork under the held tip shows at the next step's first
+    /// block, however wide the steps.
+    #[test]
+    fn a_fork_is_seen_across_steps_of_a_thousand_blocks() {
+        let h = |n: u64, side: &str| format!("0x{side}{n}");
+        let mut trail = BlockTrail::new(64);
+        for (from, to) in [(1u64, 1_000u64), (1_001, 2_000)] {
+            let first = trail.advance(&block(from, &h(from, "a"), &h(from - 1, "a")));
+            assert!(!matches!(first, Advance::Reorganised(_)), "{first:?}");
+            trail.advance(&block(to, &h(to, "a"), &h(to - 1, "a")));
+        }
+        // Block 2,000 was replaced: the next step's first block names another
+        // parent.
+        match trail.advance(&block(2_001, &h(2_001, "b"), &h(2_000, "b"))) {
+            Advance::Reorganised(reorg) => {
+                assert_eq!(reorg.from_block, 2_000);
+                assert_eq!(reorg.old_hash, h(2_000, "a"));
+            }
+            other => panic!("the fork went unseen: {other:?}"),
+        }
+    }
+
+    /// What the cursor used to do — the last block of each step only — never
+    /// links, so it could not see a fork at all.
+    #[test]
+    fn last_blocks_alone_never_link() {
+        let mut trail = BlockTrail::new(64);
+        for to in [1_000u64, 2_000, 3_000] {
+            let outcome = trail.advance(&block(to, "0xa", "0xFORKED"));
+            assert_eq!(outcome, Advance::NotLinked);
+        }
     }
 
     #[test]

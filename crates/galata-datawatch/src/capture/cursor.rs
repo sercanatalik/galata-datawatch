@@ -23,7 +23,7 @@ use std::time::Duration;
 use galata_wire::{Envelope, Event, Reorg as WireReorg, Ticker, Venue};
 
 use crate::adapters::rh_chain::client::{ChainClient, Header};
-use crate::adapters::rh_chain::trail::{Advance, BlockTrail};
+use crate::adapters::rh_chain::trail::{Advance, BlockTrail, Reorg};
 use crate::capture::run::{Capture, CaptureError};
 use crate::source::Backoff;
 use crate::venue::{BlockPaging, Frontier, Reference, Transport};
@@ -325,37 +325,61 @@ impl Capture {
             pass.requests += 1;
             self.take(payload)?;
 
-            // The tip's header, for the trail. One per step rather than one per
-            // block: a reorganisation deeper than a step is still caught, by
-            // the next step's parent not linking.
-            match client.header_at(step.to).await {
-                Ok(header) => {
-                    pass.requests += 1;
-                    if let Some(from_block) = self.advance_trail(trail, &header, venue) {
-                        pass.reorgs += 1;
-                        // **Rewind to the divergence and stop this pass.**
-                        //
-                        // Publishing the reorganisation and advancing past it
-                        // leaves the record holding the old chain's rows for
-                        // those blocks with nothing that replaces them. The
-                        // replacement rows enter with a HIGHER stream sequence,
-                        // which is what `crate::reorg` uses to tell them apart.
-                        //
-                        // `min` because a cursor only ever moves backward here:
-                        // the trail is bounded by finality so a reorganisation
-                        // ahead of the cursor cannot happen, and this does not
-                        // depend on that being true.
-                        let rewound = rewind_to(*cursor, from_block);
-                        *cursor = Some(rewound);
-                        // The break matters: falling through would set the
-                        // cursor to `step.to` below and undo the rewind.
-                        pass.rewound = Some(rewound);
-                        break;
+            // **Two headers per step: its first block and its last.** The
+            // trail links a block only to the one at the height below it, and
+            // a step's first block is exactly one above the last step's last —
+            // so that is where the chain is checked. Taking only the last
+            // block, as this did, meant no header ever had its predecessor
+            // held once a step spanned more than one block: every advance was
+            // `NotLinked` and no reorganisation was ever seen.
+            //
+            // A fork anywhere at or below the held tip changes the tip's hash
+            // (each hash commits to its parent's), so checking the boundary
+            // catches it however deep it runs; `fork_point` then finds how
+            // deep.
+            let mut heights = vec![step.from];
+            if step.to != step.from {
+                heights.push(step.to);
+            }
+            let mut forked = None;
+            for height in heights {
+                match client.header_at(height).await {
+                    Ok(header) => {
+                        pass.requests += 1;
+                        if let Some(reorg) = self.advance_trail(trail, &header) {
+                            forked = Some((reorg, header));
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(block = height, %error, "a header failed; the trail did not advance");
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(block = step.to, %error, "a header failed; the trail did not advance");
-                }
+            }
+            if let Some((mut reorg, header)) = forked {
+                pass.reorgs += 1;
+                let (from_block, requests) = fork_point(client, trail, reorg.from_block).await;
+                pass.requests += requests;
+                reorg.from_block = from_block;
+                self.record_reorg(&reorg, &header, venue);
+                // **Rewind to the divergence and stop this pass.**
+                //
+                // Publishing the reorganisation and advancing past it leaves
+                // the record holding the old chain's rows for those blocks
+                // with nothing that replaces them. The replacement rows enter
+                // with a HIGHER stream sequence, which is what `crate::reorg`
+                // uses to tell them apart.
+                //
+                // `min` because a cursor only ever moves backward here: the
+                // trail is bounded by finality so a reorganisation ahead of
+                // the cursor cannot happen, and this does not depend on that
+                // being true.
+                let rewound = rewind_to(*cursor, from_block);
+                *cursor = Some(rewound);
+                // The break matters: falling through would set the cursor to
+                // `step.to` below and undo the rewind.
+                pass.rewound = Some(rewound);
+                break;
             }
 
             *cursor = Some(step.to);
@@ -397,49 +421,76 @@ impl Capture {
         Ok(())
     }
 
-    /// Advance the trail, publishing a reorganisation if the chain disagrees,
-    /// and returning **the first block it replaced** so the caller can rewind.
-    fn advance_trail(
-        &mut self,
-        trail: &mut BlockTrail,
-        header: &Header,
-        venue: &Venue,
-    ) -> Option<u64> {
+    /// Advance the trail, returning a reorganisation if the chain disagrees.
+    fn advance_trail(&mut self, trail: &mut BlockTrail, header: &Header) -> Option<Reorg> {
         match trail.advance(&header.seen()) {
-            Advance::Extended | Advance::NotLinked => None,
-            Advance::Reorganised(reorg) => {
-                tracing::warn!(
-                    from = reorg.from_block,
-                    to = reorg.to_block,
-                    depth = reorg.depth(),
-                    "the chain replaced blocks we captured"
-                );
-                // **Through the one path**, durable before it is emitted — a
-                // reorganisation that reached the sink and not the disk is
-                // exactly the evidence an outage would erase.
-                let envelope = Envelope::new(
-                    venue.clone(),
-                    // The reorganisation is about the chain, not one
-                    // instrument. Addressed to the venue's own name so it lands
-                    // somewhere findable rather than being dropped.
-                    Ticker::new("CHAIN").ok()?,
-                    Some(header.at_micros()),
-                    self.now(),
-                    Event::Reorg(WireReorg {
-                        from_block: reorg.from_block,
-                        to_block: reorg.to_block,
-                        old_hash: reorg.old_hash,
-                        new_hash: reorg.new_hash,
-                    }),
-                );
-                let from_block = reorg.from_block;
-                if let Err(error) = self.record_generated_event(venue.as_str(), envelope) {
-                    tracing::warn!(%error, "a reorganisation could not be recorded; it is still a fact");
-                }
-                Some(from_block)
-            }
+            Advance::Reorganised(reorg) => Some(reorg),
+            _ => None,
         }
     }
+
+    /// Publish a reorganisation, **through the one path**, durable before it
+    /// is emitted — a reorganisation that reached the sink and not the disk is
+    /// exactly the evidence an outage would erase.
+    fn record_reorg(&mut self, reorg: &Reorg, header: &Header, venue: &Venue) {
+        tracing::warn!(
+            from = reorg.from_block,
+            to = reorg.to_block,
+            depth = reorg.depth(),
+            "the chain replaced blocks we captured"
+        );
+        // The reorganisation is about the chain, not one instrument. Addressed
+        // to the venue's own name so it lands somewhere findable rather than
+        // being dropped.
+        let Ok(chain) = Ticker::new("CHAIN") else {
+            return;
+        };
+        let envelope = Envelope::new(
+            venue.clone(),
+            chain,
+            Some(header.at_micros()),
+            self.now(),
+            Event::Reorg(WireReorg {
+                from_block: reorg.from_block,
+                to_block: reorg.to_block,
+                old_hash: reorg.old_hash.clone(),
+                new_hash: reorg.new_hash.clone(),
+            }),
+        );
+        if let Err(error) = self.record_generated_event(venue.as_str(), envelope) {
+            tracing::warn!(%error, "a reorganisation could not be recorded; it is still a fact");
+        }
+    }
+}
+
+/// Where a fork began: the lowest height that may have changed, found by
+/// walking back through the hashes the trail still holds and asking the chain
+/// for each, until one agrees. Returns that height and the requests it made.
+///
+/// **The trail is sparse** — two hashes a step — so the answer is *one above
+/// the newest held height the chain still agrees on*: every block above it may
+/// have been replaced, and the rewind re-reads them all. Claiming less would
+/// leave old-chain rows unreplaced; the rows of a block that did not in fact
+/// change are re-read identical, and cost a read.
+///
+/// A header that will not read stops the search at what was proven so far.
+async fn fork_point(client: &ChainClient, trail: &mut BlockTrail, changed: u64) -> (u64, u32) {
+    let mut lowest = changed;
+    let mut requests = 0;
+    for (height, held) in trail.held_below(changed) {
+        let Ok(header) = client.header_at(height).await else {
+            break;
+        };
+        requests += 1;
+        if header.hash.eq_ignore_ascii_case(&held) {
+            // The chain agrees here: the fork began above it.
+            lowest = height + 1;
+            break;
+        }
+        lowest = height;
+    }
+    trail.forget_from(lowest);
+    (lowest, requests)
 }
 
 #[cfg(test)]
@@ -510,6 +561,112 @@ mod tests {
         assert!(!Pass::default().report().contains("narrowed"));
     }
     use super::*;
+
+    /// A JSON-RPC stand-in answering `eth_getBlockByNumber` from `hashes`.
+    async fn chain(hashes: std::collections::BTreeMap<u64, &'static str>) -> ChainClient {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url: &'static str =
+            Box::leak(format!("http://{}", listener.local_addr().unwrap()).into_boxed_str());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Headers, then a body of Content-Length bytes.
+                let body = loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break None;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&raw).to_string();
+                    if let Some(split) = text.find("\r\n\r\n") {
+                        let len = text[..split]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if raw.len() >= split + 4 + len {
+                            break Some(raw[split + 4..split + 4 + len].to_vec());
+                        }
+                    }
+                };
+                let Some(body) = body else { continue };
+                let asked: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let height = u64::from_str_radix(
+                    asked["params"][0]
+                        .as_str()
+                        .unwrap()
+                        .trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap();
+                let answer = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {
+                    "number": format!("0x{height:x}"),
+                    "hash": hashes.get(&height).copied().unwrap_or("0xunknown"),
+                    "parentHash": "0xparent",
+                    "timestamp": "0x1",
+                }})
+                .to_string();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        ChainClient::new(crate::venue::Endpoint::held(
+            "GALATA_RHCHAIN_RPC_URL",
+            crate::config::Secret::new(url),
+        ))
+    }
+
+    /// A trail as the cursor leaves it: 1,000 and 1,001 held below the block
+    /// at 2,000 that was found replaced.
+    fn held() -> BlockTrail {
+        let mut trail = BlockTrail::new(10_000);
+        for (n, hash, parent) in [
+            (1_000u64, "0xa1000", "0xa999"),
+            (1_001, "0xa1001", "0xa1000"),
+            (2_000, "0xa2000", "0xa1999"),
+        ] {
+            trail.advance(&crate::adapters::rh_chain::trail::Seen {
+                number: n,
+                hash: hash.into(),
+                parent_hash: parent.into(),
+            });
+        }
+        assert_eq!(trail.len(), 3);
+        trail.forget_from(2_000);
+        trail
+    }
+
+    #[tokio::test]
+    async fn the_fork_point_is_one_above_the_newest_height_the_chain_still_agrees_on() {
+        // 1,001 unchanged: everything above it may have been replaced.
+        let client = chain([(1_000, "0xa1000"), (1_001, "0xa1001")].into()).await;
+        let mut trail = held();
+        let (from, asked) = fork_point(&client, &mut trail, 2_000).await;
+        assert_eq!((from, asked), (1_002, 1));
+        assert_eq!(rewind_to(Some(2_000), from), 1_001, "re-read from 1,002");
+
+        // 1,001 replaced too, 1,000 not: the fork began above 1,000.
+        let client = chain([(1_000, "0xa1000"), (1_001, "0xb1001")].into()).await;
+        eprintln!("DEBUG {:?}", client.header_at(1_001).await);
+        eprintln!("DEBUG {:?}", client.header_at(1_000).await);
+        let mut trail = held();
+        let (from, asked) = fork_point(&client, &mut trail, 2_000).await;
+        assert_eq!((from, asked), (1_001, 2));
+        assert_eq!(
+            trail.tip(),
+            Some(1_000),
+            "the replaced heights are forgotten"
+        );
+    }
 
     #[test]
     fn a_rewind_lands_before_the_divergence() {
