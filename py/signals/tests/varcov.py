@@ -48,7 +48,7 @@ def _bars(tickers=("BTC", "ETH", "GOLD"), n=400, width=timedelta(hours=1), seed=
 def _served(monkeypatch):
     """`bars()` answers from frames made here, per horizon."""
     frames: dict[str, pl.DataFrame] = {}
-    monkeypatch.setattr(varcov, "bars", lambda horizon, source: frames[horizon])
+    monkeypatch.setattr(varcov, "bars", lambda horizon, source, start=None: frames[horizon])
     return frames
 
 

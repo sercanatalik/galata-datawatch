@@ -31,7 +31,7 @@ import polars as pl
 import galata_research as gr
 from galata_research import Refused
 
-from .bars import bars
+from .bars import EVER, bars, since
 from .varcov import Run, micros, stored_asof
 
 SIGNAL = "jumps"
@@ -45,9 +45,17 @@ THETA = (math.pi / 2) ** 2 + math.pi - 5
 MU_43 = 2 ** (2 / 3) * math.gamma(7 / 6) / math.gamma(0.5)
 
 
-def fivemin() -> pl.DataFrame:
-    """5-minute bars from the tape's 1m, whole buckets only. A name a test can replace."""
-    return bars("5m", "1m")
+FIVE_US = 300_000_000
+
+#: The time-of-day pattern is fitted over this many days before the judged 24
+#: hours — a rolling window, so it follows the market rather than averaging
+#: every day ever captured.
+FIT_DAYS = 300
+
+
+def fivemin(start: str = EVER[0]) -> pl.DataFrame:
+    """5-minute bars from the tape's 1m, whole buckets only, from `start`. A name a test can replace."""
+    return bars("5m", "1m", start)
 
 
 def ratio(r: list[float]) -> dict:
@@ -72,7 +80,8 @@ def intensity(jump_times: list[int], asof: int, tau: int = TAU_US) -> float:
 
 
 def compute(tape: Path, run: Run) -> Run:
-    frame = fivemin()
+    # The fit window, the judged day, and a bar before both.
+    frame = fivemin(since(run.computed_micros - (FIT_DAYS + 1) * 24 * 3_600_000_000 - 2 * FIVE_US))
     if frame.height == 0:
         run.said.append("jumps: no 5m bars")
         return run
