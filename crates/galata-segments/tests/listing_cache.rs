@@ -44,19 +44,14 @@ fn tree() -> tempfile::TempDir {
     t
 }
 
-fn uncached(
-    root: &Path,
-) -> Vec<(
-    std::path::PathBuf,
-    Vec<(galata_segments::Cursor, std::path::PathBuf)>,
-)> {
+fn uncached(root: &Path) -> Vec<(std::path::PathBuf, galata_segments::SharedSegments)> {
     partitions(root)
         .into_iter()
         .map(|p| {
-            let s = list_segments(&p);
+            let s = list_segments(&p).into();
             (p, s)
         })
-        .filter(|(_, s)| !s.is_empty())
+        .filter(|(_, s): &(_, galata_segments::SharedSegments)| !s.is_empty())
         .collect()
 }
 
@@ -135,4 +130,42 @@ fn prune_forgets_a_directory_that_is_gone() {
     fs::remove_dir_all(t.path().join("date=2020-01-03")).unwrap();
     cache.prune();
     assert_eq!(cache.partitions_with_segments(t.path()), uncached(t.path()));
+}
+
+#[test]
+fn one_walk_lists_what_partitions_and_list_segments_list() {
+    let t = tree();
+    let listed: Vec<_> = galata_segments::partitions_listed(t.path())
+        .into_iter()
+        .map(|(p, s)| (p, galata_segments::SharedSegments::from(s)))
+        .collect();
+    assert_eq!(listed, uncached(t.path()));
+}
+
+#[test]
+fn a_pruned_walk_lists_only_the_directories_it_descends() {
+    let t = tree();
+    let one_day = |name: &str| !name.starts_with("date=") || name == "date=2020-01-02";
+    let listed = galata_segments::partitions_listed_where(t.path(), &one_day);
+    let dirs: Vec<_> = listed.iter().map(|(d, _)| d.clone()).collect();
+    assert_eq!(dirs, vec![t.path().join("date=2020-01-02")]);
+    assert_eq!(listed[0].1.len(), 1, "the partial write is not a segment");
+}
+
+#[test]
+fn the_newest_position_of_a_subtree_is_read_from_the_listing() {
+    let t = tree();
+    let listing = galata_segments::partitions_listed(t.path());
+    assert_eq!(
+        galata_segments::last_durable_in(&listing, t.path()),
+        galata_segments::last_durable(t.path())
+    );
+    assert_eq!(
+        galata_segments::last_durable_in(&listing, &t.path().join("date=2020-01-01")),
+        galata_segments::last_durable(&t.path().join("date=2020-01-01"))
+    );
+    assert_eq!(
+        galata_segments::last_durable_in(&listing, &t.path().join("date=1999-01-01")),
+        None
+    );
 }

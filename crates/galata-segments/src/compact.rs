@@ -24,8 +24,10 @@ use std::path::{Path, PathBuf};
 
 use crate::cursor::Cursor;
 use crate::error::SegmentError;
-use crate::listing::{list_segments, mixed_cursors, partitions};
-use crate::reader::read_segment;
+use crate::listing::{
+    list_segments, mixed_in, partitions, partitions_listed, partitions_listed_where,
+};
+use crate::reader::{read_segment, read_segment_range};
 use crate::writer::{Codec, SegmentWriter};
 
 /// What one partition's compaction did.
@@ -44,15 +46,17 @@ pub struct Compacted {
 /// A partition already holding one segment is left alone — rewriting it would
 /// churn disk for nothing.
 pub fn compact_partition(dir: &Path, codec: Codec) -> Result<Compacted, SegmentError> {
-    if let Some((a, b)) = mixed_cursors(dir) {
+    // Listed once, and the mixed-variant refusal asked of that listing: asking
+    // `mixed_cursors` first read the directory a second time to learn nothing
+    // the listing does not say.
+    let listed = list_segments(dir);
+    if let Some((a, b)) = mixed_in(&listed) {
         return Err(SegmentError::MixedCursors {
             path: dir.to_path_buf(),
             a,
             b,
         });
     }
-
-    let listed = list_segments(dir);
     let started_with = listed.len();
     let rows = compact_set(dir, listed, codec)?.1;
 
@@ -140,7 +144,11 @@ pub fn compact_closed_hours(
     use std::collections::BTreeMap;
     let mut total = Compacted::default();
     let day = format!("date={today}");
-    for dir in partitions(root) {
+    // **Every other day pruned by name, unlisted.** Walking every partition
+    // to keep today's read the whole history — 2,230 `date=` directories —
+    // every hour, for the few written today.
+    let today_only = |name: &str| !name.starts_with("date=") || name == day;
+    for (dir, listed) in partitions_listed_where(root, &today_only) {
         if !dir
             .components()
             .any(|c| c.as_os_str().to_str() == Some(day.as_str()))
@@ -148,7 +156,7 @@ pub fn compact_closed_hours(
             continue;
         }
         let mut hours: BTreeMap<i64, Vec<(Cursor, PathBuf)>> = BTreeMap::new();
-        for (cursor, path) in list_segments(&dir) {
+        for (cursor, path) in listed {
             if let Cursor::Time { last_micros, .. } = cursor
                 && last_micros < cutoff_micros
             {
@@ -202,12 +210,19 @@ pub fn compact_closed(root: &Path, today: &str, codec: Codec) -> Result<Compacte
 ///
 /// The listing is cheap — directory entries only, no parquet decode.
 pub fn overdue_closed(root: &Path, today: &str, max_segments: usize) -> Vec<(PathBuf, usize)> {
-    let mut out: Vec<(PathBuf, usize)> = closed_partitions(root, today)
-        .into_iter()
-        .map(|dir| {
-            let count = list_segments(&dir).len();
-            (dir, count)
-        })
+    overdue_in(&partitions_listed(root), today, max_segments)
+}
+
+/// [`overdue_closed`], from a listing already made.
+pub fn overdue_in(
+    listing: &[(PathBuf, Vec<(Cursor, PathBuf)>)],
+    today: &str,
+    max_segments: usize,
+) -> Vec<(PathBuf, usize)> {
+    let mut out: Vec<(PathBuf, usize)> = listing
+        .iter()
+        .filter(|(dir, _)| is_closed(dir, today))
+        .map(|(dir, segments)| (dir.clone(), segments.len()))
         .filter(|(_, count)| *count > max_segments)
         .collect();
     // Worst first: an operator reading this wants the partition that has been
@@ -223,16 +238,17 @@ pub fn overdue_closed(root: &Path, today: &str, max_segments: usize) -> Vec<(Pat
 fn closed_partitions(root: &Path, today: &str) -> Vec<PathBuf> {
     partitions(root)
         .into_iter()
-        .filter(|dir| {
-            dir.components()
-                .filter_map(|c| c.as_os_str().to_str())
-                .filter_map(|level| level.strip_prefix("date="))
-                // Lexicographic on YYYY-MM-DD is chronological, which is the
-                // one thing the partition format buys that a shorter one would
-                // not.
-                .any(|date| date < today)
-        })
+        .filter(|dir| is_closed(dir, today))
         .collect()
+}
+
+fn is_closed(dir: &Path, today: &str) -> bool {
+    dir.components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .filter_map(|level| level.strip_prefix("date="))
+        // Lexicographic on YYYY-MM-DD is chronological, which is the one
+        // thing the partition format buys that a shorter one would not.
+        .any(|date| date < today)
 }
 
 /// **Segments an interrupted compaction left behind**, in one partition.
@@ -261,6 +277,11 @@ pub fn nested(dir: &Path) -> Vec<PathBuf> {
     superseded(&list_segments(dir))
 }
 
+/// [`nested`], from one partition's listing already made.
+pub fn nested_in(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
+    superseded(listed)
+}
+
 /// Of the segments a wider one contains by range, the ones whose **every row
 /// is in that wider segment**: what an interrupted compaction leaves.
 ///
@@ -275,15 +296,52 @@ pub fn nested(dir: &Path) -> Vec<PathBuf> {
 /// otherwise. A segment that cannot be read is kept: failing to spot a
 /// duplicate costs a duplicate read; deleting an unmerged segment costs the
 /// rows.
-fn proven_duplicates(pairs: Vec<(PathBuf, PathBuf)>) -> Vec<PathBuf> {
-    use std::collections::{BTreeMap, HashSet};
-    let mut by_container: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
-    for (contained, container) in pairs {
-        by_container.entry(container).or_default().push(contained);
+///
+/// **Counted, not merely found.** A contained segment holding a row twice is
+/// not proven by a container holding it once, and two contained segments
+/// sharing a row are not both proven by one copy of it: each proof spends the
+/// container's copies it relies on.
+///
+/// **Only what the contained segments can overlap is decoded.** On the
+/// archive a segment's name is its receipt range and the footer carries
+/// statistics on receipt time, so the container is read for the union of the
+/// contained ranges alone — one late segment inside a compacted day no longer
+/// decodes the day. Its rows are kept in arrow's row format, one buffer per
+/// batch, and counted by reference into those buffers rather than copied out
+/// one allocation per row.
+fn proven_duplicates(pairs: Vec<(Cursor, PathBuf, PathBuf)>) -> Vec<PathBuf> {
+    use std::collections::{BTreeMap, HashMap};
+    let mut by_container: BTreeMap<PathBuf, Vec<(Cursor, PathBuf)>> = BTreeMap::new();
+    for (cursor, contained, container) in pairs {
+        by_container
+            .entry(container)
+            .or_default()
+            .push((cursor, contained));
     }
     let mut proven = Vec::new();
     for (container, contained) in by_container {
-        let Ok(held) = read_segment(&container) else {
+        // A receipt-time window over every contained segment, where their
+        // names are receipt times; anything else is read whole.
+        let window = contained
+            .iter()
+            .map(|(cursor, _)| match cursor {
+                Cursor::Time {
+                    first_micros,
+                    last_micros,
+                    ..
+                } => Some((*first_micros, *last_micros)),
+                _ => None,
+            })
+            .try_fold(None, |acc: Option<(i64, i64)>, range| {
+                let (lo, hi) = range?;
+                Some(Some(acc.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi)))))
+            })
+            .flatten();
+        let held = match window {
+            Some((lo, hi)) => read_segment_range(&container, lo, hi.saturating_add(1)),
+            None => read_segment(&container),
+        };
+        let Ok(held) = held else {
             continue;
         };
         let Some(schema) = held.first().map(|b| b.schema()) else {
@@ -297,28 +355,53 @@ fn proven_duplicates(pairs: Vec<(PathBuf, PathBuf)>) -> Vec<PathBuf> {
         let Ok(converter) = arrow::row::RowConverter::new(fields) else {
             continue;
         };
-        let mut rows: HashSet<Vec<u8>> = HashSet::new();
-        let mut readable = true;
-        for batch in &held {
-            match converter.convert_columns(batch.columns()) {
-                Ok(converted) => rows.extend(converted.iter().map(|r| r.as_ref().to_vec())),
-                Err(_) => readable = false,
+        let Ok(converted) = held
+            .iter()
+            .map(|batch| converter.convert_columns(batch.columns()))
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            continue;
+        };
+        let mut available: HashMap<&[u8], usize> = HashMap::new();
+        for rows in &converted {
+            for row in rows.iter() {
+                *available.entry(row.data()).or_default() += 1;
             }
         }
-        if !readable {
-            continue;
-        }
-        for path in contained {
+        for (_, path) in contained {
             let Ok(batches) = read_segment(&path) else {
                 continue;
             };
-            let all_held = batches.iter().all(|batch| {
-                batch.schema() == schema
-                    && converter
-                        .convert_columns(batch.columns())
-                        .is_ok_and(|converted| converted.iter().all(|r| rows.contains(r.as_ref())))
-            });
-            if all_held {
+            let Ok(mine) = batches
+                .iter()
+                .map(|batch| {
+                    if batch.schema() == schema {
+                        converter.convert_columns(batch.columns())
+                    } else {
+                        Err(arrow::error::ArrowError::SchemaError(
+                            "schema differs".into(),
+                        ))
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                continue;
+            };
+            let mut needed: HashMap<&[u8], usize> = HashMap::new();
+            for rows in &mine {
+                for row in rows.iter() {
+                    *needed.entry(row.data()).or_default() += 1;
+                }
+            }
+            let held_enough = needed
+                .iter()
+                .all(|(row, n)| available.get(row).is_some_and(|have| have >= n));
+            if held_enough {
+                for (row, n) in needed {
+                    if let Some(have) = available.get_mut(row) {
+                        *have -= n;
+                    }
+                }
                 proven.push(path);
             }
         }
@@ -338,7 +421,7 @@ fn superseded(listed: &[(Cursor, PathBuf)]) -> Vec<PathBuf> {
 /// An ordered sweep rather than a cross-product: comparing every segment
 /// against every other has billions of steps at a day-partition's segment
 /// count.
-fn contained_by_range(listed: &[(Cursor, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
+fn contained_by_range(listed: &[(Cursor, PathBuf)]) -> Vec<(Cursor, PathBuf, PathBuf)> {
     // **A container must be seen before what it contains**, or the sweep walks
     // past the narrow one and only catches what follows the wide one.
     //
@@ -384,7 +467,7 @@ fn contained_by_range(listed: &[(Cursor, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
                         || w.last_position() > cursor.last_position())
                     && w_path != path =>
             {
-                doomed.push((path.clone(), w_path.clone()));
+                doomed.push((*cursor, path.clone(), w_path.clone()));
             }
             _ => widest = Some((*cursor, path.clone())),
         }

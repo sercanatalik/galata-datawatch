@@ -356,18 +356,15 @@ impl SegmentWriter {
                 source,
             })?;
 
-        drop(file);
         if same_bytes(&self.temp_path, &self.final_path) {
             // Nothing to commit: the segment it would be is already there.
+            drop(file);
             let _ = std::fs::remove_file(&self.temp_path);
             return Ok(self.final_path.clone());
         }
 
-        // Durable before visible.
-        let file = File::open(&self.temp_path).map_err(|source| SegmentError::Write {
-            path: self.temp_path.clone(),
-            source,
-        })?;
+        // Durable before visible — on the handle the writer wrote through,
+        // rather than closing it and opening the path again to sync.
         file.sync_all().map_err(|source| SegmentError::Write {
             path: self.temp_path.clone(),
             source,
@@ -385,9 +382,7 @@ impl SegmentWriter {
         // The directory entry itself has to be durable, or the rename can be
         // lost while the file survives — which is a segment that exists and
         // cannot be found.
-        if let Ok(handle) = File::open(&self.dir) {
-            let _ = handle.sync_all();
-        }
+        sync_dir(&self.dir)?;
 
         Ok(self.final_path.clone())
     }
@@ -451,17 +446,68 @@ pub fn write_segment_labelled(
 /// Whether `existing` holds exactly the bytes of `fresh`: sizes first, which
 /// settles almost every difference for the price of a `stat`. Anything that
 /// cannot be read is *not* the same, so the commit proceeds.
+///
+/// **Compared a block at a time**, stopping at the first difference: reading
+/// both whole held two copies of a compacted segment (25–30 MB each) in memory
+/// to answer a yes or no.
 fn same_bytes(fresh: &Path, existing: &Path) -> bool {
+    use std::io::Read;
+    const BLOCK: usize = 64 * 1024;
     let (Ok(a), Ok(b)) = (std::fs::metadata(fresh), std::fs::metadata(existing)) else {
         return false;
     };
     if a.len() != b.len() || !b.is_file() {
         return false;
     }
-    matches!(
-        (std::fs::read(fresh), std::fs::read(existing)),
-        (Ok(x), Ok(y)) if x == y
-    )
+    let (Ok(mut x), Ok(mut y)) = (File::open(fresh), File::open(existing)) else {
+        return false;
+    };
+    let (mut bx, mut by) = (vec![0u8; BLOCK], vec![0u8; BLOCK]);
+    loop {
+        let n = match x.read(&mut bx) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            // Sizes matched, so the other is at its end too.
+            return true;
+        }
+        if y.read_exact(&mut by[..n]).is_err() || bx[..n] != by[..n] {
+            return false;
+        }
+    }
+}
+
+/// Make a directory's entries durable: what commits a rename.
+///
+/// **An error is an error.** It was discarded, so a commit could return `Ok`
+/// with the rename not durable — and compaction takes that `Ok` as leave to
+/// delete the originals. As PostgreSQL's `fsync_fname` does, the two answers a
+/// filesystem gives for *directories cannot be synced here* (`EBADF`,
+/// `EINVAL`) are not failures: there is nothing more to do on one.
+fn sync_dir(dir: &Path) -> Result<(), SegmentError> {
+    let synced = File::open(dir).and_then(|handle| handle.sync_all());
+    match synced {
+        Ok(()) => Ok(()),
+        Err(error) if dir_sync_unsupported(&error) => Ok(()),
+        Err(source) => Err(SegmentError::Write {
+            path: dir.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn dir_sync_unsupported(error: &std::io::Error) -> bool {
+    // EBADF and EINVAL, numbered alike on Linux and the BSDs (macOS).
+    matches!(error.raw_os_error(), Some(9) | Some(22))
+}
+
+#[cfg(not(unix))]
+fn dir_sync_unsupported(_: &std::io::Error) -> bool {
+    // A directory cannot be opened to sync off unix; the rename is what the
+    // platform offers.
+    true
 }
 
 /// Write one batch as the whole of the file at `path`, replacing it.
@@ -515,9 +561,7 @@ pub fn write_file(path: &Path, batch: &RecordBatch, codec: Codec) -> Result<(), 
             to: path.to_path_buf(),
             source,
         })?;
-        if let Ok(handle) = File::open(dir) {
-            let _ = handle.sync_all();
-        }
+        sync_dir(dir)?;
         Ok(())
     })();
     if result.is_err() {

@@ -25,7 +25,7 @@
 
 pub mod tape;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// One bar of one instrument, as the tape holds it.
 #[derive(Debug, Clone, PartialEq)]
@@ -283,13 +283,15 @@ fn share(flags: impl Iterator<Item = bool>) -> f64 {
 pub fn derive(bars: &[Bar], horizon: &Horizon) -> Statistics {
     let annualisation = (365.0 * 86_400.0 / horizon.bucket_secs as f64).sqrt();
     let floor = horizon.min_observations;
-    let tickers: BTreeSet<&str> = bars.iter().map(|b| b.ticker.as_str()).collect();
-    let series: BTreeMap<&str, Returns> = tickers
+    // Grouped in one pass: a filter per ticker rescanned every bar once per
+    // instrument, and reconciliation calls this once per window per venue.
+    let mut by_ticker: BTreeMap<&str, Vec<&Bar>> = BTreeMap::new();
+    for bar in bars {
+        by_ticker.entry(bar.ticker.as_str()).or_default().push(bar);
+    }
+    let series: BTreeMap<&str, Returns> = by_ticker
         .iter()
-        .map(|t| {
-            let own: Vec<&Bar> = bars.iter().filter(|b| b.ticker == *t).collect();
-            (*t, returns(&own, horizon))
-        })
+        .map(|(t, own)| (*t, returns(own, horizon)))
         .collect();
 
     let absent = |instrument: &str, count: usize| {
@@ -341,7 +343,7 @@ pub fn derive(bars: &[Bar], horizon: &Horizon) -> Statistics {
     };
 
     let mut correlation = BTreeMap::new();
-    let list: Vec<&str> = tickers.iter().copied().collect();
+    let list: Vec<&str> = by_ticker.keys().copied().collect();
     for (i, a) in list.iter().enumerate() {
         for b in &list[i + 1..] {
             let (xs, ys, backfilled_share) = joint(a, b);

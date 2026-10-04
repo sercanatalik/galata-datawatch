@@ -44,25 +44,36 @@ pub enum DeriveError {
 
 /// A bar width as the venue spells it (`1m`, `5m`, `1h`, `1d`), in
 /// microseconds. `None` for a spelling this build does not read.
+///
+/// **Positive, or `None`.** A width read off the tape or a signal row is
+/// external input: `0m` used to become a zero bucket and panic the watch on a
+/// remainder by zero, and a last character outside ASCII panicked the split.
 pub fn width_micros(interval: &str) -> Option<i64> {
-    let (n, unit) = interval.split_at(interval.len().checked_sub(1)?);
-    let n: i64 = n.parse().ok()?;
+    let unit = interval.chars().last()?;
+    let n: i64 = interval[..interval.len() - unit.len_utf8()].parse().ok()?;
     let secs = match unit {
-        "m" => 60,
-        "h" => 3_600,
-        "d" => 86_400,
+        'm' => 60,
+        'h' => 3_600,
+        'd' => 86_400,
         _ => return None,
     };
-    Some(n * secs * 1_000_000)
+    n.checked_mul(secs)?
+        .checked_mul(1_000_000)
+        .filter(|width| *width > 0)
 }
 
-fn read(root: &Path, kind: Kind) -> Result<(Vec<RecordBatch>, Reader), ReadError> {
+fn read(
+    root: &Path,
+    kind: Kind,
+    from_micros: i64,
+    to_micros: i64,
+) -> Result<(Vec<RecordBatch>, Reader), ReadError> {
     let scope = format!("kind={}", kind.as_str());
     let reader = Reader::open(root, &[scope.as_str()])?;
     let batches = reader.view(Window {
         kind,
-        from_micros: i64::MIN + 1,
-        to_micros: i64::MAX,
+        from_micros,
+        to_micros,
         ticker: None,
     })?;
     Ok((batches, reader))
@@ -92,13 +103,35 @@ pub fn from_tape(root: &Path, venue: &str, horizon: &Horizon) -> Result<Derived,
 /// One venue's candles off the tape, every width, with the venue's durable
 /// bound: read once for several horizons, as the watch's reconciliation does.
 pub fn bars_from_tape(root: &Path, venue: &str) -> Result<(Vec<Bar>, Option<i64>), DeriveError> {
-    let mut bars = Vec::new();
-    let mut bound = None;
-    if unwritten(root, &["kind=candles"]).is_empty() {
-        let (batches, reader) = read(root, Kind::Candles)?;
-        bound = reader.bound().of_venue(venue);
+    let mut by_venue = bars_by_venue(root, &[venue], i64::MIN + 1, i64::MAX)?;
+    Ok(by_venue.pop().unwrap_or_default())
+}
+
+/// One venue's bars and its durable bound.
+pub type VenueBars = (Vec<Bar>, Option<i64>);
+
+/// Several venues' candles in `[from, to)` venue time, **from one read**, in
+/// the order the venues are given, each with its durable bound.
+///
+/// Reading the whole candle dataset once per venue — every width, every
+/// venue, all of history — and keeping one venue's rows each time was the
+/// watch's hourly reconciliation. One bounded read, split as it goes, is the
+/// same bars.
+pub fn bars_by_venue(
+    root: &Path,
+    venues: &[&str],
+    from_micros: i64,
+    to_micros: i64,
+) -> Result<Vec<VenueBars>, DeriveError> {
+    let venues_wanted = venues;
+    let mut out: Vec<VenueBars> = venues.iter().map(|_| (Vec::new(), None)).collect();
+    if !venues.is_empty() && unwritten(root, &["kind=candles"]).is_empty() {
+        let (batches, reader) = read(root, Kind::Candles, from_micros, to_micros)?;
+        for (slot, venue) in out.iter_mut().zip(venues) {
+            slot.1 = reader.bound().of_venue(venue);
+        }
         for batch in &batches {
-            let venues = col::<StringArray>(batch, "candles", "venue")?;
+            let names = col::<StringArray>(batch, "candles", "venue")?;
             let tickers = col::<StringArray>(batch, "candles", "ticker")?;
             let at = col::<Int64Array>(batch, "candles", "at_micros")?;
             let recv = col::<Int64Array>(batch, "candles", "recv_micros")?;
@@ -116,13 +149,16 @@ pub fn bars_from_tape(root: &Path, venue: &str) -> Result<(Vec<Bar>, Option<i64>
             };
             let divisor = 10f64.powi(scale);
             for i in 0..batch.num_rows() {
-                if venues.value(i) != venue || at.is_null(i) {
+                if at.is_null(i) {
                     continue;
                 }
+                let Some(slot) = venues_wanted.iter().position(|v| *v == names.value(i)) else {
+                    continue;
+                };
                 let Some(width) = width_micros(intervals.value(i)) else {
                     continue;
                 };
-                bars.push(Bar {
+                out[slot].0.push(Bar {
                     ticker: tickers.value(i).to_string(),
                     start_micros: at.value(i),
                     width_micros: width,
@@ -136,7 +172,7 @@ pub fn bars_from_tape(root: &Path, venue: &str) -> Result<(Vec<Bar>, Option<i64>
         }
     }
 
-    Ok((bars, bound))
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -151,5 +187,16 @@ mod tests {
         assert_eq!(width_micros("1d"), Some(86_400_000_000));
         assert_eq!(width_micros("1w"), None);
         assert_eq!(width_micros(""), None);
+    }
+
+    #[test]
+    fn a_width_off_the_tape_never_panics_and_is_never_zero() {
+        // External input: a zero bucket was a remainder by zero downstream,
+        // and a multi-byte last character a split inside a char.
+        assert_eq!(width_micros("0m"), None);
+        assert_eq!(width_micros("-1h"), None);
+        assert_eq!(width_micros("1µ"), None);
+        assert_eq!(width_micros("µ"), None);
+        assert_eq!(width_micros("99999999999999d"), None);
     }
 }

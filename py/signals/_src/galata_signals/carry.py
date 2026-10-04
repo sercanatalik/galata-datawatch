@@ -33,6 +33,7 @@ import polars as pl
 import galata_research as gr
 
 from .frontier import frontier, period
+from .split import by
 from .varcov import Run, micros, stored_asof
 
 SIGNAL = "carry"
@@ -105,8 +106,9 @@ def compute(declared: Declared, tape: Path, run: Run) -> Run:
     now = live(asof - NOWCAST_WINDOW_US, asof + 1)
     bars = hourly_closes(asof - 31 * DAY_US, asof)
     tickers = sorted(set(rates["ticker"].to_list()) | set(now["ticker"].to_list()))
+    rates_of, now_of, bars_of = by(rates), by(now), by(bars)
     for t in tickers:
-        run.rows.extend(_rows(declared, t, asof, rates.filter(pl.col("ticker") == t), now.filter(pl.col("ticker") == t), bars.filter(pl.col("ticker") == t), run))
+        run.rows.extend(_rows(declared, t, asof, rates_of(t), now_of(t), bars_of(t), run))
     run.said.append(f"carry: {len(tickers)} instruments at {_iso(asof)}")
     return run
 

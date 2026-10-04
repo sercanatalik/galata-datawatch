@@ -227,92 +227,97 @@ pub fn rebuild_with(
             to: to_micros,
         });
     }
-    let payloads = replay::read_range(archive_root, scopes, from_micros, to_micros)?;
-    let mut report = Rebuilt {
-        payloads: payloads.len(),
-        ..Rebuilt::default()
+    // **Every labelled segment, planned before anything is written.** A
+    // segment without the labels a replacement decides by is a refusal, and a
+    // refusal still means the tape was not touched. Each footer is opened once
+    // for both labels.
+    let labelled = if replace == Replace::SourceDays {
+        plan(tape_root)?
+    } else {
+        Vec::new()
     };
-    if payloads.is_empty() {
-        return Ok(report);
-    }
 
-    // **Rooted at the archive being read**, so a bug that appended anyway would
-    // grow that tree and be visible, rather than quietly creating a second one.
-    // Nothing is appended: `ingest_replayed` is the entry point that does not,
-    // and a `Replayed` cannot reach the one that does.
+    // **One receipt day at a time.** Reading the whole range and buffering
+    // every derived row before one commit held the range's payloads and rows
+    // at once — memory that grew with the days asked for. Segments are
+    // grouped by source day anyway, so a commit per day writes the same names
+    // and the same bytes.
     let mut archive = Archive::open(archive_root);
     let collected = Arc::new(CollectingSink::default());
-    let mut tape = Tape::open(tape_root);
-
-    for payload in payloads {
-        let seq = payload.seq();
-        let received = payload.payload().recv_micros;
-        let result = ingest_replayed(&mut archive, adapter, collected.as_ref(), payload)?;
-        if result.unparsed {
-            report.unparsed += 1;
+    let mut report = Rebuilt::default();
+    let mut ours = std::collections::BTreeSet::new();
+    let mut written = std::collections::HashSet::new();
+    for midnight in replay::receipt_days(archive_root, scopes, from_micros, to_micros) {
+        let this_day = midnight.max(from_micros);
+        let day_to = midnight.saturating_add(DAY).min(to_micros);
+        let payloads = replay::read_range(archive_root, scopes, this_day, day_to)?;
+        if payloads.is_empty() {
+            continue;
         }
-        for envelope in collected.drain() {
-            tape.take(Row {
-                stream_seq: seq,
-                source_recv_micros: received,
-                envelope,
-            });
-            report.rows += 1;
-        }
-    }
+        report.payloads += payloads.len();
 
-    let mut doomed = Vec::new();
-    if replace == Replace::SourceDays {
-        // **Only what this run re-derives: this run's venues, and the receipt
-        // days it read.** A partition is `kind=/date=` by the venue's time, so
-        // it is shared by every venue that supplies the dataset *and* by every
-        // receipt day whose payloads carry that date — a walk receives last
-        // week today. A segment is kept or removed by the venue and the source
-        // day its labels state, never by the partition it sits in.
-        //
-        // **The whole tape, not the partitions this run writes.** A source day
-        // re-derived in full owns all its rows, so its segment in a partition
-        // this run no longer writes to holds rows the archive no longer
-        // produces, and is exactly what replacement is for.
-        //
-        // **Planned in full, then removed.** A refusal therefore means the
-        // tape was not touched, never that it was half-replaced.
-        //
-        // **The projected datasets only.** A dataset this tape does not
-        // project — signals, computed on a schedule — has no archive row
-        // behind it: no venue label to refuse on and no source day to
-        // replace. It is never listed here, so it is never touched.
-        let ours = tape.pending_venues();
-        let projected = crate::tape::schema::projected_kinds()
-            .flat_map(|kind| galata_segments::partitions(&tape_root.join(format!("kind={kind}"))));
-        for partition in projected {
-            for (_, segment) in galata_segments::list_segments(&partition) {
-                let Some(venue) = galata_segments::label(&segment, crate::tape::VENUE_LABEL)?
-                else {
-                    return Err(RebuildError::UnknownVenue { path: segment });
-                };
-                if !ours.contains(&venue) {
-                    continue;
-                }
-                let source = galata_segments::label(&segment, crate::tape::SOURCE_DAY_LABEL)?
-                    .and_then(|day| crate::calendar::midnight_of(&day));
-                let Some(source) = source else {
-                    return Err(RebuildError::UnknownSource { path: segment });
-                };
-                if source >= from_micros && source < to_micros {
-                    doomed.push(segment);
-                }
+        // **Rooted at the archive being read**, so a bug that appended anyway
+        // would grow that tree and be visible, rather than quietly creating a
+        // second one. Nothing is appended: `ingest_replayed` is the entry
+        // point that does not, and a `Replayed` cannot reach the one that does.
+        let mut tape = Tape::open(tape_root);
+        for payload in payloads {
+            let seq = payload.seq();
+            let received = payload.payload().recv_micros;
+            let result = ingest_replayed(&mut archive, adapter, collected.as_ref(), payload)?;
+            if result.unparsed {
+                report.unparsed += 1;
+            }
+            for envelope in collected.drain() {
+                tape.take(Row {
+                    stream_seq: seq,
+                    source_recv_micros: received,
+                    envelope,
+                });
+                report.rows += 1;
+            }
+        }
+        ours.extend(tape.pending_venues());
+        match tape.commit() {
+            Ok(paths) => written.extend(paths),
+            Err(error) => {
+                // The days already committed sit beside what they replaced
+                // until this is retried. Removing their doomed copies now
+                // keeps each of them whole; the failed day wrote nothing.
+                let _ = remove_doomed(&labelled, &ours, from_micros, this_day, &written);
+                return Err(error.into());
             }
         }
     }
+    if report.payloads == 0 {
+        return Ok(report);
+    }
+    report.segments = written.len();
 
     // **Written first, removed after.** No reader of the tape takes the shared
     // hold, so the exclusive one keeps nobody out: removing first left the
     // tape without four receipt days for 67 s of every hourly run, and
     // without them until the next run when the write failed (measured
     // 2026-09-27, a-replacement-never-leaves-a-hole). Now a failed commit
-    // removes nothing, and a reader sees at worst both copies for as long as
-    // the unlinks take, never neither.
+    // removes nothing it did not replace, and a reader sees at worst both
+    // copies for as long as the unlinks take, never neither.
+    //
+    // **Only what this run re-derives: this run's venues, and the receipt
+    // days it read.** A partition is `kind=/date=` by the venue's time, so it
+    // is shared by every venue that supplies the dataset *and* by every
+    // receipt day whose payloads carry that date — a walk receives last week
+    // today. A segment is kept or removed by the venue and the source day its
+    // labels state, never by the partition it sits in.
+    //
+    // **The whole tape, not the partitions this run writes.** A source day
+    // re-derived in full owns all its rows, so its segment in a partition this
+    // run no longer writes to holds rows the archive no longer produces, and
+    // is exactly what replacement is for.
+    //
+    // **The projected datasets only.** A dataset this tape does not project —
+    // signals, computed on a schedule — has no archive row behind it: no
+    // venue label to refuse on and no source day to replace. It is never
+    // listed here, so it is never touched.
     //
     // **Never a path this run wrote.** The rebuild is deterministic, so an
     // unchanged receipt day comes back under the same name with the same
@@ -320,21 +325,64 @@ pub fn rebuild_with(
     // (`leave-an-identical-segment`): no sync, no rename. A changed one is
     // renamed atomically over the old file. Either way that path is now this
     // run's segment.
-    let written = tape.commit()?;
-    report.segments = written.len();
-    let written: std::collections::HashSet<_> = written.into_iter().collect();
-    for segment in doomed {
-        // Replaced all the same, in place.
-        report.replaced += 1;
-        if written.contains(&segment) {
+    report.replaced = remove_doomed(&labelled, &ours, from_micros, to_micros, &written)?;
+    Ok(report)
+}
+
+const DAY: i64 = 86_400_000_000;
+
+/// Every segment of the projected datasets, with the venue and source day its
+/// labels state — or a refusal naming the first that does not state them.
+fn plan(tape_root: &Path) -> Result<Vec<(std::path::PathBuf, String, i64)>, RebuildError> {
+    let mut out = Vec::new();
+    for kind in crate::tape::schema::projected_kinds() {
+        for (_, segments) in
+            galata_segments::partitions_listed(&tape_root.join(format!("kind={kind}")))
+        {
+            for (_, segment) in segments {
+                let opened = galata_segments::Segment::open(&segment)?;
+                let Some(venue) = opened.label(crate::tape::VENUE_LABEL) else {
+                    return Err(RebuildError::UnknownVenue { path: segment });
+                };
+                let source = opened
+                    .label(crate::tape::SOURCE_DAY_LABEL)
+                    .and_then(|day| crate::calendar::midnight_of(&day));
+                let Some(source) = source else {
+                    return Err(RebuildError::UnknownSource { path: segment });
+                };
+                out.push((segment, venue, source));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Remove the planned segments of `venues` whose source day falls in
+/// `[from, to)`, other than any this run wrote. Returns how many were
+/// replaced, counting those rewritten in place.
+fn remove_doomed(
+    labelled: &[(std::path::PathBuf, String, i64)],
+    venues: &std::collections::BTreeSet<String>,
+    from_micros: i64,
+    to_micros: i64,
+    written: &std::collections::HashSet<std::path::PathBuf>,
+) -> Result<usize, RebuildError> {
+    let mut replaced = 0;
+    for (segment, venue, source) in labelled {
+        if !venues.contains(venue) || *source < from_micros || *source >= to_micros {
             continue;
         }
-        std::fs::remove_file(&segment).map_err(|source| RebuildError::Replace {
+        // Replaced all the same, in place.
+        replaced += 1;
+        if written.contains(segment) {
+            continue;
+        }
+        std::fs::remove_file(segment).map_err(|source| RebuildError::Replace {
             path: segment.clone(),
             source,
         })?;
     }
-    Ok(report)
+    Ok(replaced)
 }
 
 // The tests normalise real frames, so they need an adapter to normalise them

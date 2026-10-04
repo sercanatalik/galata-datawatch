@@ -28,7 +28,8 @@ import polars as pl
 
 import galata_research as gr
 
-from .frontier import frontier, period
+from .frontier import frontier, period, signal_files
+from .split import by
 from .varcov import Run, micros, stored_asof
 
 SIGNAL = "liquidity"
@@ -56,12 +57,15 @@ def trades(lo: int, hi: int) -> pl.DataFrame:
 
 def history(tape: Path, lo: int, hi: int) -> pl.DataFrame:
     """This signal's stored `quoted_spread_bps` with asof in [lo, hi): its own history."""
-    root = tape / "kind=signals"
-    if not root.is_dir() or not any(root.rglob("*.parquet")):
+    files = signal_files(tape, lo, hi)
+    if not files:
         return pl.DataFrame(schema={"ticker_i": pl.String, "asof_micros": pl.Int64, "value": pl.Float64})
+    # The newest computation of each hour, as `activity.history` and `basis.history`.
     return (
-        pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
+        pl.scan_parquet(files, hive_partitioning=False)
         .filter((pl.col("signal") == SIGNAL) & (pl.col("measure") == "quoted_spread_bps") & (pl.col("asof_micros") >= lo) & (pl.col("asof_micros") < hi))
+        .group_by("ticker_i", "asof_micros")
+        .agg(pl.col("value").sort_by("computed_micros").last())
         .select("ticker_i", "asof_micros", "value")
         .collect()
     )
@@ -112,8 +116,9 @@ def compute(tape: Path, run: Run) -> Run:
     day = trades(asof - 24 * HOUR_US, asof)
     past = history(tape, asof - Z_DAYS * 24 * HOUR_US, asof)
     tickers = sorted(set(q["ticker"].to_list()) | set(day["ticker"].to_list()))
+    quotes_of, day_of, past_of = by(q), by(day), by(past, "ticker_i")
     for t in tickers:
-        run.rows.extend(_rows(t, asof, q.filter(pl.col("ticker") == t), day.filter(pl.col("ticker") == t), past.filter(pl.col("ticker_i") == t), run))
+        run.rows.extend(_rows(t, asof, quotes_of(t), day_of(t), past_of(t), run))
     run.said.append(f"liquidity: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

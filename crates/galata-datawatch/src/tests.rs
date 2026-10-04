@@ -497,6 +497,48 @@ fn the_window_begins_at_the_last_durable_receipt() {
 }
 
 #[test]
+fn a_flush_that_fails_part_way_keeps_what_it_did_not_write_and_dates_the_gap_from_it() {
+    let root = tempfile::tempdir().unwrap();
+    let mut archive = Archive::open(root.path()).scoped_to("hyperliquid");
+    let sink = RecordingSink::default();
+    // Two partitions in one flush: quotes, written; trades, which cannot be.
+    ingest(
+        &mut archive,
+        &Witness::default(),
+        &sink,
+        payload(Origin::Streamed, DAY + 9, b"{}"),
+    )
+    .unwrap();
+    let mut trade = payload(Origin::Streamed, DAY + 5, b"{}");
+    trade.kind = "trades".into();
+    ingest(&mut archive, &Witness::default(), &sink, trade).unwrap();
+    let blocked = root.path().join("venue=hyperliquid/kind=trades");
+    std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+    std::fs::write(&blocked, b"not a directory").unwrap();
+
+    assert!(archive.flush().is_err());
+    assert_eq!(
+        archive.buffered(),
+        1,
+        "the trade is still held, not dropped"
+    );
+    assert_eq!(archive.last_durable(), Some(DAY + 9), "the quote did land");
+    let (from, _, cause) = archive.restart_window(DAY * 2).expect("a window");
+    assert_eq!(
+        from,
+        DAY + 5,
+        "dated from the lost trade, not the quote after it"
+    );
+    assert_eq!(cause, GapCause::CrashUnflushed);
+
+    // The cause cleared, the next flush writes it and the marker goes.
+    std::fs::rename(&blocked, root.path().join("moved-aside")).unwrap();
+    archive.flush().unwrap();
+    assert_eq!(archive.buffered(), 0);
+    assert_eq!(archive.restart_window(DAY * 2).unwrap().0, DAY + 9);
+}
+
+#[test]
 fn two_venues_do_not_read_each_others_shutdown() {
     // One process per venue, one root between them. A handle scoped to one
     // must not report a colleague's clean stop as its own.

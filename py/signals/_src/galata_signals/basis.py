@@ -34,8 +34,9 @@ from pathlib import Path
 import polars as pl
 
 from .carry import Declared
-from .frontier import frontier, period
+from .frontier import frontier, period, signal_files
 from .sessions import external_share
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "basis"
@@ -75,15 +76,14 @@ def marks(tape: Path, lo: int, hi: int) -> pl.DataFrame:
 
 def history(tape: Path, lo: int, hi: int) -> pl.DataFrame:
     """This signal's stored `premium_twa_bps` with asof in [lo, hi), the latest stored for each hour: its own history."""
-    root = tape / "kind=signals"
-    if not root.is_dir() or not any(root.rglob("*.parquet")):
+    files = signal_files(tape, lo, hi)
+    if not files:
         return pl.DataFrame(schema={"ticker_i": pl.String, "asof_micros": pl.Int64, "value": pl.Float64})
     return (
-        pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
+        pl.scan_parquet(files, hive_partitioning=False)
         .filter((pl.col("signal") == SIGNAL) & (pl.col("measure") == "premium_twa_bps") & (pl.col("asof_micros") >= lo) & (pl.col("asof_micros") < hi))
-        .sort("computed_micros")
         .group_by("ticker_i", "asof_micros")
-        .agg(pl.col("value").last())
+        .agg(pl.col("value").sort_by("computed_micros").last())
         .collect()
     )
 
@@ -118,8 +118,9 @@ def compute(declared: Declared, tape: Path, run: Run) -> Run:
     m = marks(tape, lo - MAX_STAND_US, asof)
     past = history(tape, asof - Z_DAYS * 24 * HOUR_US, asof)
     tickers = sorted(set(m["ticker"].to_list()))
+    marks_of, past_of = by(m), by(past, "ticker_i")
     for t in tickers:
-        run.rows.extend(_rows(declared.dex(t), t, asof, m.filter(pl.col("ticker") == t), past.filter(pl.col("ticker_i") == t), run))
+        run.rows.extend(_rows(declared.dex(t), t, asof, marks_of(t), past_of(t), run))
     run.said.append(f"basis: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

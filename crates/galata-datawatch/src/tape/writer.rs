@@ -10,6 +10,7 @@
 //! claiming overlapping ranges are visible from the listing alone rather than
 //! double-counted silently.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -163,24 +164,34 @@ impl Tape {
     }
 
     /// Write and commit everything buffered.
+    ///
+    /// **Every batch is built before any is written.** Building is where a
+    /// row is refused (a price past the column's precision), and that refusal
+    /// is deterministic: when it came after some partitions were already
+    /// written, a `--replace` rebuild returned before removing what those
+    /// replaced, and every retry failed the same way — leaving the old and new
+    /// copies side by side for good. Now a refused row writes nothing.
     pub fn commit(&mut self) -> Result<Vec<PathBuf>, TapeError> {
         let rows = std::mem::take(&mut self.buffered);
-        let mut written = Vec::new();
+        let mut built = Vec::new();
 
         for (partition, kind, venue, source_day, mut group) in group(rows) {
-            // **Sorted by venue, then ticker, then venue time.** In that order
-            // because it is decreasing cardinality and increasing selectivity:
-            // a venue predicate skips whole row groups, a ticker predicate
-            // skips within what is left, a time predicate within that. Sorting
-            // by time first would interleave every ticker and leave a ticker
-            // predicate nothing to prune on.
+            // **Sorted by ticker, then venue time** — and by venue first in
+            // principle, but a group is one venue by construction (see
+            // `group`), so comparing it on every step bought nothing. In that
+            // order because it is decreasing cardinality and increasing
+            // selectivity: a venue predicate skips whole row groups, a ticker
+            // predicate skips within what is left, a time predicate within
+            // that. Sorting by time first would interleave every ticker and
+            // leave a ticker predicate nothing to prune on.
             //
             // `stream_seq` last, so the order is TOTAL and a rebuild over the
-            // same rows produces byte-identical output.
+            // same rows produces byte-identical output. Stable, because rows
+            // of one payload share a `stream_seq` and keep the order the
+            // payload gave them.
             group.sort_by(|a, b| {
-                venue_of(&a.envelope)
-                    .cmp(venue_of(&b.envelope))
-                    .then_with(|| ticker_of(&a.envelope).cmp(ticker_of(&b.envelope)))
+                ticker_of(&a.envelope)
+                    .cmp(ticker_of(&b.envelope))
                     .then(a.envelope.at_micros.cmp(&b.envelope.at_micros))
                     .then(a.stream_seq.cmp(&b.stream_seq))
             });
@@ -188,12 +199,24 @@ impl Tape {
             let first = group.iter().map(|r| r.stream_seq).min().unwrap_or(0);
             let last = group.iter().map(|r| r.stream_seq).max().unwrap_or(0);
             let batch = batch_for(kind, &group)?;
+            drop(group);
             if batch.num_rows() == 0 {
                 continue;
             }
+            built.push((
+                partition,
+                Cursor::Seq { first, last },
+                batch,
+                venue,
+                source_day,
+            ));
+        }
+
+        let mut written = Vec::with_capacity(built.len());
+        for (partition, cursor, batch, venue, source_day) in built {
             written.push(write_segment_labelled(
                 &self.root.join(partition),
-                Cursor::Seq { first, last },
+                cursor,
                 &batch,
                 self.codec,
                 &PRUNE_ON,
@@ -285,12 +308,15 @@ fn scaled(value: Num) -> Result<i128, TapeError> {
 }
 
 /// A decimal column, sized from the row count.
-fn dec(rows: &[Row], f: impl Fn(&Envelope) -> Option<Num>) -> Result<ArrayRef, TapeError> {
+fn dec<R: Borrow<Row>>(
+    rows: &[R],
+    f: impl Fn(&Envelope) -> Option<Num>,
+) -> Result<ArrayRef, TapeError> {
     let mut builder = Decimal128Builder::with_capacity(rows.len())
         .with_precision_and_scale(38, SCALE as i8)
         .map_err(|e| TapeError::Arrow(e.to_string()))?;
     for row in rows {
-        match f(&row.envelope) {
+        match f(&row.borrow().envelope) {
             Some(value) => builder.append_value(scaled(value)?),
             None => builder.append_null(),
         }
@@ -302,53 +328,60 @@ fn dec(rows: &[Row], f: impl Fn(&Envelope) -> Option<Num>) -> Result<ArrayRef, T
 ///
 /// Both, because the default reallocates the value buffer every 32 KB and a
 /// batch already knows how many bytes it holds.
-fn text(rows: &[Row], f: impl Fn(&Envelope) -> Option<String>) -> ArrayRef {
-    let values: Vec<Option<String>> = rows.iter().map(|r| f(&r.envelope)).collect();
-    let bytes: usize = values.iter().flatten().map(String::len).sum();
-    let mut builder = StringBuilder::with_capacity(values.len(), bytes);
-    for value in values {
-        builder.append_option(value);
+///
+/// **Borrowed, never owned.** Every value is a `&str` into the row it came
+/// from, read twice — once to size, once to append — instead of a `String`
+/// allocated per row per column to be copied into the builder and dropped.
+fn text<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Envelope) -> Option<&str>) -> ArrayRef {
+    let bytes: usize = rows
+        .iter()
+        .filter_map(|r| f(&r.borrow().envelope))
+        .map(str::len)
+        .sum();
+    let mut builder = StringBuilder::with_capacity(rows.len(), bytes);
+    for row in rows {
+        builder.append_option(f(&row.borrow().envelope));
     }
     std::sync::Arc::new(builder.finish())
 }
 
-fn int(rows: &[Row], f: impl Fn(&Envelope) -> Option<i64>) -> ArrayRef {
+fn int<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Envelope) -> Option<i64>) -> ArrayRef {
     let mut builder = Int64Builder::with_capacity(rows.len());
     for row in rows {
-        builder.append_option(f(&row.envelope));
+        builder.append_option(f(&row.borrow().envelope));
     }
     std::sync::Arc::new(builder.finish())
 }
 
-fn u64s(rows: &[Row], f: impl Fn(&Row) -> u64) -> ArrayRef {
+fn u64s<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Row) -> u64) -> ArrayRef {
     let mut builder = UInt64Builder::with_capacity(rows.len());
     for row in rows {
-        builder.append_value(f(row));
+        builder.append_value(f(row.borrow()));
     }
     std::sync::Arc::new(builder.finish())
 }
 
-fn u32s(rows: &[Row], f: impl Fn(&Envelope) -> Option<u32>) -> ArrayRef {
+fn u32s<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Envelope) -> Option<u32>) -> ArrayRef {
     let mut builder = UInt32Builder::with_capacity(rows.len());
     for row in rows {
-        builder.append_option(f(&row.envelope));
+        builder.append_option(f(&row.borrow().envelope));
     }
     std::sync::Arc::new(builder.finish())
 }
 
-fn flag(rows: &[Row], f: impl Fn(&Envelope) -> bool) -> ArrayRef {
+fn flag<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Envelope) -> bool) -> ArrayRef {
     let mut builder = BooleanBuilder::with_capacity(rows.len());
     for row in rows {
-        builder.append_value(f(&row.envelope));
+        builder.append_value(f(&row.borrow().envelope));
     }
     std::sync::Arc::new(builder.finish())
 }
 
 /// The five every dataset carries.
-fn common(rows: &[Row]) -> Vec<ArrayRef> {
+fn common<R: Borrow<Row>>(rows: &[R]) -> Vec<ArrayRef> {
     vec![
-        text(rows, |e| Some(venue_of(e).to_string())),
-        text(rows, |e| e.ticker().map(|t| t.as_str().to_string())),
+        text(rows, |e| Some(venue_of(e))),
+        text(rows, |e| e.ticker().map(|t| t.as_str())),
         int(rows, |e| e.at_micros),
         int(rows, |e| Some(e.recv_micros)),
         u64s(rows, |r| r.stream_seq),
@@ -371,13 +404,11 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
         Kind::Trades => {
             columns.push(dec(rows, |e| trade(e).map(|t| t.price))?);
             columns.push(dec(rows, |e| trade(e).map(|t| t.size))?);
-            columns.push(text(rows, |e| {
-                trade(e).map(|t| t.aggressor.as_str().to_string())
-            }));
-            columns.push(text(rows, |e| trade(e).and_then(|t| t.trade_id.clone())));
+            columns.push(text(rows, |e| trade(e).map(|t| t.aggressor.as_str())));
+            columns.push(text(rows, |e| trade(e).and_then(|t| t.trade_id.as_deref())));
         }
         Kind::Candles => {
-            columns.push(text(rows, |e| candle(e).map(|c| c.interval.clone())));
+            columns.push(text(rows, |e| candle(e).map(|c| c.interval.as_str())));
             columns.push(dec(rows, |e| candle(e).map(|c| c.open))?);
             columns.push(dec(rows, |e| candle(e).map(|c| c.high))?);
             columns.push(dec(rows, |e| candle(e).map(|c| c.low))?);
@@ -403,20 +434,20 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(u64s(rows, |r| {
                 transfer(&r.envelope).map(|t| t.block).unwrap_or(0)
             }));
-            columns.push(text(rows, |e| transfer(e).map(|t| t.from.clone())));
-            columns.push(text(rows, |e| transfer(e).map(|t| t.to.clone())));
+            columns.push(text(rows, |e| transfer(e).map(|t| t.from.as_str())));
+            columns.push(text(rows, |e| transfer(e).map(|t| t.to.as_str())));
             columns.push(dec(rows, |e| transfer(e).map(|t| t.amount))?);
-            columns.push(text(rows, |e| transfer(e).map(|t| t.tx_hash.clone())));
+            columns.push(text(rows, |e| transfer(e).map(|t| t.tx_hash.as_str())));
             columns.push(u32s(rows, |e| transfer(e).map(|t| t.log_index)));
         }
         Kind::Mints => {
             columns.push(u64s(rows, |r| {
                 mint(&r.envelope).map(|m| m.block).unwrap_or(0)
             }));
-            columns.push(text(rows, |e| mint(e).map(|m| m.holder.clone())));
+            columns.push(text(rows, |e| mint(e).map(|m| m.holder.as_str())));
             columns.push(dec(rows, |e| mint(e).map(|m| m.amount))?);
             columns.push(flag(rows, |e| mint(e).is_some_and(|m| m.is_issue)));
-            columns.push(text(rows, |e| mint(e).map(|m| m.tx_hash.clone())));
+            columns.push(text(rows, |e| mint(e).map(|m| m.tx_hash.as_str())));
             columns.push(u32s(rows, |e| mint(e).map(|m| m.log_index)));
         }
         Kind::Marks => {
@@ -428,31 +459,25 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(dec(rows, |e| mark(e).and_then(|m| m.premium))?);
         }
         Kind::Gaps => {
-            columns.push(text(rows, |e| {
-                gap(e).map(|g| g.series.as_str().to_string())
-            }));
+            columns.push(text(rows, |e| gap(e).map(|g| g.series.as_str())));
             columns.push(int(rows, |e| gap(e).map(|g| g.from_micros)));
             columns.push(int(rows, |e| gap(e).map(|g| g.to_micros)));
-            columns.push(text(rows, |e| gap(e).map(|g| g.cause.as_str().to_string())));
-            columns.push(text(rows, |e| {
-                gap(e).map(|g| g.clipped.as_str().to_string())
-            }));
+            columns.push(text(rows, |e| gap(e).map(|g| g.cause.as_str())));
+            columns.push(text(rows, |e| gap(e).map(|g| g.clipped.as_str())));
         }
         Kind::Unparsed => {
-            columns.push(text(rows, |e| unparsed(e).map(|u| u.channel.clone())));
+            columns.push(text(rows, |e| unparsed(e).map(|u| u.channel.as_str())));
             columns.push(u64s(rows, |r| {
                 unparsed(&r.envelope).map(|u| u.archive_seq).unwrap_or(0)
             }));
-            columns.push(text(rows, |e| unparsed(e).map(|u| u.error.clone())));
+            columns.push(text(rows, |e| unparsed(e).map(|u| u.error.as_str())));
         }
         Kind::Sessions => {
             columns.push(int(rows, |e| session(e).map(|s| s.session_start)));
             columns.push(int(rows, |e| session(e).map(|s| s.session_end)));
-            columns.push(text(rows, |e| {
-                session(e).map(|s| s.session_kind.as_str().to_string())
-            }));
-            columns.push(text(rows, |e| session(e).map(|s| s.tz.clone())));
-            columns.push(text(rows, |e| session(e).map(|s| s.source.clone())));
+            columns.push(text(rows, |e| session(e).map(|s| s.session_kind.as_str())));
+            columns.push(text(rows, |e| session(e).map(|s| s.tz.as_str())));
+            columns.push(text(rows, |e| session(e).map(|s| s.source.as_str())));
             columns.push(int(rows, |e| session(e).map(|s| s.observed_at)));
         }
         Kind::Instruments => {
@@ -460,11 +485,11 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(dec(rows, |e| instrument(e).map(|i| i.lot_size))?);
             columns.push(dec(rows, |e| instrument(e).map(|i| i.min_size))?);
             columns.push(text(rows, |e| {
-                instrument(e).map(|i| i.contract_type.clone())
+                instrument(e).map(|i| i.contract_type.as_str())
             }));
-            columns.push(text(rows, |e| instrument(e).map(|i| i.base.clone())));
-            columns.push(text(rows, |e| instrument(e).map(|i| i.quote.clone())));
-            columns.push(text(rows, |e| instrument(e).map(|i| i.hours.clone())));
+            columns.push(text(rows, |e| instrument(e).map(|i| i.base.as_str())));
+            columns.push(text(rows, |e| instrument(e).map(|i| i.quote.as_str())));
+            columns.push(text(rows, |e| instrument(e).map(|i| i.hours.as_str())));
             columns.push(flag(rows, |e| instrument(e).is_some_and(|i| i.active)));
             columns.push(u32s(rows, |e| instrument(e).and_then(|i| i.venue_index)));
             columns.push(dec(rows, |e| instrument(e).and_then(|i| i.ui_multiplier))?);
@@ -477,8 +502,8 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(u64s(rows, |r| {
                 reorg(&r.envelope).map(|o| o.to_block).unwrap_or(0)
             }));
-            columns.push(text(rows, |e| reorg(e).map(|o| o.old_hash.clone())));
-            columns.push(text(rows, |e| reorg(e).map(|o| o.new_hash.clone())));
+            columns.push(text(rows, |e| reorg(e).map(|o| o.old_hash.as_str())));
+            columns.push(text(rows, |e| reorg(e).map(|o| o.new_hash.as_str())));
         }
         // Handled above, before any column was built.
         Kind::Book => unreachable!("the book expands its rows first"),
@@ -495,13 +520,18 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
 
 /// The book, expanded: **one row per price level touched.**
 fn book_batch(rows: &[Row]) -> Result<RecordBatch, TapeError> {
-    let mut flat: Vec<Row> = Vec::new();
+    // **References, not copies.** One row per level used to clone the whole
+    // row — the envelope and every level of its book — once per level: a
+    // 500-level snapshot copied 250,000 levels to write 500.
+    let mut flat: Vec<&Row> = Vec::new();
     let mut levels = Vec::new();
     for row in rows {
         if let Event::Book(book) = &row.envelope.event {
+            flat.reserve(book.levels.len());
+            levels.reserve(book.levels.len());
             for level in &book.levels {
-                flat.push(row.clone());
-                levels.push((book.update_seq, book.is_snapshot, level.clone()));
+                flat.push(row);
+                levels.push((book.update_seq, book.is_snapshot, level));
             }
         }
     }
@@ -762,6 +792,27 @@ mod tests {
         let error = tape.commit().unwrap_err();
         assert!(matches!(error, TapeError::Precision { .. }), "{error}");
         assert!(error.to_string().contains("archive"), "{error}");
+    }
+
+    #[test]
+    fn a_refused_row_writes_nothing_not_even_the_partitions_before_it() {
+        // A `--replace` rebuild removes what it replaces only after a commit
+        // succeeds; a partition written ahead of a refusal stayed beside the
+        // copy it was meant to replace, and every retry refused the same way.
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(quote_row(1, "hyperliquid", "BTC", Some(DAY)));
+        let mut bad = quote_row(2, "hyperliquid", "BTC", Some(3 * DAY));
+        if let Event::Quote(q) = &mut bad.envelope.event {
+            q.bid_px = Some(Num::from_str("0.00000000000000000001").unwrap());
+        }
+        tape.take(bad);
+        assert!(matches!(tape.commit(), Err(TapeError::Precision { .. })));
+        let written: Vec<_> = galata_segments::partitions_listed(root.path())
+            .into_iter()
+            .flat_map(|(_, segments)| segments)
+            .collect();
+        assert!(written.is_empty(), "{written:?}");
     }
 
     #[test]

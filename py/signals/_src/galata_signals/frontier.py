@@ -62,6 +62,27 @@ def held(tape: Path, patience_s: float = PATIENCE_S) -> Iterator[None]:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+def signal_files(tape: Path, lo: int, hi: int) -> list[str]:
+    """The `kind=signals` segments that can hold an asof in [lo, hi), and no others.
+
+    The dataset is partitioned by **asof date** and only ever grows: one file
+    per commit, a dozen calculators, every half hour. Globbing `**/*.parquet`
+    opened every footer it ever wrote on every read; a window names the dates
+    it can be in, so only those directories are listed.
+    """
+    root = tape / "kind=signals"
+    if not root.is_dir() or hi <= lo:
+        return []
+    first = time.strftime("%Y-%m-%d", time.gmtime(lo // 1_000_000))
+    last = time.strftime("%Y-%m-%d", time.gmtime((hi - 1) // 1_000_000))
+    files = []
+    for d in root.glob("date=*"):
+        day = d.name.removeprefix("date=")
+        if d.is_dir() and first <= day <= last:
+            files.extend(str(f) for f in d.glob("*.parquet") if not f.name.startswith("."))
+    return sorted(files)
+
+
 def frontier(tape: Path, kinds: tuple[str, ...]) -> int | None:
     """The newest `recv_micros` the tape holds, the least of it over `kinds`; None when any has nothing."""
     ends = []

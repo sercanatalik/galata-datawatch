@@ -206,6 +206,9 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
     earliest: BTreeMap<(Account, Kind), i64>,
     /// Accounts whose history has been read back from the record.
     loaded: BTreeSet<Account>,
+    /// Each account's folded history, extended pass by pass rather than read
+    /// again from the start. See [`crate::ledger::events::History`].
+    histories: BTreeMap<Account, crate::ledger::events::History>,
     /// (account, kind) whose reach has been recorded.
     reached: BTreeSet<(Account, Kind)>,
     /// Where the fold's report goes, and the tolerances it checks at.
@@ -280,6 +283,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             newest: BTreeMap::new(),
             earliest: BTreeMap::new(),
             loaded: BTreeSet::new(),
+            histories: BTreeMap::new(),
             reached: BTreeSet::new(),
             fold: None,
             projection: None,
@@ -320,14 +324,24 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             ..Default::default()
         };
         for account in self.polled() {
-            let rows = crate::ledger::events::read(
+            let history = self.histories.entry(account.alias.clone()).or_default();
+            // **Best effort, like the writes below.** One unreadable segment
+            // under one account used to end the whole ledger, so a report
+            // about the recording stopped the recording. The account is left
+            // out of this report, by name, and asked again next pass.
+            if let Err(error) = history.extend(
                 self.archive.root(),
                 account.venue.as_str(),
                 account.alias.as_str(),
                 &crate::ledger::fold::FOLD_KINDS,
                 self.venue.normaliser(),
                 &ours,
-            )?;
+            ) {
+                tracing::warn!(account = account.alias.as_str(), %error, "the ledger was not folded");
+                report.unread.push(account.alias.to_string());
+                continue;
+            }
+            let rows = history.rows();
             // The same rows, projected. Best effort, as the report's own write
             // is: a projection that cannot be written must not stop the ledger
             // recording, which is what it projects.
@@ -336,14 +350,14 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                     root,
                     account.venue.as_str(),
                     account.alias.as_str(),
-                    &rows,
+                    rows,
                 )
             {
                 tracing::warn!(account = account.alias.as_str(), %error, "the ledger was not projected");
             }
             report.accounts.insert(
                 account.alias.to_string(),
-                crate::ledger::fold::fold(&rows, &tolerances),
+                crate::ledger::fold::fold(rows, &tolerances),
             );
         }
         if let Ok(json) = serde_json::to_string_pretty(&report) {
@@ -776,7 +790,15 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             origin: Origin::Fetched,
             payload: bytes,
         };
-        let unknown: Vec<String> = match self.venue.normaliser().normalise(&payload) {
+        // **Ledger updates only.** Only they carry an effect this build may
+        // not know; normalising a fills or funding page here as well as in
+        // `ingest` parsed every page of a catch-up twice for nothing.
+        let normalised = if kind == Kind::LedgerUpdates {
+            self.venue.normaliser().normalise(&payload)
+        } else {
+            Ok(Vec::new())
+        };
+        let unknown: Vec<String> = match normalised {
             Ok(rows) => rows
                 .into_iter()
                 .filter_map(|e| match e.event {
@@ -1285,6 +1307,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pass_extends_the_history_and_folds_as_a_full_read_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, root) = ledger(dir.path());
+        let file = StatusFile::named(&root.join("status"), "ledger-fold-hyperliquid");
+        let tolerances = crate::ledger::fold::Tolerances {
+            position: "0".parse().unwrap(),
+            relative: "0.00002".parse().unwrap(),
+        };
+        let mut run = run.with_fold(file, tolerances);
+        run.venue
+            .pages(MAIN, Kind::Fills, &[&page(&[fill(1, 1, 1000)])]);
+        run.events_all().await.unwrap();
+        run.fold_all().unwrap();
+
+        // A second pass with something new: only the new receipt is read,
+        // and the fold is what reading everything again would have said.
+        run.clock.advance_secs(60);
+        run.venue.pages(
+            MAIN,
+            Kind::Fills,
+            &[&page(&[fill(1, 1, 1000), fill(2, 2, 2000)])],
+        );
+        run.events_all().await.unwrap();
+        let folded = run.fold_all().unwrap().unwrap();
+
+        let everything = crate::ledger::events::read(
+            &root,
+            "hyperliquid",
+            "main",
+            &crate::ledger::fold::FOLD_KINDS,
+            run.venue.normaliser(),
+            &run.ours(),
+        )
+        .unwrap();
+        assert_eq!(
+            folded.accounts["main"],
+            crate::ledger::fold::fold(&everything, &tolerances)
+        );
+        assert_eq!(
+            run.histories[&Account::new("main").unwrap()].rows().len(),
+            everything.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_record_leaves_the_account_out_and_the_ledger_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, root) = ledger(dir.path());
+        let file = StatusFile::named(&root.join("status"), "ledger-fold-hyperliquid");
+        let mut run = run.with_fold(
+            file,
+            crate::ledger::fold::Tolerances {
+                position: "0".parse().unwrap(),
+                relative: "0.00002".parse().unwrap(),
+            },
+        );
+        run.venue
+            .pages(MAIN, Kind::Fills, &[&page(&[fill(1, 1, 1000)])]);
+        run.events_all().await.unwrap();
+        // Truncate every fills segment: a torn file on disk.
+        for path in payload_paths(&root, "fills") {
+            std::fs::write(&path, b"PAR1").unwrap();
+        }
+        let report = run
+            .fold_all()
+            .expect("a torn segment must not stop the ledger")
+            .unwrap();
+        assert_eq!(report.unread, vec!["main".to_string()]);
+        assert!(!report.accounts.contains_key("main"));
+    }
+
+    #[tokio::test]
     async fn two_passes_over_one_record_write_one_report() {
         let dir = tempfile::tempdir().unwrap();
         let (run, root) = ledger(dir.path());
@@ -1592,6 +1686,33 @@ mod tests {
             .map(|r| r.payload().clone())
             .filter(|p| p.kind == kind)
             .collect()
+    }
+
+    fn payload_paths(root: &std::path::Path, kind: &str) -> Vec<std::path::PathBuf> {
+        fn walk(
+            dir: &std::path::Path,
+            inside: bool,
+            kind: &str,
+            out: &mut Vec<std::path::PathBuf>,
+        ) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    walk(&path, inside || name == format!("kind={kind}"), kind, out);
+                } else if inside && name.ends_with(".parquet") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, false, kind, &mut out);
+        assert!(
+            !out.is_empty(),
+            "no {kind} segments under {}",
+            root.display()
+        );
+        out
     }
 
     fn gaps(root: &std::path::Path) -> Vec<Gap> {

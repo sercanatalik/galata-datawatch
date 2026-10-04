@@ -33,8 +33,9 @@ import polars as pl
 import galata_research as gr
 from galata_research import Refused
 
-from .liquidity import quotes, trades
 from .frontier import frontier, period
+from .liquidity import quotes, trades
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "flow"
@@ -60,8 +61,9 @@ def compute(tape: Path, run: Run) -> Run:
     q = quotes(lo - 60_000_000, asof)
     t = trades(lo, asof)
     tickers = sorted(set(q["ticker"].to_list()) | set(t["ticker"].to_list()))
+    quotes_of, trades_of = by(q), by(t)
     for ticker in tickers:
-        run.rows.extend(_rows(ticker, asof, q.filter(pl.col("ticker") == ticker), t.filter(pl.col("ticker") == ticker), run))
+        run.rows.extend(_rows(ticker, asof, quotes_of(ticker), trades_of(ticker), run))
     run.said.append(f"flow: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

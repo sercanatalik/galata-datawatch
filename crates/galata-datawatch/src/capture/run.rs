@@ -21,7 +21,7 @@ use crate::ingest::{ingest, record_generated};
 use crate::record::{Archive, Payload, RecordError};
 use crate::sink::Sink;
 use crate::source::{Frame, SourceError, StreamSource};
-use crate::venue::{Adapter, PageDirection, Subscription};
+use crate::venue::{Adapter, PageDirection, PageEnd, Subscription};
 
 /// What this build is, for the status surface.
 const BUILD: &str = concat!("galata-datawatch ", env!("CARGO_PKG_VERSION"));
@@ -165,6 +165,9 @@ const THROTTLE_WAIT_MAX_SECS: u64 = 300;
 /// minute bound the restart hole; the one width left at boot is a few pages,
 /// so a refusal there means another process on the IP is spending.
 const THROTTLE_RETRIES: u32 = 3;
+/// Longest a fill's fetch may run before it counts as a failed attempt. The
+/// HTTP client's own bound plus the slack a pause-aware fetch may add.
+const FILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Why a historical fetch came back without a page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -875,7 +878,12 @@ impl Capture {
                 }
                 continue;
             }
-            backoff.reset();
+            // **Not reset here.** A venue that accepts the connection and then
+            // closes it straight away — too many subscriptions, a per-IP limit
+            // — would otherwise be reconnected to with no wait at all, which
+            // spends exactly the new-connection budget the backoff protects.
+            // The backoff resets once the session has delivered something.
+            let mut delivered = false;
             self.open_session(self.wiring.clock.now_micros());
 
             // Level-triggered: converge toward the declared set rather than
@@ -985,7 +993,13 @@ impl Capture {
                 self.fill_step(now)?;
 
                 match source.next_frame().await {
-                    Ok(Frame::Bytes(bytes)) => self.take_frame(&bytes)?,
+                    Ok(Frame::Bytes(bytes)) => {
+                        if !delivered {
+                            delivered = true;
+                            backoff.reset();
+                        }
+                        self.take_frame(&bytes)?
+                    }
                     // **Not a gap.** A quiet market and a silently dead
                     // connection are the same shape from here, so nothing is
                     // inferred from it.
@@ -1002,6 +1016,16 @@ impl Capture {
                 }
             }
             source.close().await;
+            // A session that delivered nothing waits before the next connect,
+            // as a failed connect does. One that delivered reconnects at once:
+            // every millisecond here is a millisecond of gap.
+            if !delivered && !shutdown.is_cancelled() {
+                let wait = backoff.next_wait();
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(wait) => {}
+                }
+            }
         }
 
         self.shutdown()
@@ -1205,6 +1229,7 @@ impl Capture {
                             from_micros: step.from_micros,
                             to_micros: step.to_micros,
                         },
+                        false,
                     )
                     .await?
                 {
@@ -1287,6 +1312,7 @@ impl Capture {
                             from_micros: from,
                             to_micros,
                         },
+                        true,
                     )
                     .await?;
                 pages += 1;
@@ -1295,8 +1321,8 @@ impl Capture {
                 // **A page that never came is not coverage**, and there is no
                 // paging past it: where the next page starts is read from this
                 // one. The instrument stops here, at where it asked from.
-                let payload = match payload {
-                    Ok(payload) => payload,
+                let end = match payload {
+                    Ok(end) => end,
                     Err(error) => {
                         failed.push(crate::capture::FailedFetch {
                             ticker: ticker.clone(),
@@ -1311,7 +1337,7 @@ impl Capture {
                 // Where the page ended is the ADAPTER's reading: the loop does
                 // not parse a venue's payload. `None` stops the walk rather
                 // than paging forever from a time it invented.
-                let Some(end) = self.wiring.adapter.page_end(&payload) else {
+                let Some(end) = end else {
                     here = to_micros;
                     break;
                 };
@@ -1375,7 +1401,8 @@ impl Capture {
         &mut self,
         fetch: &F,
         request: Fetch,
-    ) -> Result<Result<Payload, FetchFailure>, CaptureError>
+        read_end: bool,
+    ) -> Result<Result<Option<PageEnd>, FetchFailure>, CaptureError>
     where
         F: Fn(Fetch) -> Fut,
         Fut: std::future::Future<Output = FetchResult>,
@@ -1384,9 +1411,17 @@ impl Capture {
         loop {
             match fetch(request.clone()).await {
                 Ok(payload) => {
-                    let copy = payload.clone();
+                    // **Where it ended, read before the page is taken**, not a
+                    // copy of the whole page kept to read it from afterwards —
+                    // up to 5,000 candles copied per walked page to answer two
+                    // numbers, and dropped unread by a caller that wanted none.
+                    let end = if read_end {
+                        self.wiring.adapter.page_end(&payload)
+                    } else {
+                        None
+                    };
                     self.take(payload)?;
-                    return Ok(Ok(copy));
+                    return Ok(Ok(end));
                 }
                 Err(failure)
                     if failure.throttled
@@ -1428,6 +1463,35 @@ impl Capture {
             tokio::time::sleep(pace).await;
         }
         Ok(())
+    }
+}
+
+/// Queue a fill, **one per pair**: a fill for a (ticker, series, width)
+/// already queued widens that one rather than standing beside it.
+///
+/// Every queueing goes through here. A multi-page fill queued its next step
+/// straight onto the queue, and a failed first step was queued again the same
+/// way and re-planned from its start — so each failure added another copy of
+/// the next step, each a full page of the venue's weight.
+fn merge_into(queue: &mut Vec<Fill>, fill: Fill) {
+    match queue.iter_mut().find(|queued| {
+        queued.ticker == fill.ticker
+            && queued.series == fill.series
+            && queued.interval_micros == fill.interval_micros
+    }) {
+        Some(queued) => {
+            queued.from_micros = queued.from_micros.min(fill.from_micros);
+            queued.due_micros = queued.due_micros.max(fill.due_micros);
+            // Failures carried by either still count toward the cap, or a
+            // merge would reset a failing fill's attempts and ask forever.
+            queued.attempts = queued.attempts.max(fill.attempts);
+            // A history fill's report survives a gap or a settle merged
+            // into it: the chain still asks from the earlier start.
+            if queued.history.is_none() {
+                queued.history = fill.history;
+            }
+        }
+        None => queue.push(fill),
     }
 }
 
@@ -1617,22 +1681,7 @@ impl Capture {
         let Some(filler) = self.filler.as_mut() else {
             return;
         };
-        match filler.queue.iter_mut().find(|queued| {
-            queued.ticker == fill.ticker
-                && queued.series == fill.series
-                && queued.interval_micros == fill.interval_micros
-        }) {
-            Some(queued) => {
-                queued.from_micros = queued.from_micros.min(fill.from_micros);
-                queued.due_micros = queued.due_micros.max(fill.due_micros);
-                // A history fill's report survives a gap or a settle merged
-                // into it: the chain still asks from the earlier start.
-                if queued.history.is_none() {
-                    queued.history = fill.history;
-                }
-            }
-            None => filler.queue.push(fill),
-        }
+        merge_into(&mut filler.queue, fill);
     }
 
     /// Queue a gap published while running, if its series is one the venue
@@ -1661,9 +1710,9 @@ impl Capture {
         else {
             return;
         };
-        let declaration = self.wiring.adapter.declaration().clone();
+        let declaration = self.wiring.adapter.declaration();
         let overlap = Walk::new(
-            &declaration,
+            declaration,
             filler.request.share,
             filler.request.cold_start_days,
             filler.request.cap,
@@ -1715,7 +1764,25 @@ impl Capture {
         };
         match result {
             Ok(page) => {
-                let copy = page.clone();
+                // **A full forward page is not the last one**: continue from
+                // past its last row, as the walk does. The adapter reads where
+                // it ended — before the page is taken, rather than from a copy
+                // of the whole page kept for it; the loop parses no venue
+                // payload.
+                let forward_rows = self
+                    .wiring
+                    .adapter
+                    .declaration()
+                    .paging(fill.series)
+                    .filter(|p| p.direction == PageDirection::ForwardFromStart)
+                    .map(|p| p.max_rows_per_call);
+                let next_from = forward_rows.and_then(|full| {
+                    self.wiring
+                        .adapter
+                        .page_end(&page)
+                        .filter(|end| end.rows >= full)
+                        .map(|end| end.last_micros + 1)
+                });
                 self.take(page)?;
                 if fill.history.is_some() {
                     tracing::info!(
@@ -1735,20 +1802,6 @@ impl Capture {
                         "filled a gap published while running"
                     );
                 }
-                // **A full forward page is not the last one**: continue from
-                // past its last row, as the walk does. The adapter reads where
-                // it ended; the loop parses no venue payload.
-                let declaration = self.wiring.adapter.declaration().clone();
-                let forward = declaration
-                    .paging(fill.series)
-                    .filter(|p| p.direction == PageDirection::ForwardFromStart);
-                let next_from = forward.and_then(|paging| {
-                    self.wiring
-                        .adapter
-                        .page_end(&copy)
-                        .filter(|end| end.rows >= paging.max_rows_per_call)
-                        .map(|end| end.last_micros + 1)
-                });
                 let cap = self.filler.as_ref().map_or(0, |f| f.request.cap);
                 match (next_from, fill.history) {
                     (Some(_), Some(history)) if history.pages >= cap => {
@@ -1766,15 +1819,18 @@ impl Capture {
                     }
                     (Some(from), _) => {
                         if let Some(filler) = self.filler.as_mut() {
-                            filler.queue.push(Fill {
-                                from_micros: from,
-                                due_micros: now_micros,
-                                attempts: 0,
-                                ..fill
-                            });
+                            merge_into(
+                                &mut filler.queue,
+                                Fill {
+                                    from_micros: from,
+                                    due_micros: now_micros,
+                                    attempts: 0,
+                                    ..fill
+                                },
+                            );
                         }
                     }
-                    (None, Some(history)) if forward.is_some() || history.last_step => {
+                    (None, Some(history)) if forward_rows.is_some() || history.last_step => {
                         tracing::info!(
                             ticker = fill.ticker.as_str(),
                             series = fill.series.as_str(),
@@ -1827,7 +1883,12 @@ impl Capture {
                     } else {
                         now_micros
                     };
-                    filler.queue.push(fill);
+                    // A page that never came is not a page the chain took:
+                    // only `attempts` counts it, against the cap it is for.
+                    if let Some(history) = &mut fill.history {
+                        history.pages = history.pages.saturating_sub(1);
+                    }
+                    merge_into(&mut filler.queue, fill);
                 }
             }
         }
@@ -1837,7 +1898,7 @@ impl Capture {
     /// Start the earliest due fill, as its own task, if none is out and the
     /// walk's pace allows.
     fn start_due_fill(&mut self, now_micros: i64) {
-        let declaration = self.wiring.adapter.declaration().clone();
+        let declaration = self.wiring.adapter.declaration();
         let Some(filler) = self.filler.as_mut() else {
             return;
         };
@@ -1845,7 +1906,7 @@ impl Capture {
             return;
         }
         let planner = Walk::new(
-            &declaration,
+            declaration,
             filler.request.share,
             filler.request.cold_start_days,
             filler.request.cap,
@@ -1909,12 +1970,15 @@ impl Capture {
             history.last_step = steps.len() == 1;
         }
         if let Some(next) = steps.get(1) {
-            filler.queue.push(Fill {
-                from_micros: next.from_micros,
-                due_micros: now_micros,
-                attempts: 0,
-                ..fill.clone()
-            });
+            merge_into(
+                &mut filler.queue,
+                Fill {
+                    from_micros: next.from_micros,
+                    due_micros: now_micros,
+                    attempts: 0,
+                    ..fill.clone()
+                },
+            );
         }
         let pause_micros = planner.pause_ms(
             fill.series,
@@ -1945,7 +2009,17 @@ impl Capture {
         let future = (filler.fetch)(request.clone());
         let sender = filler.sender.clone();
         tokio::spawn(async move {
-            let result = future.await;
+            // **Bounded here as well as in the client.** `in_flight` clears
+            // only when an answer comes back, so a fetch that never returns
+            // would stop every later fill for the life of the process.
+            let result = tokio::time::timeout(FILL_TIMEOUT, future)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(FetchFailure::from(format!(
+                        "no answer within {}s",
+                        FILL_TIMEOUT.as_secs()
+                    )))
+                });
             // A loop that has stopped is not listening, and that is fine: the
             // gap row is already in the record.
             let _ = sender.send((request, result));
@@ -1958,6 +2032,37 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_first_step_merges_with_its_queued_next_step() {
+        // Step 2 was queued when step 1 started; step 1 failed and is queued
+        // again. One fill for the pair, from step 1, still counting the
+        // failure — not two, each asking a page.
+        let fill = |from, attempts| Fill {
+            ticker: Ticker::new("BTC").unwrap(),
+            series: Series::Candles,
+            interval_micros: 60_000_000,
+            from_micros: from,
+            due_micros: 0,
+            attempts,
+            history: None,
+        };
+        let mut queue = Vec::new();
+        merge_into(&mut queue, fill(2_000, 0));
+        merge_into(&mut queue, fill(1_000, 1));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].from_micros, 1_000);
+        assert_eq!(queue[0].attempts, 1, "a merge does not forgive a failure");
+        // Another width of the same pair is its own fill.
+        merge_into(
+            &mut queue,
+            Fill {
+                interval_micros: 3_600_000_000,
+                ..fill(1_000, 0)
+            },
+        );
+        assert_eq!(queue.len(), 2);
+    }
     use crate::adapters::hyperliquid::{Config as HlConfig, Hyperliquid, Instrument, Market};
     use crate::capture::clock::TestClock;
     use crate::sink::testing::RecordingSink;

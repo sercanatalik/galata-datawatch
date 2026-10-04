@@ -132,7 +132,7 @@ impl ChainClient {
     /// A client for an endpoint.
     pub fn new(endpoint: Endpoint) -> ChainClient {
         ChainClient {
-            http: reqwest::Client::new(),
+            http: crate::source::http_client(),
             endpoint,
         }
     }
@@ -238,17 +238,26 @@ impl ChainClient {
     /// The raw hex is what goes into the record. Decoding happens in
     /// `normalise`, downstream of durability, so a decoder fixed later can be
     /// re-run over everything already captured.
-    pub async fn metadata(&self, contract: &str, now_micros: i64) -> Payload {
-        let read = |selector: &'static str| {
-            let to = contract.to_string();
-            async move { self.call_raw(&to, selector).await.ok().flatten() }
-        };
+    ///
+    /// **A failure is not a revert.** A transport error, an HTTP 429, or any
+    /// error object other than a revert used to read as *does not implement
+    /// it* too — so a rate-limited hour recorded NVDA as unscaled and
+    /// inactive. Now any of those fails the read, and nothing is recorded:
+    /// the last answer stands, stale rather than wrong.
+    ///
+    /// The three calls are asked together rather than one after another.
+    pub async fn metadata(&self, contract: &str, now_micros: i64) -> Result<Payload, ChainError> {
+        let (symbol, decimals, ui_multiplier) = futures_util::join!(
+            self.call_raw(contract, erc8056::SYMBOL_SELECTOR),
+            self.call_raw(contract, erc8056::DECIMALS_SELECTOR),
+            self.call_raw(contract, erc8056::UI_MULTIPLIER_SELECTOR),
+        );
         let answers = Answers {
-            symbol: read(erc8056::SYMBOL_SELECTOR).await,
-            decimals: read(erc8056::DECIMALS_SELECTOR).await,
-            ui_multiplier: read(erc8056::UI_MULTIPLIER_SELECTOR).await,
+            symbol: symbol?,
+            decimals: decimals?,
+            ui_multiplier: ui_multiplier?,
         };
-        Payload {
+        Ok(Payload {
             seq: 0,
             recv_micros: now_micros,
             address: PayloadAddress::Venue(VENUE.into()),
@@ -259,7 +268,7 @@ impl ChainClient {
             symbol: Some(contract.to_ascii_lowercase()),
             origin: Origin::Fetched,
             payload: serde_json::to_vec(&answers).unwrap_or_default(),
-        }
+        })
     }
 
     /// One `eth_call`, returning the raw hex or `None` where it reverted.
@@ -283,8 +292,15 @@ impl ChainClient {
                 method: "eth_call",
                 detail: e.to_string(),
             })?;
-        if value.get("error").is_some() {
-            return Ok(None);
+        if let Some(error) = value.get("error") {
+            if reverted(error) {
+                return Ok(None);
+            }
+            return Err(ChainError::Rpc {
+                venue: VENUE,
+                method: "eth_call",
+                detail: error.to_string(),
+            });
         }
         Ok(value
             .get("result")
@@ -357,6 +373,10 @@ impl ChainClient {
             .json(body)
             .send()
             .await
+            .and_then(reqwest::Response::error_for_status)
+            // **The status is read.** A 429 or a 503 arrives with an HTML or
+            // text body, which used to be reported as a malformed answer and
+            // so did not read as throttling at all.
             .map_err(|source| ChainError::http(method, source))?;
         response
             .bytes()
@@ -364,6 +384,17 @@ impl ChainClient {
             .map(|b| b.to_vec())
             .map_err(|source| ChainError::http(method, source))
     }
+}
+
+/// Whether a JSON-RPC error object is an `eth_call` **revert**: code 3, as
+/// geth and its descendants send, or a message saying so where a node sends
+/// another code.
+fn reverted(error: &serde_json::Value) -> bool {
+    error.get("code").and_then(serde_json::Value::as_i64) == Some(3)
+        || error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|m| m.to_ascii_lowercase().contains("revert"))
 }
 
 /// A block's header, as far as the loop cares.
@@ -458,6 +489,42 @@ mod tests {
         let value = serde_json::json!({"error": {"code": -32000, "message": "too many blocks"}});
         let error = ChainClient::result(&value, "eth_getLogs").unwrap_err();
         assert!(error.to_string().contains("too many blocks"), "{error}");
+    }
+
+    #[test]
+    fn a_revert_is_an_answer_and_a_refusal_is_not() {
+        // geth's revert, and a node that says so in words.
+        assert!(reverted(
+            &serde_json::json!({"code": 3, "message": "execution reverted"})
+        ));
+        assert!(reverted(
+            &serde_json::json!({"code": -32000, "message": "Execution Reverted"})
+        ));
+        // A rate limit, a timeout: not a contract saying no.
+        assert!(!reverted(
+            &serde_json::json!({"code": -32005, "message": "limit exceeded"})
+        ));
+        assert!(!reverted(
+            &serde_json::json!({"code": 429, "message": "too many requests"})
+        ));
+    }
+
+    #[cfg(feature = "rh-crypto")]
+    #[tokio::test]
+    async fn a_throttled_metadata_read_records_nothing_rather_than_no_multiplier() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, _) = crate::adapters::rh_crypto::adapter::stand_in::serve_script(&[
+            (429, "slow down"),
+            (429, "slow down"),
+            (429, "slow down"),
+        ])
+        .await;
+        let client = ChainClient::new(Endpoint::held(
+            "GALATA_RHCHAIN_RPC_URL",
+            crate::config::Secret::new(url),
+        ));
+        let read = client.metadata("0xabc", 0).await;
+        assert!(read.is_err(), "a 429 became an answer: {read:?}");
     }
 
     #[test]

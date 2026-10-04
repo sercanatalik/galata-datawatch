@@ -130,6 +130,141 @@ pub fn label(path: &Path, key: &str) -> Result<Option<String>, SegmentError> {
         .and_then(|pair| pair.value.clone()))
 }
 
+/// What a row group must be able to hold to be decoded: the tests
+/// [`Segment::read_where`] applies to each group's footer statistics.
+///
+/// Every test answers **"no" only on the evidence** of both bounds, as the
+/// rest of this module does; an absent statistic reads the group.
+#[derive(Debug, Clone)]
+pub enum Prune<'a> {
+    /// An `Int64` column with a value in `[from, to)`. With `keep_nulls`, a
+    /// group holding any null in the column is read whatever its bounds say:
+    /// statistics bound the values present, and a row with no value may be
+    /// one the caller keeps.
+    Int64Range {
+        /// The column.
+        column: &'a str,
+        /// Inclusive.
+        from: i64,
+        /// Exclusive.
+        to: i64,
+        /// Read a group holding a null regardless.
+        keep_nulls: bool,
+    },
+    /// A UTF-8 column equal to `value`.
+    Equals {
+        /// The column.
+        column: &'a str,
+        /// The value.
+        value: &'a str,
+    },
+}
+
+/// One segment, opened once: its footer read, nothing decoded yet.
+///
+/// For a reader that asks the footer something — whose segment this is —
+/// before deciding what to decode. Asking [`label`] and then reading opened
+/// and parsed the file twice.
+pub struct Segment {
+    path: std::path::PathBuf,
+    builder: ParquetRecordBatchReaderBuilder<File>,
+}
+
+impl Segment {
+    /// Open a segment and read its footer.
+    pub fn open(path: &Path) -> Result<Segment, SegmentError> {
+        Ok(Segment {
+            path: path.to_path_buf(),
+            builder: builder(path)?,
+        })
+    }
+
+    /// A label the writer stated, as [`label`] reads it.
+    pub fn label(&self, key: &str) -> Option<String> {
+        self.builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|pairs| pairs.iter().find(|pair| pair.key == key))
+            .and_then(|pair| pair.value.clone())
+    }
+
+    /// The row groups every test can hold, decoded. Rows are not filtered:
+    /// a group passing comes back whole, and the caller filters rows as it
+    /// must anyway.
+    pub fn read_where(self, prunes: &[Prune<'_>]) -> Result<Vec<RecordBatch>, SegmentError> {
+        let columns = self.builder.parquet_schema().columns();
+        let resolved: Vec<(Option<usize>, &Prune<'_>)> = prunes
+            .iter()
+            .map(|p| {
+                let name = match p {
+                    Prune::Int64Range { column, .. } | Prune::Equals { column, .. } => *column,
+                };
+                (columns.iter().position(|c| c.path().string() == name), p)
+            })
+            .collect();
+        let total = self.builder.metadata().num_row_groups();
+        let selected: Vec<usize> = (0..total)
+            .filter(|i| {
+                let group = self.builder.metadata().row_group(*i);
+                resolved.iter().all(|(index, prune)| match index {
+                    Some(index) => may_hold(group, *index, prune),
+                    None => true,
+                })
+            })
+            .collect();
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.path;
+        let builder = if selected.len() == total {
+            self.builder
+        } else {
+            self.builder.with_row_groups(selected)
+        };
+        let reader = builder.build().map_err(|source| SegmentError::Parquet {
+            path: path.clone(),
+            source,
+        })?;
+        collect(&path, reader)
+    }
+}
+
+fn may_hold(group: &RowGroupMetaData, index: usize, prune: &Prune<'_>) -> bool {
+    let statistics = group.column(index).statistics();
+    match (prune, statistics) {
+        (
+            Prune::Int64Range {
+                from,
+                to,
+                keep_nulls,
+                ..
+            },
+            Some(Statistics::Int64(s)),
+        ) => {
+            if *keep_nulls && s.null_count_opt() != Some(0) {
+                return true;
+            }
+            match (s.min_opt(), s.max_opt()) {
+                (Some(lo), Some(hi)) => *hi >= *from && *lo < *to,
+                _ => true,
+            }
+        }
+        (Prune::Equals { value, .. }, Some(Statistics::ByteArray(s))) => {
+            // Truncated statistics still bound the values (a truncated max is
+            // rounded up), so the comparison stays a safe "no".
+            match (s.min_opt(), s.max_opt()) {
+                (Some(lo), Some(hi)) => {
+                    let v = value.as_bytes();
+                    lo.data() <= v && v <= hi.data()
+                }
+                _ => true,
+            }
+        }
+        _ => true,
+    }
+}
+
 fn builder(path: &Path) -> Result<ParquetRecordBatchReaderBuilder<File>, SegmentError> {
     let file = File::open(path).map_err(|source| SegmentError::Write {
         path: path.to_path_buf(),

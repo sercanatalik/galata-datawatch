@@ -47,8 +47,37 @@ def external(at: datetime, closed: frozenset[date] | None = None) -> bool:
     return trade_date not in closed
 
 
+HOUR_US = 60 * MIN_US
+
+
+@lru_cache(maxsize=65_536)
+def _external_hour(hour: int, closed: frozenset[date] | None) -> bool:
+    """`external` for every instant of one UTC hour, which it is constant over.
+
+    New York is a whole number of hours from UTC, in both seasons, and every
+    threshold above falls on a New York hour (17:00, 18:00, midnight, and the
+    2:00 clock change). So within a UTC hour nothing `external` reads changes.
+    """
+    return external(datetime.fromtimestamp(hour * HOUR_US / 1e6, tz=UTC), closed)
+
+
 def external_share(start_micros: int, end_micros: int, closed: frozenset[date] | None = None) -> float:
-    """The share of [start, end) in the external session, minute by minute."""
-    minutes = range(start_micros, end_micros, MIN_US)
-    count = sum(external(datetime.fromtimestamp(m / 1e6, tz=UTC), closed) for m in minutes)
-    return count / len(minutes)
+    """The share of [start, end) in the external session, minute by minute.
+
+    **Counted per UTC hour**, not per minute: the session is constant over an
+    hour, so each hour's minutes on the grid from `start` are counted and the
+    session asked once — and remembered, since every calculator asks about the
+    same hours. It was 43,200 timezone conversions per instrument for a
+    month's baseline.
+    """
+    n = len(range(start_micros, end_micros, MIN_US))
+    if n == 0:
+        raise ZeroDivisionError("an empty interval has no share")
+    count = 0
+    for hour in range(start_micros // HOUR_US, (end_micros - 1) // HOUR_US + 1):
+        # The grid's minutes k with hour start ≤ start + k·MIN < hour end.
+        k_lo = max(0, -(-(hour * HOUR_US - start_micros) // MIN_US))
+        k_hi = min(n, -(-((hour + 1) * HOUR_US - start_micros) // MIN_US))
+        if k_hi > k_lo and _external_hour(hour, closed):
+            count += k_hi - k_lo
+    return count / n

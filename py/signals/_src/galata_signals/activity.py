@@ -32,8 +32,9 @@ from pathlib import Path
 import polars as pl
 
 from .basis import _dt
-from .frontier import frontier, period
+from .frontier import frontier, period, signal_files
 from .liquidity import trades
+from .split import by
 from .varcov import Run, stored_asof
 
 SIGNAL = "activity"
@@ -49,13 +50,18 @@ RAW = ("notional_usd", "trade_count", "avg_trade_usd")
 
 def history(tape: Path, lo: int, hi: int) -> pl.DataFrame:
     """This signal's stored raw figures with asof in [lo, hi): `ticker_i, asof_micros, measure, value`."""
-    root = tape / "kind=signals"
     empty = pl.DataFrame(schema={"ticker_i": pl.String, "asof_micros": pl.Int64, "measure": pl.String, "value": pl.Float64})
-    if not root.is_dir() or not any(root.rglob("*.parquet")):
+    files = signal_files(tape, lo, hi)
+    if not files:
         return empty
+    # The newest computation of each hour: a `--redo` adds a row beside the one
+    # it repairs (the dataset is additive-only), and both in the baseline would
+    # keep the wrong figure in the median it was redone to replace.
     return (
-        pl.scan_parquet(str(root / "**" / "*.parquet"), hive_partitioning=False)
+        pl.scan_parquet(files, hive_partitioning=False)
         .filter((pl.col("signal") == SIGNAL) & pl.col("measure").is_in(list(RAW)) & (pl.col("asof_micros") >= lo) & (pl.col("asof_micros") < hi))
+        .group_by("ticker_i", "asof_micros", "measure")
+        .agg(pl.col("value").sort_by("computed_micros").last())
         .select("ticker_i", "asof_micros", "measure", "value")
         .collect()
     )
@@ -79,9 +85,10 @@ def compute(tape: Path, run: Run) -> Run:
         t = t.with_columns((pl.col("price") * pl.col("size")).alias("usd"), pl.col("ts").dt.epoch("us").alias("_t"))
     past = history(tape, asof - HISTORY_DAYS * DAY_US, asof)
     tickers = sorted(set(t["ticker"].to_list())) if t.height else []
+    trades_of, past_of = by(t), by(past, "ticker_i")
     for ticker in tickers:
-        mine = t.filter(pl.col("ticker") == ticker)
-        run.rows.extend(_rows(ticker, asof, mine.filter(pl.col("_t") >= lo), mine.filter(pl.col("_t") < lo), past.filter(pl.col("ticker_i") == ticker), run))
+        mine = trades_of(ticker)
+        run.rows.extend(_rows(ticker, asof, mine.filter(pl.col("_t") >= lo), mine.filter(pl.col("_t") < lo), past_of(ticker), run))
     run.said.append(f"activity: {len(tickers)} instruments for the hour to {_dt(asof):%Y-%m-%d %H:%M}")
     return run
 

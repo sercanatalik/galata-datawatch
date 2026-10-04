@@ -185,8 +185,12 @@ impl Publisher for NatsPublisher {
         envelope: &'a Envelope,
     ) -> Pin<Box<dyn Future<Output = Result<(), PublishError>> + Send + 'a>> {
         Box::pin(async move {
+            let body = encode(envelope).map_err(|e| PublishError::Failed {
+                subject: subject.as_str().to_string(),
+                reason: e.to_string(),
+            })?;
             self.client
-                .publish(subject.as_str().to_string(), encode(envelope).into())
+                .publish(subject.to_nats(), body.into())
                 .await
                 .map_err(|e| PublishError::Failed {
                     subject: subject.as_str().to_string(),
@@ -202,7 +206,7 @@ impl Publisher for NatsPublisher {
     ) -> Pin<Box<dyn Future<Output = Result<(), PublishError>> + Send + 'a>> {
         Box::pin(async move {
             self.client
-                .publish(subject.as_str().to_string(), body.to_vec().into())
+                .publish(subject.to_nats(), body.to_vec().into())
                 .await
                 .map_err(|e| PublishError::Failed {
                     subject: subject.as_str().to_string(),

@@ -169,6 +169,34 @@ pub fn read_range(
     Ok(out)
 }
 
+/// The receipt days the archive holds in scope and in `[from, to)`, as the
+/// midnight each starts at, oldest first.
+///
+/// For a reader that goes **a day at a time**: stepping through the range
+/// instead would visit every empty day of an open-ended one.
+pub fn receipt_days(
+    root: &Path,
+    scopes: Option<&[&str]>,
+    from_micros: i64,
+    to_micros: i64,
+) -> Vec<i64> {
+    let mut days: Vec<i64> = partitions_in_range(root, from_micros, to_micros)
+        .into_iter()
+        .filter(|p| !p.ends_with("failures") && in_scope(root, p, scopes))
+        .filter_map(|p| {
+            p.components().rev().find_map(|c| {
+                c.as_os_str()
+                    .to_str()?
+                    .strip_prefix("date=")
+                    .and_then(crate::calendar::midnight_of)
+            })
+        })
+        .collect();
+    days.sort_unstable();
+    days.dedup();
+    days
+}
+
 fn payloads_of(
     batch: &arrow::record_batch::RecordBatch,
     path: &Path,

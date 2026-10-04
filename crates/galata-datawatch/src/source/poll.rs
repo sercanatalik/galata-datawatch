@@ -42,7 +42,7 @@ impl PollSource {
     /// Built from what the adapter declared.
     pub fn new(rest_url: Endpoint, path: &str, symbols: &[String], signer: Signer) -> PollSource {
         PollSource {
-            http: reqwest::Client::new(),
+            http: crate::source::http_client(),
             rest_url,
             path_and_query: path_and_query(path, symbols),
             signer,

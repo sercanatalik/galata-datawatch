@@ -50,7 +50,7 @@ pub mod publisher;
 pub mod subject;
 pub mod subscriber;
 
-pub use encode::{DecodeError, decode, encode};
+pub use encode::{DecodeError, EncodeError, decode, encode};
 pub use grants::{Grant, Grants, ROOTS, password_var, to_nats_config};
 pub use identity::BrokerIdentity;
 pub use publisher::{ConnectRefusal, NatsPublisher, NullPublisher, PublishError, Publisher};

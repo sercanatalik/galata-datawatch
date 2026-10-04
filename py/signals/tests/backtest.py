@@ -51,7 +51,7 @@ def _served(monkeypatch, n, var_scale=1.0, seed=4):
         {"ticker": "BTC", "ts": [t0 + timedelta(hours=k) for k in range(n + 1)], "close_ts": [t0 + timedelta(hours=k + 1) for k in range(n + 1)], "open": closes, "high": closes, "low": closes, "close": closes}
     )
     monkeypatch.setattr(backtest, "stored_tails", lambda tape, lo, hi: tails)
-    monkeypatch.setattr(backtest, "bars", lambda h, s: bars)
+    monkeypatch.setattr(backtest, "bars", lambda h, s, start=None: bars)
 
 
 def _got(tmp_path):

@@ -35,7 +35,7 @@ import polars as pl
 
 import galata_research as gr
 
-from .bars import bars
+from .bars import EVER, bars, since
 from .carry import Declared
 from .frontier import frontier, period
 from .sessions import external_share
@@ -50,9 +50,9 @@ MIN_DAYS = 4
 FIVE_US = 300_000_000
 
 
-def fivemin() -> pl.DataFrame:
-    """5-minute bars from the tape's 1m, whole buckets only. A name a test can replace."""
-    return bars("5m", "1m")
+def fivemin(start: str = EVER[0]) -> pl.DataFrame:
+    """5-minute bars from the tape's 1m, whole buckets only, from `start`. A name a test can replace."""
+    return bars("5m", "1m", start)
 
 
 def _dt(us: int) -> datetime:
@@ -72,7 +72,9 @@ def compute(tape: Path, run: Run, declared: Declared | None = None) -> Run:
         run.said.append(f"moments: nothing new since {_dt(stored):%Y-%m-%d}")
         return run
     lo = asof - WEEK_DAYS * DAY_US
-    b = fivemin().filter((pl.col("close_ts").dt.epoch("us") > lo - DAY_US) & (pl.col("close_ts").dt.epoch("us") <= asof))
+    # The week and the day before it, read as such: the filter below still
+    # decides, the bound only stops the read at what it can keep.
+    b = fivemin(since(lo - 2 * DAY_US)).filter((pl.col("close_ts").dt.epoch("us") > lo - DAY_US) & (pl.col("close_ts").dt.epoch("us") <= asof))
     r = gr.timeseries.returns(b, kind="log").filter(pl.col("close_ts").dt.epoch("us") > lo)
     dex = declared.dex if declared is not None else (lambda t: "main")
     sessioned = [t for t in set(r["ticker"].to_list()) if dex(t) != "main"] if r.height else []

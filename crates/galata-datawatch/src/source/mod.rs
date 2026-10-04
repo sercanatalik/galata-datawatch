@@ -29,6 +29,33 @@ pub mod stream;
 pub use backoff::Backoff;
 pub use stream::StreamSource;
 
+/// Longest a TCP and TLS handshake may take before the request fails.
+#[cfg(feature = "capture")]
+pub const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Longest one whole request may take, connect to last byte.
+///
+/// **Without it a half-open connection waits forever**, and every caller here
+/// asks one request at a time: one stalled answer stops every gap fill, settle
+/// and history fill behind it, silently. A minute is far above any page
+/// measured, and far below the time nobody notices.
+#[cfg(feature = "capture")]
+pub const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The HTTP client every venue request goes through: bounded in time.
+#[cfg(feature = "capture")]
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_TIMEOUT)
+        // Probes an idle pooled connection, so one the venue's side dropped
+        // without a FIN is found before a request is sent down it.
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .build()
+        // Building fails only where the TLS backend cannot initialise, which
+        // `Client::new` would panic on as well.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// What a source hands the loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

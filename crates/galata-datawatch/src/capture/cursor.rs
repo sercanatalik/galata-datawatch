@@ -386,8 +386,12 @@ impl Capture {
             return Ok(());
         }
         for symbol in &reference.symbols {
-            let payload = client.metadata(symbol, self.now()).await;
-            self.take(payload)?;
+            match client.metadata(symbol, self.now()).await {
+                Ok(payload) => self.take(payload)?,
+                Err(error) => {
+                    tracing::warn!(contract = symbol.as_str(), %error, "a contract's metadata did not read; its last answer stands");
+                }
+            }
         }
         *refreshed_at = Some(now);
         Ok(())

@@ -24,7 +24,7 @@ use std::path::Path;
 
 use arrow::array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
 
-use crate::derive::tape::{bars_from_tape, width_micros};
+use crate::derive::tape::{bars_by_venue, width_micros};
 use crate::derive::{Bar, Cell, Horizon, derive};
 use crate::watch::Finding;
 
@@ -176,11 +176,40 @@ pub fn reconcile(tape: &Path, venues: &[&str], bound: f64, now_micros: i64) -> V
     if targets.is_empty() {
         return Vec::new();
     }
-    let candles: Vec<Vec<Bar>> = venues
-        .iter()
-        .filter_map(|venue| bars_from_tape(tape, venue).ok().map(|(bars, _)| bars))
-        .collect();
     let at = tape.join(format!("kind={}", galata_wire::Kind::Signals));
+    // **One read, bounded by the windows the targets were fitted over.** Every
+    // window starts a width before its fit (the closing bar of the first
+    // return) and ends at what it fitted through.
+    let span = targets
+        .iter()
+        .filter(|t| t.value.is_some())
+        .filter_map(|t| {
+            let width = width_micros(&t.horizon)?;
+            Some((
+                t.fit_from_micros?.checked_sub(width)?,
+                t.fitted_through_micros?,
+            ))
+        })
+        .fold(None, |acc: Option<(i64, i64)>, (lo, hi)| {
+            Some(acc.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))))
+        });
+    let Some((from, through)) = span else {
+        return Vec::new();
+    };
+    let candles: Vec<Vec<Bar>> = match bars_by_venue(tape, venues, from, through.saturating_add(1))
+    {
+        Ok(by_venue) => by_venue.into_iter().map(|(bars, _)| bars).collect(),
+        // **Said, not swallowed.** A candle dataset that will not read
+        // used to come back as no bars, so no findings — a broken tape
+        // reported as a clean reconciliation.
+        Err(error) => {
+            return vec![Finding {
+                observed: format!("the candles would not read for reconciliation: {error}"),
+                expected: "a readable kind=candles".into(),
+                at: tape.join(format!("kind={}", galata_wire::Kind::Candles)),
+            }];
+        }
+    };
     judge(&targets, &candles, bound, &at)
 }
 
