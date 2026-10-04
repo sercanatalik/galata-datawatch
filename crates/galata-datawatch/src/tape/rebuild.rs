@@ -250,18 +250,19 @@ pub fn rebuild_with(
     for midnight in replay::receipt_days(archive_root, scopes, from_micros, to_micros) {
         let this_day = midnight.max(from_micros);
         let day_to = midnight.saturating_add(DAY).min(to_micros);
-        let payloads = replay::read_range(archive_root, scopes, this_day, day_to)?;
-        if payloads.is_empty() {
-            continue;
-        }
-        report.payloads += payloads.len();
+        // **Streamed**: each payload is derived and dropped as it is read, so
+        // a day's raw bytes are never held at once — only its derived rows,
+        // until the day commits.
+        let mut read = 0usize;
 
         // **Rooted at the archive being read**, so a bug that appended anyway
         // would grow that tree and be visible, rather than quietly creating a
         // second one. Nothing is appended: `ingest_replayed` is the entry
         // point that does not, and a `Replayed` cannot reach the one that does.
         let mut tape = Tape::open(tape_root);
-        for payload in payloads {
+        for payload in replay::stream_range(archive_root, scopes, this_day, day_to) {
+            let payload = payload?;
+            read += 1;
             let seq = payload.seq();
             let received = payload.payload().recv_micros;
             let result = ingest_replayed(&mut archive, adapter, collected.as_ref(), payload)?;
@@ -277,6 +278,10 @@ pub fn rebuild_with(
                 report.rows += 1;
             }
         }
+        if read == 0 {
+            continue;
+        }
+        report.payloads += read;
         ours.extend(tape.pending_venues());
         match tape.commit() {
             Ok(paths) => written.extend(paths),

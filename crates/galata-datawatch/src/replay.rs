@@ -104,7 +104,27 @@ pub fn read_range(
     from_micros: i64,
     to_micros: i64,
 ) -> Result<Vec<Replayed>, ReplayError> {
-    let mut out = Vec::new();
+    stream_range(root, scopes, from_micros, to_micros).collect()
+}
+
+/// [`read_range`], **one payload at a time**: the same payloads in the same
+/// order, without holding the range.
+///
+/// Reading a range used to decode every segment in it into one `Vec`, then
+/// sort it — so memory grew with the range asked for. Here the segments are
+/// merged by receipt time, and a segment is opened only when the merge
+/// reaches its first receipt (its name says when that is). What is held at
+/// once is the segments overlapping the moment being replayed, not the range.
+///
+/// The listing is made up front, so a segment written while this runs is not
+/// read. An error ends the iteration after it is yielded.
+pub fn stream_range(
+    root: &Path,
+    scopes: Option<&[&str]>,
+    from_micros: i64,
+    to_micros: i64,
+) -> Replay {
+    let mut pending = Vec::new();
     for partition in partitions_in_range(root, from_micros, to_micros) {
         // The failure rows NAME payloads; they are not payloads. Replaying them
         // would ingest an error message as though it were a venue frame.
@@ -118,55 +138,161 @@ pub fn read_range(
         // second thing that can disagree.
         let kind = kind_of(&partition);
         let level = address_level(&partition);
-
         let account = account_of(&partition);
 
         for (cursor, path) in galata_segments::list_segments(&partition) {
             // The name carries the range, so a segment that cannot hold the
             // window is skipped without being opened.
-            if let galata_segments::Cursor::Time {
-                first_micros,
-                last_micros,
-                ..
-            } = cursor
-                && (last_micros < from_micros || first_micros >= to_micros)
-            {
-                continue;
-            }
-            // An account's payloads come back addressed to the account, with
-            // the fingerprint its segment's footer carries — not flattened to
-            // the venue, which would lose whose they were.
-            let address = match &account {
-                Some((venue, alias)) => Some(PayloadAddress::Account(AccountAddress {
-                    venue: venue.clone(),
-                    account: alias.clone(),
-                    fingerprint: galata_segments::label(&path, ACCOUNT_FP_LABEL)?
-                        .unwrap_or_default(),
-                })),
-                None => None,
-            };
-            for batch in galata_segments::read_segment_range(&path, from_micros, to_micros)? {
-                let mut payloads = payloads_of(
-                    &batch,
-                    &path,
-                    level,
-                    kind.as_deref(),
-                    from_micros,
-                    to_micros,
-                )?;
-                if let Some(address) = &address {
-                    for replayed in &mut payloads {
-                        replayed.0.address = address.clone();
+            let first = match cursor {
+                galata_segments::Cursor::Time {
+                    first_micros,
+                    last_micros,
+                    ..
+                } => {
+                    if last_micros < from_micros || first_micros >= to_micros {
+                        continue;
                     }
+                    first_micros
                 }
-                out.extend(payloads);
-            }
+                // Not named by receipt time: nothing says when its rows
+                // start, so it is opened before anything is yielded.
+                _ => i64::MIN,
+            };
+            pending.push(Pending {
+                first,
+                path,
+                level,
+                kind: kind.clone(),
+                account: account.clone(),
+            });
         }
     }
-    // Receipt order, then sequence — the order capture produced them in, so a
-    // rebuild's rows land in the same order capture's did.
-    out.sort_by_key(|p| (p.0.recv_micros, p.0.seq));
-    Ok(out)
+    // Popped from the end: latest first-receipt first in the vector. Stable,
+    // so segments sharing a first receipt open in listing order.
+    pending.sort_by_key(|p| std::cmp::Reverse(p.first));
+    Replay {
+        pending,
+        open: Vec::new(),
+        heap: std::collections::BinaryHeap::new(),
+        from_micros,
+        to_micros,
+        failed: false,
+    }
+}
+
+/// A segment listed for a replay and not yet opened.
+#[derive(Debug)]
+struct Pending {
+    first: i64,
+    path: PathBuf,
+    level: &'static str,
+    kind: Option<String>,
+    account: Option<(String, String)>,
+}
+
+/// The payloads of a receipt range, in receipt order, read as they are
+/// reached. See [`stream_range`].
+#[derive(Debug)]
+pub struct Replay {
+    /// Listed and unopened, latest first-receipt first.
+    pending: Vec<Pending>,
+    /// Each opened segment's rows not yet yielded, in receipt order.
+    open: Vec<std::collections::VecDeque<Replayed>>,
+    /// The next row of each open segment: `(receipt, sequence, segment)`.
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(i64, u64, usize)>>,
+    from_micros: i64,
+    to_micros: i64,
+    failed: bool,
+}
+
+impl Replay {
+    fn open_segment(&mut self, segment: Pending) -> Result<(), ReplayError> {
+        // An account's payloads come back addressed to the account, with the
+        // fingerprint its segment's footer carries — not flattened to the
+        // venue, which would lose whose they were.
+        let address = match &segment.account {
+            Some((venue, alias)) => Some(PayloadAddress::Account(AccountAddress {
+                venue: venue.clone(),
+                account: alias.clone(),
+                fingerprint: galata_segments::label(&segment.path, ACCOUNT_FP_LABEL)?
+                    .unwrap_or_default(),
+            })),
+            None => None,
+        };
+        let mut rows = Vec::new();
+        for batch in
+            galata_segments::read_segment_range(&segment.path, self.from_micros, self.to_micros)?
+        {
+            let mut payloads = payloads_of(
+                &batch,
+                &segment.path,
+                segment.level,
+                segment.kind.as_deref(),
+                self.from_micros,
+                self.to_micros,
+            )?;
+            if let Some(address) = &address {
+                for replayed in &mut payloads {
+                    replayed.0.address = address.clone();
+                }
+            }
+            rows.extend(payloads);
+        }
+        // Receipt order, then sequence — the order capture produced them in,
+        // so a rebuild's rows land in the same order capture's did. Within a
+        // segment this is almost always already true, and a stable sort of a
+        // sorted run is one pass.
+        rows.sort_by_key(|p| (p.0.recv_micros, p.0.seq));
+        let index = self.open.len();
+        if let Some(first) = rows.first() {
+            self.heap
+                .push(std::cmp::Reverse((first.0.recv_micros, first.0.seq, index)));
+        }
+        self.open.push(rows.into());
+        Ok(())
+    }
+}
+
+impl Iterator for Replay {
+    type Item = Result<Replayed, ReplayError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        // Open every segment that could hold a row at or before the earliest
+        // row held. A segment's rows all arrive at or after its first receipt,
+        // so once the earliest held row is earlier than every unopened
+        // segment's start, nothing unopened can come before it.
+        while let Some(next) = self.pending.last() {
+            let earliest = self
+                .heap
+                .peek()
+                .map(|std::cmp::Reverse((recv, _, _))| *recv);
+            if earliest.is_some_and(|recv| recv < next.first) {
+                break;
+            }
+            let Some(segment) = self.pending.pop() else {
+                break;
+            };
+            if let Err(error) = self.open_segment(segment) {
+                self.failed = true;
+                return Some(Err(error));
+            }
+        }
+        let std::cmp::Reverse((_, _, index)) = self.heap.pop()?;
+        let rows = &mut self.open[index];
+        let row = rows.pop_front()?;
+        match rows.front() {
+            Some(next) => {
+                self.heap
+                    .push(std::cmp::Reverse((next.0.recv_micros, next.0.seq, index)))
+            }
+            // Done with this segment: give its memory back now.
+            None => *rows = std::collections::VecDeque::new(),
+        }
+        Some(Ok(row))
+    }
 }
 
 /// The receipt days the archive holds in scope and in `[from, to)`, as the
@@ -427,6 +553,53 @@ mod tests {
             archive.append(row).unwrap();
         }
         archive.flush().unwrap();
+    }
+
+    #[test]
+    fn a_stream_merges_overlapping_segments_into_receipt_order() {
+        // Segments of two partitions, overlapping in receipt time: a stream
+        // gives exactly what reading everything and sorting gave.
+        let dir = tempfile::tempdir().unwrap();
+        written(
+            dir.path(),
+            vec![
+                payload(1, DAY + 10, "quotes", "BTC"),
+                payload(4, DAY + 30, "quotes", "BTC"),
+            ],
+        );
+        written(
+            dir.path(),
+            vec![
+                payload(2, DAY + 20, "trades", "BTC"),
+                payload(6, DAY + 40, "trades", "BTC"),
+            ],
+        );
+        written(
+            dir.path(),
+            vec![
+                payload(3, DAY + 25, "quotes", "ETH"),
+                payload(7, DAY + 50, "quotes", "ETH"),
+            ],
+        );
+        let order: Vec<u64> = stream_range(dir.path(), None, i64::MIN, i64::MAX)
+            .map(|r| r.unwrap().seq())
+            .collect();
+        assert_eq!(order, vec![1, 2, 3, 4, 6, 7]);
+    }
+
+    #[test]
+    fn a_stream_opens_a_segment_only_when_the_merge_reaches_it() {
+        // A day's replay holds the segments overlapping the moment being
+        // replayed, not the day: the one ten days on is not opened to yield
+        // the first row.
+        let dir = tempfile::tempdir().unwrap();
+        written(dir.path(), vec![payload(1, DAY, "quotes", "BTC")]);
+        written(dir.path(), vec![payload(2, 10 * DAY, "quotes", "BTC")]);
+        let mut replay = stream_range(dir.path(), None, i64::MIN, i64::MAX);
+        assert_eq!(replay.next().unwrap().unwrap().seq(), 1);
+        assert_eq!(replay.open.len(), 1, "the later segment is still unopened");
+        assert_eq!(replay.next().unwrap().unwrap().seq(), 2);
+        assert!(replay.next().is_none());
     }
 
     #[test]
