@@ -26,7 +26,7 @@ def _bars(returns_by_ticker: dict[str, np.ndarray]) -> pl.DataFrame:
 
 
 def _run(frame, tmp_path, monkeypatch):
-    monkeypatch.setattr(jumps, "fivemin", lambda: frame)
+    monkeypatch.setattr(jumps, "fivemin", lambda start=None: frame)
     run = varcov.Run(computed_micros=varcov.micros(frame["close_ts"].max()) + 1, code="abc", signal="jumps")
     return {(r["ticker_i"], r["measure"]): r for r in jumps.compute(tmp_path, run).rows}
 

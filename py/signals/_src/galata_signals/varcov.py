@@ -2,8 +2,9 @@
 
 For each horizon in `signals.toml`: the closed bars of that width, their log
 returns, and `gr.models.corr.walk_forward` from the last close (split there,
-one origin, h = 1; every run refits on everything, so a run is stateless and
-deterministic — a fit takes about a second). Rows are the signals schema:
+one origin, h = 1; every run refits on the window `lookback_us` names — 300
+days, or a year where the tail needs it — so a run is stateless and
+deterministic and its sample rolls with the market). Rows are the signals schema:
 `covariance` for every pair i ≤ j, `correlation` for i < j, and on a fitted
 horizon `correlation_target` for i < j: R̄, the correlation the fit reverts
 to, which `galata-watch` reconciles against `derive`'s equal-weight ρ.
@@ -30,7 +31,7 @@ import galata_research as gr
 from galata_research import Refused
 
 from . import matrix
-from .bars import WIDTH_US, bars
+from .bars import WIDTH_US, bars, since
 
 SIGNAL = "varcov"
 
@@ -109,11 +110,36 @@ def stored_asof(tape: Path, signal: str = SIGNAL) -> dict[str, int]:
     return dict(zip(frame["horizon"].to_list(), frame["asof_micros"].to_list()))
 
 
+#: How far back a horizon's fit looks: a **rolling window of fixed time**, the
+#: same for every horizon, rather than everything ever captured. The sample a
+#: model fits moves with the market instead of growing forever, and a run reads
+#: a bounded tape. Widened, never narrowed, by what a horizon's own figures need
+#: (`lookback_us`), so nothing that is computed today stops being computed.
+LOOKBACK_DAYS = 300
+DAY_US = 86_400_000_000
+
+
+def lookback_us(hz: Horizon) -> int:
+    """How far before now a horizon's bars are read.
+
+    `LOOKBACK_DAYS`, or more where the horizon needs more: a fitted horizon's
+    `min_obs` returns, and the year of standardised residuals its tail is
+    simulated from (`TAIL_YEAR_DAYS`). Two widths more cover the bar the first
+    return is taken from and a first bucket cut short by the bound.
+    """
+    width = WIDTH_US[hz.name]
+    need = LOOKBACK_DAYS * DAY_US
+    if hz.fitted:
+        need = max(need, (hz.min_obs + 1) * width, TAIL_YEAR_DAYS * DAY_US)
+    return need + 2 * width
+
+
 def compute(horizons: list[Horizon], tape: Path, run: Run) -> Run:
     """Every horizon with a new close, appended to `run.rows`: Σ, and what is derived from it."""
     stored = stored_asof(tape)
     for hz in horizons:
-        returns = gr.timeseries.returns(bars(hz.name, hz.bars), kind="log")
+        start = since(run.computed_micros - lookback_us(hz))
+        returns = gr.timeseries.returns(bars(hz.name, hz.bars, start), kind="log")
         try:
             tickers, joint, _ = gr.models.corr.joint(returns)
         except Refused as refusal:
