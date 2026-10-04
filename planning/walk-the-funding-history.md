@@ -1,8 +1,9 @@
 # walk-the-funding-history
 
-**BUILT 2026-09-26, NOT DEPLOYED.** Switched on 2026-09-28 and off again:
-the venue answered 429 on every instrument, and the outcome claimed full
-coverage anyway. See [`pace-by-the-venue-weight`](./pace-by-the-venue-weight.md).
+**BUILT 2026-09-26, DEPLOYED 2026-09-29 19:29Z** with `walk_funding_days =
+1300`, paced by [`pace-by-the-venue-weight`](./pace-by-the-venue-weight.md). It
+was first switched on 2026-09-28 and off again: the venue answered 429 on
+every instrument, and the outcome claimed full coverage anyway.
 
 `walk_funding_days`, asked every boot
 (`walk-the-funding-history`), and `premium` carried on settled funding
