@@ -13,8 +13,8 @@
 # reach — which is why the vault lives in its own member rather than behind
 # `--features vault`.
 #
-# What comes with it, measured under Cargo 1.98.1 on 2026-09-23: galata-vault
-# 0.4 resolves 268 packages alone and adds 151 to this tree (335 -> 478), much
+# What comes with it, measured under Cargo 1.98.1 on 2026-11-16: galata-vault
+# 0.5 resolves 268 packages alone and adds 149 to this tree (337 -> 478), much
 # of it `age`'s localisation stack — fluent, i18n-embed, unic-langid, rust-embed,
 # intl-memoizer — which no `age` feature set drops. A tape reader must not
 # compile a localisation framework.
@@ -43,7 +43,7 @@ text = path.read_text()
 marker = "[dependencies]\n"
 assert marker in text, "the plant's target moved — the PLANT is wrong, not the guard"
 at = text.index(marker) + len(marker)
-path.write_text(text[:at] + "galata-vault = \"0.4\"  # planted by check-vault-reach.sh\n" + text[at:])
+path.write_text(text[:at] + "galata-vault = \"0.5\"  # planted by check-vault-reach.sh\n" + text[at:])
 PLANTPY
     echo "planted in $PLANT" >&2
     exit 0
@@ -53,10 +53,10 @@ cd "$ROOT"
 
 VAULT_FAMILY=$(cargo tree -p galata-datawatch-vault --prefix none 2>/dev/null \
     | grep -E '^galata-vault(-client|-keys|-proto|-seal)? v[0-9]' | sort -u || true)
-SUPPORTED_VAULT=$(printf '%s\n' "$VAULT_FAMILY" | grep -cE '^galata-vault v0\.4\.[0-9]+$' || true)
+SUPPORTED_VAULT=$(printf '%s\n' "$VAULT_FAMILY" | grep -cE '^galata-vault v0\.5\.[0-9]+$' || true)
 VAULT_COUNT=$(printf '%s\n' "$VAULT_FAMILY" | grep -c . || true)
 if [[ "$SUPPORTED_VAULT" -ne 1 || "$VAULT_COUNT" -ne 1 ]]; then
-    echo "check-vault-reach: expected one galata-vault 0.4.x package and no split family" >&2
+    echo "check-vault-reach: expected one galata-vault 0.5.x package and no split family" >&2
     printf '%s\n' "$VAULT_FAMILY" >&2
     exit 1
 fi

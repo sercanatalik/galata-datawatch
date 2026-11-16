@@ -331,10 +331,12 @@ different shape from the one planned here.
 
 ## Tier 5 — the vault
 
-*Built against the published `galata-vault 0.4` SDK.*
+*Built against the published `galata-vault 0.5` SDK.*
 
-The first release was `0.1.0` on 2026-09-21. The current release is `0.4.0`,
-which consolidates the former ten packages into one feature-gated crate. The
+The first release was `0.1.0` on 2026-09-21. `0.4.0` consolidated the former
+ten packages into one feature-gated crate. The current release is `0.5.0`,
+whose `gv` uses a token file or refuses, which is what lets the services
+start through `gv run`. The
 unpublished `galata-datawatch-vault` member now resolves that registry package;
 its root API required no source migration.
 
@@ -370,8 +372,8 @@ comment.
   broker-backed document uses one `read` credential, preferably restricted by a
   secret allow-list. A child vault is the deployment answer when cryptographic
   isolation is required; two role-specific tokens are not a supported mode.
-- **The 0.4 dependency boundary.** Under Cargo 1.98.1, the vault resolves 268
-  packages alone and adds 151 to the `bin` Datawatch tree (`335 -> 478`). The
+- **The 0.5 dependency boundary.** Under Cargo 1.98.1, the vault resolves 268
+  packages alone and adds 149 to the `bin` Datawatch tree (`337 -> 478`). The
   old `221 / 104 / 310 -> 414` table is retained in `design/measured.md` as the
   0.1 measurement it was, not as the current cost.
 

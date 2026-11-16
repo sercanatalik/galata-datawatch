@@ -957,6 +957,29 @@ process, not downgrading the client.
 
 ---
 
+
+### The 0.5 graph — 2026-11-16
+
+The workspace resolves `galata-vault 0.5.0` from crates.io. The same commands,
+on the tree as it was the moment before the bump and the moment after:
+
+```
+                                      0.4, today    0.5 graph     change
+  workspace union                         489           489           0
+  galata-datawatch --features bin         337           337           0
+  galata-vault alone                      268           268           0
+  galata-datawatch-vault                  478           478           0
+  marginal over datawatch `bin`           149           149           0
+```
+
+0.5.0 changes what `gv` and the SDK do, not what they link: the lockfile's
+only change is the vault's own version. The `bin` tree is two packages larger
+than on 2026-09-23 (`335 -> 337`), from work since that touched no vault
+crate, and both were already inside the vault-backed tree — so the marginal
+figure fell from 151 to 149 without the wall moving. The 0.4 column is
+re-taken today for that reason: comparing against September's would have
+credited the vault with a change it did not make.
+
 ## The third wall — 541 crates to 279, 2026-09-21
 
 A consumer that wants only the tape's schemas — the tower's server is the first,
