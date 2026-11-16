@@ -4482,5 +4482,41 @@ run-service.sh capture hyperliquid, the tower's token
 install-services.sh --status                      three tokens, 2027-11-16, 365 days, ok
 ```
 
-**Still to measure, on the machine that runs the services:** the same under
-launchd, with the tools in `~/.cargo/bin` where the installers put them.
+### Under launchd — 2026-11-16, 21:17Z
+
+A first install on this machine: `gv` and `gv-server` 0.5.1 put in
+`~/.cargo/bin` by the release's own installer scripts, `GALATA_VAULT_BIN`
+unset, a new vault project, three generated broker passwords, and
+`install-services.sh` for all five. The owner key is in this user's keychain.
+Read from each job's own process, names only:
+
+```text
+job                   launchd's pid runs   holds
+nats                  nats-server          GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID,
+                                           ..._DATAWATCH_RH_CHAIN, ..._READER
+capture.hyperliquid   galata-datawatch     GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
+tower                 galata-tower         GALATA_BROKER_PASSWORD_READER
+flows                 uv                   none, and no vault variable
+vault                 gv-server            (the store itself)
+
+install-services.sh --status                every service ready to start again;
+                                            three tokens, 2027-11-16, 364 days, ok
+```
+
+- **launchd's pid is the service**, in every row: `run-service.sh` and
+  `gv run` both exec. Capture connected to the broker as
+  `datawatch-hyperliquid` and the tower subscribed to `status.>`, each with
+  the one password it was handed.
+- **No prompt and no refusal.** `gv run` in token mode started three
+  services on a machine whose keychain holds the owner key without asking
+  for it.
+- The vault's own two variables pass through to each secret-holding service,
+  as they did under `galata-vault-exec`: they point at that service's token,
+  which reads nothing else.
+- **Not done:** a SIGTERM at a launchd pid here. It was measured against the
+  stand-in above; sending one to a live capture would cost a gap in the
+  record to learn what `exec` already shows.
+
+The first `flows` start refused four times, by name: `py/signals` is locked
+to a `galata-research` checkout beside this one, and a new machine has none.
+Cloning it there was the whole fix.
