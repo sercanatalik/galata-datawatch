@@ -273,34 +273,6 @@ impl SecretSource for VaultSecrets<'_> {
     }
 }
 
-/// Named secrets, as `NAME=value` pairs for a child process's environment.
-///
-/// For `galata-vault-exec`, which starts a process that reads its secrets
-/// from the environment — NATS's `$VAR`s, the tower's reader password, the
-/// file binary's `EnvSecrets` — with each one read **through the vault's
-/// token**. The vault decides which names that token may read, so a process
-/// started with the tower's token cannot be handed capture's password
-/// whatever the command line asks for.
-///
-/// The values leave the `Secret` type here, the one module of this member
-/// permitted to (`check-endpoint-reach.sh`), because an environment variable
-/// is a string. Every name must resolve; the first that does not is the
-/// refusal, naming it.
-pub fn environment_for(
-    vault: &Vault,
-    names: &[String],
-) -> Result<Vec<(String, String)>, ConfigError> {
-    let source = VaultSecrets::new(vault);
-    names
-        .iter()
-        .map(|name| {
-            source
-                .secret(name)
-                .map(|secret| (name.clone(), secret.expose().to_owned()))
-        })
-        .collect()
-}
-
 /// Days before a token's expiry that a service starts saying so.
 ///
 /// **30, not the vault's own 14** (`galata_vault::EXPIRY_WARNING_SECS`, which
@@ -310,8 +282,8 @@ pub fn environment_for(
 /// printed only when a service starts, which under launchd's `KeepAlive` can
 /// be weeks apart. The common manual-renewal practice warns at 30, 15 and 7
 /// days; this takes the widest, once, because it is seen least often.
-/// `install-services.sh --status` reads the verdict from `--expiry` rather
-/// than restating the number.
+/// `install-services.sh --status` and `run-service.sh` read the verdict from
+/// `galata-token-expiry` rather than restating the number.
 pub const TOKEN_WARNING_DAYS: i64 = 30;
 
 const DAY_SECS: i64 = 86_400;
@@ -354,7 +326,7 @@ impl TokenNotice {
 
 /// Judge a token expiring at `expires_at` against `now` (both Unix seconds).
 ///
-/// **The clock is the caller's.** Only `galata-vault-exec`'s `main` reads
+/// **The clock is the caller's.** Only `galata-token-expiry`'s `main` reads
 /// one, so this can be asked at any instant a test names.
 pub fn token_notice(expires_at: i64, now: i64) -> TokenNotice {
     let left = expires_at - now;

@@ -381,6 +381,34 @@ prove "check-secret-reach (a tool that does not connect names a secret source)" 
       'use galata_datawatch::config::{Adapters, Config, FileSource};' \
       'use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource};'
 
+# The floor that keeps an older gv, which reads through the owner key, away
+# from a service's token.
+prove "check-service-secrets (the version floor is lowered)" \
+      ./scripts/check-service-secrets.sh \
+      scripts/lib/vault-tools.sh replace \
+      'GV_FLOOR="0.5.0"' \
+      'GV_FLOOR="0.4.0"'
+
+# A floor compared as text, under which 0.10.0 sorts below 0.5.0.
+prove "check-service-secrets (versions compared as text)" \
+      ./scripts/check-service-secrets.sh \
+      scripts/lib/vault-tools.sh replace \
+      'if ! version_at_least "${have:-0}" "$GV_FLOOR"; then' \
+      'if [[ "${have:-0}" < "$GV_FLOOR" ]]; then'
+
+# A broker identity's dash surviving into a secret name, which gv run skips.
+prove "check-service-secrets (a secret name that cannot be a variable)" \
+      ./scripts/check-service-secrets.sh \
+      scripts/lib/vault-tools.sh replace \
+      'local id="${1//-/_}"' \
+      'local id="$1"'
+
+# A script reaching back into a galata-vault checkout.
+prove "check-service-secrets (a script runs gv from a checkout)" \
+      ./scripts/check-service-secrets.sh \
+      scripts/provision-vault.sh append \
+      $'\n# GV="$GALATA_VAULT_ROOT/target/release/gv"\n'
+
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)
 present=$(find scripts -maxdepth 1 -name 'check-*.sh' ! -name 'check-all.sh' | wc -l | tr -d ' ')

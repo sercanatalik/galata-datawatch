@@ -26,7 +26,11 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
-VAULT_ROOT="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}"
+# shellcheck source=scripts/lib/vault-tools.sh
+source "$ROOT/scripts/lib/vault-tools.sh"
+# The installed galata-vault tools (gv, gv-server): vetted before a restart
+# like anything else freshly installed.
+VAULT_BIN="$(vault_bin_dir)"
 TEMPLATE="$ROOT/deploy/launchd/com.galata.service.plist.in"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
@@ -41,7 +45,7 @@ refuse() { echo "install-services: REFUSED — $1" >&2; exit 1; }
 # var/bin copy, and `galata-datawatch-vault <venue>`, which is a second writer
 # of one archive scope (know-a-twin-by-its-binary). Matching the executable
 # also cannot match the shell doing the matching. What launchd owns is the
-# job's pid and its descendants: run-service.sh and galata-vault-exec exec, so
+# job's pid and its descendants: run-service.sh and `gv run` exec, so
 # the job's pid is the service itself.
 #
 #   twins_of <spec>    one "pid<TAB>command" line per twin
@@ -133,7 +137,8 @@ twins_of() {
 # argument measured to exit before the program does any work, while the old
 # instance still serves (vet-before-the-restart).
 #
-#   galata-vault-exec --help        usage line, exit 2
+#   galata-token-expiry --help      usage line, exit 2
+#   gv --help                       help text
 #   galata-datawatch|ledger --help  refused as a venue, before connecting
 #   gv-server --help                usage line
 #   galata-tower --version          version, exit 0 (--help would SERVE)
@@ -142,7 +147,7 @@ vet() {  # vet <label> <program>...
     for program in "$@"; do
         [[ -x "$program" ]] || continue
         case "$program" in
-            "$ROOT"/*|"$TOWER"/*|"$VAULT_ROOT"/*) ;;
+            "$ROOT"/*|"$TOWER"/*|"$VAULT_BIN"/*) ;;
             *) continue ;;   # uv, Homebrew's nats-server: vetted long ago
         esac
         case "${program##*/}" in
@@ -166,7 +171,10 @@ vet_programs() {  # the programs a service's start would exec
     esac
     if [[ "$said" == ready:* ]]; then set -- $said; echo "$2"; fi
     case "$spec" in
-        nats|tower|capture:*|ledger:*) echo "$ROOT/target/release/galata-vault-exec" ;;
+        # The two a secret-holding start runs before the service itself.
+        nats|tower|capture:*|ledger:*)
+            echo "$ROOT/target/release/galata-token-expiry"
+            echo "$VAULT_BIN/gv" ;;
     esac
     return 0
 }
@@ -233,21 +241,21 @@ if [[ "${1:-}" == --status ]]; then
 
     # The service tokens: a lapsed one is a service that cannot restart, and
     # nothing else says so before the day (warn-before-the-tokens-lapse). The
-    # verdict — ok, WARN inside 30 days, EXPIRED — is galata-vault-exec's, so
+    # verdict — ok, WARN inside 30 days, EXPIRED — is galata-token-expiry's, so
     # the window is stated once.
     echo
     printf '%-34s %-10s %-5s %s\n' TOKEN EXPIRES DAYS STATE
-    exec_bin="$ROOT/target/release/galata-vault-exec"
+    exec_bin="$ROOT/target/release/galata-token-expiry"
     for token in "$ROOT"/var/tokens/*.gvt; do
         [[ -f "$token" ]] || { echo "(no tokens in var/tokens — scripts/mint-service-tokens.sh)"; break; }
         name="$(basename "$token" .gvt)"
         if [[ ! -x "$exec_bin" ]]; then
-            printf '%-34s %s\n' "$name" "unreadable: no galata-vault-exec — cargo build --release -p galata-datawatch-vault"
-        elif line="$(GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}" GV_TOKEN_FILE="$token" "$exec_bin" --expiry 2>&1)"; then
+            printf '%-34s %s\n' "$name" "unreadable: no galata-token-expiry — cargo build --release -p galata-datawatch-vault"
+        elif line="$(GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}" GV_TOKEN_FILE="$token" "$exec_bin" 2>&1 </dev/null)"; then
             read -r _ date days state <<<"$line"
             printf '%-34s %-10s %-5s %s\n' "$name" "$date" "$days" "$state"
         else
-            printf '%-34s %s\n' "$name" "unreadable: ${line#galata-vault-exec: }"
+            printf '%-34s %s\n' "$name" "unreadable: ${line#galata-token-expiry: }"
         fi
     done
 
@@ -326,8 +334,9 @@ for spec in "${services[@]}"; do
     # The four that hold a secret read it through their own vault token.
     # (Not `;;&` in the case above: macOS's bash is 3.2.)
     if [[ "$service" == capture || "$service" == ledger || "$service" == nats || "$service" == tower ]]; then
-        [[ -x "$ROOT/target/release/galata-vault-exec" ]] \
-            || refuse "no galata-vault-exec — cargo build --release -p galata-datawatch-vault first"
+        [[ -x "$ROOT/target/release/galata-token-expiry" ]] \
+            || refuse "no galata-token-expiry — cargo build --release -p galata-datawatch-vault first"
+        said="$(gv_tool 2>&1)" || refuse "$said"
     fi
 
     mkdir -p "$AGENTS" "$ROOT/var/logs"

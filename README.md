@@ -325,7 +325,7 @@ configuration names a broker password, it fetches that secret once too. The
 capture loop never holds the vault or the credential.
 
 ```sh
-# Install the published galata-vault 0.4 tools.
+# Install the published galata-vault tools, 0.5.0 or later, into ~/.cargo/bin.
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-installer.sh | sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -511,16 +511,24 @@ scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 3
 ```
 
 - **Each service reads only its own secrets**, through a token minted for it
-  alone, using `galata-vault-exec --only NAME -- <command>`. `gv run` is not
-  used because it reads through the owner key, which would give any service
-  every secret. No secret goes into a plist, since launchd leaves plists
+  alone: `run-service.sh` execs `gv run --only NAME -- <command>` with that
+  token's file. No secret goes into a plist, since launchd leaves plists
   readable by every user.
+- **`gv` must be 0.5.0 or later, and the scripts refuse an older one.**
+  Before 0.5.0, `gv` ignored a token file and read through the owner key,
+  which this machine holds, so `gv run` gave any service every secret. From
+  0.5.0 it uses the token or refuses, and refuses a name outside the token's
+  allow-list rather than starting the command without it.
+- **The vault's tools are the installed release.** The scripts run `gv` and
+  `gv-server` from `~/.cargo/bin`, where the installers put them; set
+  `GALATA_VAULT_BIN` to use another directory. No galata-vault checkout is
+  needed.
 - **The recovery kit** is written to `var/galata-datawatch-recovery.gvkit`.
   It is the only way to recover the project, so move it to offline storage
   and delete that copy.
 - **Tokens expire** after 365 days, the server's maximum. `--status` shows
   each one's date and days left. Inside 30 days it reads `WARN`, and every
-  start of that service logs a warning (`galata-vault-exec --expiry` asks
+  start of that service logs a warning (`galata-token-expiry` asks
   directly). Re-run `mint-service-tokens.sh` and reinstall the services
   before then. A re-mint revokes the tokens it replaces, by the ids kept in
   `var/tokens/<service>.id`.

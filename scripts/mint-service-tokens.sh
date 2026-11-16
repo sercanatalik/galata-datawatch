@@ -21,12 +21,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GV="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}/target/release/gv"
+# shellcheck source=scripts/lib/vault-tools.sh
+source "$ROOT/scripts/lib/vault-tools.sh"
 ENV="galata-datawatch/prod"
 TOKENS="$ROOT/var/tokens"
 TTL="365d"
 
-[[ -x "$GV" ]] || { echo "mint-service-tokens: no gv at $GV" >&2; exit 1; }
+GV="$(gv_tool 2>&1)" || { echo "mint-service-tokens: $GV" >&2; exit 1; }
 umask 077
 mkdir -p "$TOKENS"
 
@@ -34,35 +35,57 @@ mint() {
     local service="$1"; shift
     local only=()
     for name in "$@"; do only+=(--only "$name"); done
-    local said="$TOKENS/$service.said.tmp"
-    "$GV" token mint --env "$ENV" --scope read --ttl "$TTL" "${only[@]}" 2>"$said" \
-        | grep -Eo 'gvt1_[A-Za-z0-9_-]+' | head -n 1 > "$TOKENS/$service.gvt.tmp"
-    [[ -s "$TOKENS/$service.gvt.tmp" ]] || { cat "$said" >&2; echo "no token printed for $service" >&2; exit 1; }
-    # gv says the id on stderr ("minted read token <id> for ..."); the token
-    # alone goes to stdout.
-    local id
-    id="$(grep -Eo 'token [0-9a-f]{32}' "$said" | head -n 1 | cut -d' ' -f2 || true)"
+    # gv's own structured result: one JSON object on stdout carrying the
+    # token and its id. Until galata-vault 0.5.0 this matched `gvt1_…` on one
+    # stream and `token <32 hex>` on the other, which is reading a sentence
+    # written for a person.
+    local said="$TOKENS/$service.said.tmp" result="$TOKENS/$service.json.tmp"
+    local fresh="$TOKENS/$service.gvt.tmp"
+    if ! "$GV" token mint --env "$ENV" --scope read --ttl "$TTL" --json "${only[@]}" \
+            >"$result" 2>"$said"; then
+        cat "$said" >&2; rm -f "$said" "$result"
+        echo "mint-service-tokens: gv would not mint for $service — var/tokens/$service.gvt left as it was" >&2
+        exit 1
+    fi
     rm -f "$said"
+    # Both fields or neither file: a token stored without its id is one that
+    # the next re-mint cannot revoke, and an id recorded without its token
+    # points at nothing. The token goes to the file, never to this shell.
+    local id
+    if ! id="$(python3 - "$result" "$fresh" <<'PY'
+import json, pathlib, re, sys
+try:
+    minted = json.loads(pathlib.Path(sys.argv[1]).read_text())
+    token, ident = minted["token"], minted["id"]
+except (ValueError, KeyError, TypeError):
+    sys.exit("the mint result is not the object gv token mint --json documents")
+if not (isinstance(token, str) and token.startswith("gvt1_")):
+    sys.exit("the mint result carries no gvt1_ token")
+if not (isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{32}", ident)):
+    sys.exit("the mint result carries no token id")
+pathlib.Path(sys.argv[2]).write_text(token + "\n")
+print(ident)
+PY
+    )"; then
+        rm -f "$result" "$fresh"
+        echo "mint-service-tokens: $service — var/tokens/$service.gvt and its id left as they were" >&2
+        exit 1
+    fi
+    rm -f "$result"
     local previous=""
     [[ -f "$TOKENS/$service.id" ]] && previous="$(tr -d '[:space:]' < "$TOKENS/$service.id")"
 
-    mv "$TOKENS/$service.gvt.tmp" "$TOKENS/$service.gvt"
-    chmod 600 "$TOKENS/$service.gvt"
-    if [[ -n "$id" ]]; then
-        printf '%s\n' "$id" > "$TOKENS/$service.id"
-    else
-        # Refuse to overwrite the record with nothing: the previous id is
-        # still the only way to find the token this one replaced.
-        echo "WARNING: gv printed no token id for $service — var/tokens/$service.id left as it was" >&2
-    fi
-    echo "minted $service${id:+ ($id)}: reads $*"
+    chmod 600 "$fresh"
+    mv "$fresh" "$TOKENS/$service.gvt"
+    printf '%s\n' "$id" > "$TOKENS/$service.id"
+    echo "minted $service ($id): reads $*"
 
     # Revoke after replace, never before: a failed revoke is a leftover, not
     # an outage, so it is reported by id and the new token stands.
     if [[ -z "$previous" ]]; then
         echo "  no previous token id recorded for $service — revoke the old one by hand from: gv token ls --env $ENV"
-    elif [[ -z "$id" || "$previous" == "$id" ]]; then
-        echo "  previous token $previous not revoked (no new id to replace it)" >&2
+    elif [[ "$previous" == "$id" ]]; then
+        echo "  previous token $previous not revoked (it is the new one)" >&2
     elif "$GV" token revoke --env "$ENV" "$previous" >/dev/null 2>&1; then
         echo "  revoked the token it replaces ($previous)"
     else

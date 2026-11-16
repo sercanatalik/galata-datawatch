@@ -1,0 +1,91 @@
+# Where the vault's own programs are, and which `gv` is new enough to trust
+# with a service's token. Sourced, never run; it sets nothing and starts
+# nothing.
+#
+#   gv="$(gv_tool 2>&1)" || refuse "$gv"
+#   server="$(vault_tool gv-server 2>&1)" || refuse "$server"
+#
+# Each function prints the answer on stdout, or the reason on stderr and
+# returns 1 — so the caller's own `refuse` says it, under the caller's name.
+#
+# **The installed release, never a checkout.** These scripts used to run
+# `$GALATA_VAULT_ROOT/target/release/gv`, which made a deployment depend on a
+# sibling source tree and on whatever was last built in it. galata-vault ships
+# installers; they put `gv` and `gv-server` in `$CARGO_HOME/bin`.
+#
+# **One directory, not PATH.** launchd's PATH has no `~/.cargo/bin`, and a
+# name resolved through PATH at install time and again at start time can be
+# two different programs. `GALATA_VAULT_BIN` names the directory; nothing else
+# is searched.
+#
+# **The floor is what makes `gv run` safe here.** Before 0.5.0, `gv` ignored
+# `GV_TOKEN_FILE` and answered with the owner key, which this machine holds:
+# measured on 2026-09-25, the tower's token "read" capture's password through
+# `gv run`. 0.5.0 uses the token or refuses, and refuses a name outside the
+# token's allow-list instead of starting the command without it. An older
+# `gv` is therefore not a slower path but the leak itself, and is refused by
+# version before it is handed a token.
+
+GV_FLOOR="0.5.0"
+
+vault_bin_dir() {
+    printf '%s' "${GALATA_VAULT_BIN:-${CARGO_HOME:-$HOME/.cargo}/bin}"
+}
+
+# How to get them, said wherever one is missing or too old.
+vault_install_hint() {
+    printf '%s' "install the galata-vault $GV_FLOOR tools (README, Configuration and secrets): the gv-installer.sh and gv-server-installer.sh of its latest release — or set GALATA_VAULT_BIN to the directory that holds them"
+}
+
+# vault_tool <gv|gv-server>: its path.
+vault_tool() {
+    local path
+    path="$(vault_bin_dir)/$1"
+    if [[ ! -x "$path" ]]; then
+        echo "no $1 at $path — $(vault_install_hint)" >&2
+        return 1
+    fi
+    printf '%s' "$path"
+}
+
+# version_at_least <have> <want>: both MAJOR.MINOR.PATCH; a pre-release or
+# build suffix on <have> is ignored, so 0.5.0-rc.1 counts as 0.5.0.
+version_at_least() {
+    local have="${1%%[-+]*}" want="$2" i h w
+    local IFS=.
+    # shellcheck disable=SC2206  # split on the dots, on purpose
+    local hs=($have) ws=($want)
+    for i in 0 1 2; do
+        h="${hs[$i]:-0}"; w="${ws[$i]:-0}"
+        [[ "$h" =~ ^[0-9]+$ ]] || return 1
+        (( h > w )) && return 0
+        (( h < w )) && return 1
+    done
+    return 0
+}
+
+# gv_tool: the path of a `gv` at or above the floor.
+gv_tool() {
+    local path have
+    path="$(vault_tool gv)" || return 1
+    # `gv --version` prints "gv 0.5.0".
+    have="$("$path" --version 2>/dev/null </dev/null | awk 'NR == 1 { print $NF }')"
+    if ! version_at_least "${have:-0}" "$GV_FLOOR"; then
+        echo "$path is gv ${have:-of an unreadable version}, and $GV_FLOOR is required: an older gv ignores a token file and reads through the owner key, handing a service every secret — $(vault_install_hint)" >&2
+        return 1
+    fi
+    printf '%s' "$path"
+}
+
+# The broker's own naming: GALATA_BROKER_PASSWORD_<IDENTITY>, dashes to
+# underscores, upper case (galata_broker::password_var). `gv run` skips a
+# name that cannot be an environment variable, so the dash must not survive.
+password_var() {
+    local id="${1//-/_}"
+    printf 'GALATA_BROKER_PASSWORD_%s' "$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]')"
+}
+
+# is_env_name <name>: could a process be handed this as a variable?
+is_env_name() {
+    [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}

@@ -4373,3 +4373,72 @@ for i in range(50):
 **Deployed 2026-09-29 19:29Z.** The venue took 2,250 documented weight in 24 s
 without a 429. Capture restarted with `walk_funding_days = 1300` enabled; the
 funding walk is running as paced fills inside the live loop, no 429.
+
+## Services start through `gv run` — against a scratch vault, 2026-11-16
+
+`close-gv-cli-gaps`. `galata-vault-exec` existed because `gv run` could not be
+trusted with a service's token: on 2026-09-25 the tower's token "read"
+capture's password through it. The cause, read from galata-vault's source,
+was narrower than "the owner key answers": `gv` entered token mode on
+`GV_TOKEN` only, ignored `GV_TOKEN_FILE`, and went on as the owner. The fix is
+in galata-vault, and this is what `run-service.sh` does with it.
+
+**Not the service machine, and not a release.** A `gv-server local` on a
+scratch data directory at `127.0.0.1:8750`; a scratch `GV_HOME` holding the
+owner key, so the owner key is present exactly as on the real machine; `gv`
+and `gv-server` built from the galata-vault tree at `7b54510` plus the
+unreleased change, behind a one-line wrapper answering `--version` with
+`0.5.0` because the tree still says `0.4.0`. launchd was not involved: the
+start was `scripts/run-service.sh tower` from a shell, with a shell script
+standing in for the tower binary. What follows is therefore true of the
+scripts and of that `gv`; what it says about launchd is not yet measured.
+
+```text
+provision-vault.sh, mint-service-tokens.sh        three tokens, 0600, each with an id
+
+token                 READER   DATAWATCH_HYPERLIQUID   DATAWATCH_RH_CHAIN
+tower                 reads    refused                 refused
+capture-hyperliquid   refused  reads                   refused
+nats                  reads    reads                   reads
+
+mint-service-tokens.sh, again                     revoked the token it replaces
+  the tower's previous token                      the token was not accepted: it is unknown, revoked, ...
+  the tower's new token                           reads
+
+run-service.sh tower (the stand-in)
+  handed                                          GALATA_BROKER_PASSWORD_READER, and no other
+  the pid launched and the pid the program saw    the same
+  SIGTERM at the launched pid                     received by the program
+
+run-service.sh capture hyperliquid, with the tower's token in capture's place
+  exit 1; galata-datawatch never started          this token's allow-list does not include
+                                                  GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
+
+run-service.sh --check, GALATA_VAULT_BIN at a gv reporting 0.4.0
+  refused                                         is gv 0.4.0, and 0.5.0 is required
+
+mint-service-tokens.sh, gv answering {"scope":"read"}
+  exit 1; nats.gvt and nats.id byte-identical     no temporary file left
+
+galata-token-expiry, a token minted today         1826396693 2027-11-16 364 ok
+```
+
+- **The wrong token is refused by name, before the service exists.** The
+  first version of this run was not: `gv run --only B` with a token for `A`
+  started the command *without* `B` and exited 0, because the SDK's named
+  read left out a name outside the allow-list instead of refusing it. Nothing
+  leaked, and a service would have started with no password. That is fixed in
+  galata-vault in the same change, and is why the floor below is 0.5.0 and
+  not "whichever release reads a token file".
+- **Token mode writes nothing and asks for nothing.** With an empty `GV_HOME`,
+  `env -i`, and the default credential store, `gv run` delivered the secret,
+  created no file and did not block. Under launchd this is still to be seen.
+- **The floor is the only thing between these scripts and the old
+  behaviour**, so `check-service-secrets.sh` runs it against stub versions,
+  and `test-guards.sh` plants a lowered floor, a text comparison (under which
+  0.10.0 is below 0.5.0), a surviving dash in a secret name, and a path into
+  a galata-vault checkout. Each went red.
+
+**Still to measure, on the machine that runs the services:** the same table
+under launchd, with the published 0.5.0 tools in `~/.cargo/bin` and no
+wrapper.

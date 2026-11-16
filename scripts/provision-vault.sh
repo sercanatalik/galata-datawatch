@@ -20,7 +20,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GV="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}/target/release/gv"
+# shellcheck source=scripts/lib/vault-tools.sh
+source "$ROOT/scripts/lib/vault-tools.sh"
 SERVER="http://127.0.0.1:8750"
 PROJECT="galata-datawatch"
 ENV="$PROJECT/prod"
@@ -28,7 +29,7 @@ KIT="$ROOT/var/$PROJECT-recovery.gvkit"
 SECRETS="$ROOT/var/broker.env"
 
 refuse() { echo "provision-vault: REFUSED — $1" >&2; exit 1; }
-[[ -x "$GV" ]] || refuse "no gv at $GV — cargo build --release -p gv in galata-vault"
+GV="$(gv_tool 2>&1)" || refuse "$GV"
 curl -s -o /dev/null "$SERVER/" || refuse "no vault at $SERVER — scripts/install-services.sh vault"
 [[ -e "$KIT" ]] && refuse "$KIT exists: this project was provisioned already"
 [[ -f "$SECRETS" ]] || refuse "no $SECRETS to import"

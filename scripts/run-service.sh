@@ -31,7 +31,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VAULT_BIN="${GALATA_VAULT_ROOT:-$(cd "$ROOT/.." && pwd)/galata-vault}/target/release"
+# shellcheck source=scripts/lib/vault-tools.sh
+source "$ROOT/scripts/lib/vault-tools.sh"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin"
 export NO_COLOR=1
 cd "$ROOT"
@@ -88,37 +89,65 @@ config_verdict() {  # prints a note, or refuses
 
 # Start a command with named secrets from the vault, read through THIS
 # SERVICE'S token — the vault refuses any name the token was not minted for.
-# galata-vault-exec, not `gv run`: gv reads through the owner key, which this
-# machine holds, so `gv run` would hand any service every secret.
+#
+#   from_vault <service> --only NAME [--only NAME ...] -- <command> [args ...]
+#
+# `gv run`, from galata-vault 0.5.0 on: given a token file it uses that token
+# or refuses, and it refuses a name outside the token's allow-list rather than
+# starting the command without it. Before 0.5.0 it ignored the file and read
+# through the owner key, which this machine holds — so the version is checked
+# first (scripts/lib/vault-tools.sh), and an older gv is never handed a token.
+# `gv run` execs, so the service replaces it and nothing resident holds the
+# values.
+#
+# The token's expiry is judged before the start, by galata-token-expiry: a
+# lapsed one is refused here, by name, and one inside the warning window logs
+# a line and starts anyway — a valid token is never refused.
 from_vault() {
-    local token="$ROOT/var/tokens/$1.gvt"; shift
+    local service="$1" token="$ROOT/var/tokens/$1.gvt"; shift
     [[ -f "$token" ]] || refuse "no token at $token — scripts/mint-service-tokens.sh"
     local mode
     mode="$(stat -f %Lp "$token" 2>/dev/null || stat -c %a "$token")"
     [[ "$mode" == 600 || "$mode" == 400 ]] \
         || refuse "$token is mode $mode; a token must be 0600 or 0400"
-    [[ -x "$ROOT/target/release/galata-vault-exec" ]] \
-        || refuse "no galata-vault-exec — cargo build --release -p galata-datawatch-vault"
+    local judge="$ROOT/target/release/galata-token-expiry"
+    [[ -x "$judge" ]] \
+        || refuse "no galata-token-expiry — cargo build --release -p galata-datawatch-vault"
+    local gv
+    gv="$(gv_tool 2>&1)" || refuse "$gv"
+
+    local names="" name
+    while [[ $# -gt 0 && "$1" != -- ]]; do
+        [[ "$1" == --only && -n "${2:-}" ]] || refuse "from_vault: expected --only NAME, got '$1'"
+        name="$2"; shift 2
+        # gv run skips, with a warning, a name that cannot be a variable; here
+        # that would be a service started without its secret.
+        is_env_name "$name" || refuse "'$name' cannot be an environment variable, so $service would start without it"
+        names="${names:+$names,}$name"
+    done
+    [[ "${1:-}" == -- && -n "$names" && $# -ge 2 ]] \
+        || refuse "from_vault: usage: <service> --only NAME ... -- <command>"
+    shift
+
     export GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}"
     export GV_TOKEN_FILE="$token"
-    if (( CHECK )); then
-        local expiry
-        expiry="$("$ROOT/target/release/galata-vault-exec" --expiry 2>&1)" \
-            || refuse "$token does not open: ${expiry#galata-vault-exec: }"
-        [[ "$expiry" != *EXPIRED* ]] || refuse "$token has expired ($expiry) — scripts/mint-service-tokens.sh"
-        # The program after `--` is what galata-vault-exec would exec.
-        while [[ $# -gt 0 && "$1" != -- ]]; do shift; done
-        shift
-        start "$@"
-    fi
-    exec "$ROOT/target/release/galata-vault-exec" "$@"
-}
-
-password_var() {
-    # The broker's own naming: GALATA_BROKER_PASSWORD_<IDENTITY>, dashes to
-    # underscores, upper case (galata_broker::password_var).
-    local id="${1//-/_}"
-    printf 'GALATA_BROKER_PASSWORD_%s' "$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]')"
+    # "<unix> <YYYY-MM-DD> <days> <ok|WARN|EXPIRED>"
+    local expiry
+    expiry="$("$judge" 2>&1 </dev/null)" \
+        || refuse "$token does not open: ${expiry#galata-token-expiry: }"
+    local date days state
+    read -r _ date days state <<< "$expiry"
+    case "$state" in
+        ok) ;;
+        WARN)
+            (( CHECK )) || echo "run-service: WARNING $service's token expires on $date ($days days); after that the service cannot restart. Re-mint with scripts/mint-service-tokens.sh, then scripts/install-services.sh" >&2 ;;
+        EXPIRED) refuse "$token has expired ($date) — scripts/mint-service-tokens.sh" ;;
+        *) refuse "$token: galata-token-expiry said '$expiry', which is no verdict" ;;
+    esac
+    # Under --check, the program after `--` is what gv run would exec.
+    (( CHECK )) && start "$@"
+    [[ -x "$1" ]] || refuse "no program at $1"
+    exec "$gv" run --only "$names" -- "$@"
 }
 
 # This machine's broker block lives in the local configuration, which is the
@@ -183,9 +212,8 @@ case "$service" in
         # The deployment's secret store: loopback only, data in
         # ~/.local/share/galata-vault, no configuration. It stores ciphertext
         # and cannot read any of it — the binary links no decryption code.
-        [[ -x "$VAULT_BIN/gv-server" ]] \
-            || refuse "no gv-server at $VAULT_BIN — cargo build --release -p gv -p gv-server in galata-vault"
-        start "$VAULT_BIN/gv-server" local
+        server="$(vault_tool gv-server 2>&1)" || refuse "$server"
+        start "$server" local
         ;;
     flows)
         # No secret at all: the lane holds no credential, by design and by
