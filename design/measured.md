@@ -4462,6 +4462,25 @@ galata-token-expiry, a token minted today         1826396693 2027-11-16 364 ok
   0.10.0 is below 0.5.0), a surviving dash in a secret name, and a path into
   a galata-vault checkout. Each went red.
 
-**Still to measure, on the machine that runs the services:** the same table
-under launchd, with the published 0.5.0 tools in `~/.cargo/bin` and no
-wrapper.
+### With the published tools — 2026-11-16, later the same day
+
+galata-vault **0.5.1**, not 0.5.0: 0.5.0 reached crates.io and nothing else,
+because GitHub had retired the runner that built its Apple Silicon binaries,
+so no installer for it exists. 0.5.1 is 0.5.0 plus that runner and dependency
+updates. `gv` and `gv-server` for `aarch64-apple-darwin` from its GitHub
+release, their SHA-256 matching the published ones, unpacked into a scratch
+directory named by `GALATA_VAULT_BIN`. No wrapper: `gv --version` says
+`gv 0.5.1`, and the floor accepts it. A fresh scratch vault.
+
+```text
+provision-vault.sh, mint-service-tokens.sh        three tokens minted from --json
+run-service.sh --check vault                      ready: .../gv-server local
+run-service.sh tower (a stand-in)                 handed GALATA_BROKER_PASSWORD_READER, and no other
+run-service.sh capture hyperliquid, the tower's token
+                                                  this token's allow-list does not include
+                                                  GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
+install-services.sh --status                      three tokens, 2027-11-16, 365 days, ok
+```
+
+**Still to measure, on the machine that runs the services:** the same under
+launchd, with the tools in `~/.cargo/bin` where the installers put them.
