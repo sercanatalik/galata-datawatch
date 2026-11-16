@@ -107,6 +107,14 @@ instruments = [
   { ticker = "CL",     dex = "xyz" },
   { ticker = "XYZ100", dex = "xyz" },
   { ticker = "GOLD",   dex = "xyz" },
+  # Added 2026-11-16, each checked against the venue's own universe first
+  # (`meta` with `dex = "xyz"`, 145 instruments): `xyz:NVDA`, `xyz:SILVER`
+  # and `xyz:ANT` are listed and not delisted. No calendar is declared for
+  # them, as for the three above; NVDA is an equity, and whether it thins or
+  # stops outside its home session is not yet measured here.
+  { ticker = "NVDA",   dex = "xyz" },
+  { ticker = "SILVER", dex = "xyz" },
+  { ticker = "ANT",    dex = "xyz" },
 ]
 
 # A CHAIN VENUE IS NOT DECLARED HERE EITHER, AND ITS PROVIDER IS A SECRET.
