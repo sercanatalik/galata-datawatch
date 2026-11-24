@@ -4690,3 +4690,17 @@ sequences. They were written natively on 2026-11-18, and the judge run
 natively against the same record reports the same nine. The rebuild writes
 its day, then checks the tape, finds them, and exits 1; so on this record
 every rebuild fails after doing its work, in a container or out of one.
+
+**With the signals partition out of the tape, both pass.** `kind=signals`
+was moved whole to `var/tape.set-aside/`, with nothing deleted and a note
+beside it; signals are set aside for now.
+
+```text
+judge-the-record                             completed, 1.6 s        nothing to report
+rebuild-one-day, 2026-11-19                  completed, 20.7 s       peak 8.1 GiB, no memory kill
+    the day's tape, before and after         byte for byte the same
+project-the-recent-days, on its schedule     completed at 23:40, 1.1 s
+```
+
+Not shown here: the tape's frontier advancing under the lane, which needs
+capture to be running.
