@@ -1,0 +1,25 @@
+# Which of this deployment's services run in a container of their own, and
+# what each may use. Copy to var/containers.conf and uncomment a line to move
+# that service; var/, because the figures belong to one machine.
+#
+# A service with a line here starts in its container (scripts/run-service.sh,
+# README "Services in containers"). A service with no line starts natively.
+# Removing a line and reinstalling the service moves it back.
+#
+# Both limits, always. A container given neither gets 4 CPUs and 1 GiB
+# whatever the service is, so a line that states only one of them is refused
+# by name. CPUs are a whole number; memory is a number and M or G, and
+# Apple's container refuses less than 200M.
+#
+# The figures below are places to start: set each from what the service is
+# seen to use on this machine. One is measured (design/measured.md,
+# 2026-11-24): the hourly projection's shape, three days in one run with
+# trades and quotes for nine instruments, peaked at 8.2 GiB in a container,
+# and a lane given 4G was killed, not slowed. A day captured since holds no
+# trades, and needs somewhat less.
+#
+# service              cpus  memory
+# flows                  4     12G
+# nats                   1     256M
+# capture:hyperliquid    2     1G
+# ledger:hyperliquid     2     2G

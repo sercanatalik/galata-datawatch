@@ -1,0 +1,27 @@
+# The broker: the published NATS server, plus the one door by which its
+# passwords enter. Built from the repository root:
+#
+#   scripts/build-images.sh
+#   container build -t galata-nats -f deploy/container/Containerfile.nats .
+#
+# **The version this deployment ran natively.** 2.15.3 is what Homebrew's
+# nats-server was when the broker moved into a container, so the move changed
+# where the server runs and not which server it is. Moving the pin is a
+# change of its own.
+#
+# **`with-secrets`, because the passwords arrive on standard input.** The
+# authorization file names each identity's password as a variable, and the
+# launcher hands the three of them over as it hands capture its one
+# (scripts/run-service.sh). The alpine image, because that script needs a
+# shell and the default image has none.
+#
+# **No entrypoint.** The published image starts through its own script; here
+# the launcher states the whole command, so what runs is what
+# `run-service.sh --check nats` prints.
+
+ARG NATS_VERSION=2.15.3
+FROM nats:${NATS_VERSION}-alpine
+COPY --chmod=755 deploy/container/with-secrets /usr/local/bin/with-secrets
+ARG SOURCE_TREE=unknown
+LABEL org.galata.source-tree=$SOURCE_TREE
+ENTRYPOINT []

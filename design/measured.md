@@ -4520,3 +4520,142 @@ install-services.sh --status                every service ready to start again;
 The first `flows` start refused four times, by name: `py/signals` is locked
 to a `galata-research` checkout beside this one, and a new machine has none.
 Cloning it there was the whole fix.
+
+## Services in containers — before any service moved, 2026-11-24
+
+`containerise-host-services`. Each service is to run in a container of its
+own, under Apple's `container`, reached by the host's tailnet name. Every
+figure below was taken before anything moved, so that the design rests on
+what the tools do and not on what their documentation suggests.
+
+**Not the service machine, and nothing of the deployment was touched.** A
+64 GiB, 18-core Mac; Apple container 1.7.1; the Tailscale app 1.104.7;
+nats-server 2.15.3. Throwaway containers, scratch archives, stand-in values
+for secrets. No agent was loaded or unloaded, and the vault was stopped
+throughout. What follows is true of the tools on that machine. The Mac mini,
+a second tailnet device, tailnet ACLs and the clock after a sleep are not
+measured.
+
+**Reaching a service from a container.** The reason a reached service
+publishes on the tailnet address, and the reason `tailscale serve` is not
+the path between containers.
+
+```text
+a container resolves the Mac's tailnet name            yes, to its tailnet address
+a container -> an ordinary listener on that address    connected, 1 ms
+the Mac itself -> tailscale serve, HTTP and raw TCP    answered, with the owner's identity headers
+a container -> tailscale serve, by name and address    timed out, HTTP and raw TCP
+a container -> a port published on the tailnet address
+    by name                                            9.4 ms first, then 0.19 ms median, 0.58 ms p99 (300 requests)
+    by address                                         0.18 ms median, 0.22 ms p99
+the Mac itself -> that port on loopback                no answer
+what the service sees as its caller                    the container gateway, whoever calls
+```
+
+**A secret handed to a container.** `container run` has no secrets option.
+
+```text
+-e NAME, inherited from the launcher's environment
+    in a host argument list                            no
+    in the container tool's state                      two files, mode 0644, while the container exists
+    in `container inspect`                             printed
+standard input, to an entrypoint that exports and execs (with-secrets)
+    the service receives the value                     yes
+    in the container tool's state                      no
+    in `container inspect`                             no
+    in a host process's arguments or environment       no
+    SIGTERM at the `container run` process             reaches the service
+    left beneath the service                           one defunct process: the writer, once done
+```
+
+**What a container can be given.**
+
+```text
+a file, read-write (-v file:path)                      works
+a file, read-only                                      refused ("is not a directory"), or silently not mounted (:ro)
+a folder, read-only (--mount ...,readonly)             works, and a write is refused
+a folder's mode, seen inside                           kept (0700 stays 0700)
+a folder's owner, seen inside                          root, whatever the image's user
+writing to a 0700 folder as another user               allowed: the host user's rights are what apply
+a new volume                                           mode 755, owned by root; the image's user cannot write
+    after one `chown` as root                          writable, and it keeps what was written
+no limit stated                                        4 CPUs and 1,024 MB
+--memory below 200M                                    refused: "minimum memory amount allowed is 200 MiB"
+.dockerignore                                          honoured: var/, target/ and .git are not sent to a build
+```
+
+**Building the image.** The release profile keeps debug information, and the
+link is where the memory goes.
+
+```text
+builder at its default, 2 CPUs and 2 GB                the linker is killed (signal 9) linking galata-datawatch
+builder at 8 CPUs and 12 GB                            51 s
+a build that names no size                             the builder returns to its default, and its cache with it
+```
+
+**Capture, natively and in a container, side by side.** One instrument (BTC),
+no broker, ten minutes, each into a scratch archive; the container at 2 CPUs
+and 1 GiB. Trades are compared because each carries an id.
+
+```text
+                                        native         in a container
+files written                           1,096          1,103
+quotes segments (flush_secs = 2)        278            278
+trades in the run                       1,548          1,548
+distinct trade ids                      1,518          1,518      all in both, none in only one
+receipt lag, quotes, p50 / p99          332 / 604 ms   318 / 533 ms
+receipt lag, trades, p50                360 ms         339 ms
+container receipt minus native, the same trade         median -17 ms, p10 -80 ms, p90 +7 ms
+SIGTERM to exit                         0.13 s         0.15 s
+"asked to terminate; stopping cleanly"  logged         logged
+.clean-shutdown written                 yes            yes
+last row before the stop                1.46 s         1.44 s     the same rows
+the container's clock against the Mac's                inside the 76 ms it took to ask
+```
+
+The container did not receive later. The 17 ms in its favour is what two
+connections to one venue differ by, not a property of containers.
+
+**A tape rebuild of one day, natively and in a container.** 2026-11-18, nine
+instruments, 151 MB of compacted archive, copied into a fresh root per run;
+the container at 4 CPUs. `galata-tape-rebuild --replace hyperliquid
+2026-11-18`.
+
+```text
+native, three runs                      30.5 s, 30.8 s, 30.6 s     peak 8.6 GiB
+in a container given 4 GB               killed after 179 s          nothing written
+in a container given 12 GB, two runs    18.5 s, 18.6 s             peak 6.5 GiB
+the tapes                               2,291 files, 129 MB, byte for byte the same in all five
+
+three days in one run, 2026-11-17 to 2026-11-20 (519 MB of archive), which is the shape of the hourly projection
+native                                  58.9 s                     peak 10.2 GiB
+in a container given 24 GB              60.6 s                     peak 8.2 GiB
+the tapes                               2,306 files, byte for byte the same
+```
+
+The mounted folder is not what a rebuild waits on. Its memory is: a lane
+given less than a rebuild holds does not run slowly, it is killed. Three
+days hold little more than one (8.2 GiB against 6.5), so the limit follows
+the largest day in the window, not the window's length.
+That day held trades, a fifth of its rows, which are not captured from
+2026-11-24; the figure for a day captured since is somewhat lower and not
+yet measured.
+
+**What was captured, and what it would be at fifty instruments.** One full
+day, 2026-11-18, nine instruments; scaled linearly, which overstates it,
+since the nine include the busiest markets.
+
+```text
+                rows       tape       at fifty: rows    tape
+quotes          3.26M      71 MiB     18.1M             396 MiB
+trades          1.09M      23 MiB     6.1M              125 MiB
+marks           0.54M      10 MiB     3.0M              55 MiB
+funding         0.54M      7 MiB      3.0M              39 MiB
+candles         0.33M      7 MiB      1.9M              38 MiB     96% are updates to the forming bar
+all             5.77M      118 MiB    32M               650 MiB
+without trades                        26M               530 MiB    about 300 events a second on the bus
+```
+
+`trades` left the `series` line on 2026-11-24: nothing that runs reads
+them. `quotes` stays: the top of book as it moved can be fetched from
+nowhere afterwards.

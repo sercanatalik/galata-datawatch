@@ -28,6 +28,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
 # shellcheck source=scripts/lib/vault-tools.sh
 source "$ROOT/scripts/lib/vault-tools.sh"
+# shellcheck source=scripts/lib/container-tools.sh
+source "$ROOT/scripts/lib/container-tools.sh"
 # The installed galata-vault tools (gv, gv-server): vetted before a restart
 # like anything else freshly installed.
 VAULT_BIN="$(vault_bin_dir)"
@@ -127,6 +129,22 @@ twins_of() {
         fi
         printf '%s\t%s\n' "$pid" "$args"
     done
+
+    # The other shape a twin takes: the service's container, running, and not
+    # launchd's. The same service in a container and natively is two writers
+    # of one scope, exactly as two native ones are. launchd's own is the one
+    # whose `container run` is the job's process; any other holder of the
+    # name — a hand-started one, or one left detached — is a twin. It has no
+    # pid of its own on this side, so the first column says `container`.
+    local tool name state client launchds=0
+    tool="$(container_tool 2>/dev/null)" || return 0
+    name="$(container_name "$spec")"
+    state="$(container_state "$tool" "$name" | cut -f1)"
+    [[ "$state" == running ]] || return 0
+    for client in $(pgrep -f "container run .*--name $name( |\$)" 2>/dev/null); do
+        [[ "$owned" == *" $client "* ]] && launchds=1
+    done
+    (( launchds )) || printf 'container\t%s (a container under this service'"'"'s name, not started by launchd)\n' "$name"
 }
 
 # **Vet before the restart.** A freshly built binary's first launch waits
@@ -238,6 +256,41 @@ if [[ "${1:-}" == --status ]]; then
         done < <(twins_of "$spec")
     done
     (( twin_count )) || echo "(none — every managed service runs only under launchd)"
+
+    # Containers: the services var/containers.conf puts in a container of
+    # their own. For each, whether its container is running, the image it
+    # runs, the tree that image was built from, and the limits it is given.
+    # A container started before the last build runs the old image under the
+    # same name, and nothing else says so (the BUILD section's reason, here).
+    echo
+    printf '%-26s %-12s %-26s %-18s %s\n' CONTAINER STATE IMAGE TREE LIMITS
+    conf="$(containers_conf)"
+    if [[ ! -f "$conf" ]]; then
+        echo "(no $conf — every service runs natively)"
+    elif ! ctool="$(container_tool 2>&1)"; then
+        echo "($ctool)"
+    else
+        awk '!/^[[:space:]]*(#|$)/ {print $1}' "$conf" | while read -r spec; do
+            name="$(container_name "$spec")"
+            image="$(service_image "$spec")"
+            if limits="$(container_limits "$spec" 2>&1)"; then
+                read -r cpus memory <<< "$limits"
+                limits="$cpus CPUs, $memory"
+            else
+                limits="NO — ${limits##*states }"
+            fi
+            tree="$(image_source_tree "$ctool" "$image" 2>/dev/null)" || tree="unlabelled"
+            IFS=$'\t' read -r state _ digest <<< "$(container_state "$ctool" "$name")"
+            if [[ -z "$state" ]]; then
+                state="not running"
+            # One says `sha256:…` and the other the bare digest (measured
+            # 2026-11-24), so both are compared bare.
+            elif now="$(image_digest "$ctool" "$image")" && [[ -n "$digest" && -n "$now" && "${digest#sha256:}" != "${now#sha256:}" ]]; then
+                tree="STALE — started before the last build of $image; restart it"
+            fi
+            printf '%-26s %-12s %-26s %-18s %s\n' "$name" "$state" "$image" "$tree" "$limits"
+        done
+    fi
 
     # The service tokens: a lapsed one is a service that cannot restart, and
     # nothing else says so before the day (warn-before-the-tokens-lapse). The
@@ -364,7 +417,14 @@ for spec in "${services[@]}"; do
     # Replace, never stack — and never beside a hand-started twin.
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
     wait_unloaded "$label"
-    twin_pids() { twins_of "$spec" | cut -f1 | tr '\n' ' '; }
+    # A container under this service's name that launchd did not start goes
+    # first: the agent is unloaded, so whatever holds the name now is a twin.
+    if ctool="$(container_tool 2>/dev/null)" && [[ -n "$(container_state "$ctool" "$(container_name "$spec")")" ]]; then
+        echo "removing a container left under $(container_name "$spec")"
+        "$ctool" rm -f "$(container_name "$spec")" >/dev/null 2>&1 \
+            || refuse "a container under $(container_name "$spec") would not stop"
+    fi
+    twin_pids() { twins_of "$spec" | cut -f1 | grep -E '^[0-9]+$' | tr '\n' ' '; }
     pids="$(twin_pids)"
     if [[ -n "${pids// }" ]]; then
         echo "stopping a hand-started $spec (pid ${pids% })"

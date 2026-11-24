@@ -546,6 +546,58 @@ scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 3
 
 Logs are written to `var/logs/<service>.log`.
 
+### Services in containers
+
+A service listed in `var/containers.conf` runs in a container of its own,
+under Apple's [`container`](https://github.com/apple/container) (1.7 or
+later, started once by hand so it can install its kernel). A service with no
+line there runs natively, as above. Services move one at a time, and removing
+a line and reinstalling moves a service back.
+
+```sh
+scripts/build-images.sh                                  # galata-datawatch, galata-nats, galata-flows
+cp config/containers.conf.example var/containers.conf    # then state each moved service's CPUs and memory
+scripts/run-service.sh --check capture hyperliquid       # the whole line it would start; starts nothing
+scripts/install-services.sh capture:hyperliquid          # restart it, now in its container
+scripts/install-services.sh --status                     # CONTAINER: state, image, the tree it was built from, limits
+```
+
+| Service | Image | Is given | Reached at |
+|---|---|---|---|
+| `capture:<venue>` | `galata-datawatch` | the archive and the status folder | nowhere |
+| `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
+| `nats` | `galata-nats` | the generated authorization file | this Mac's tailnet name, port 4222 |
+| `flows` | `galata-flows` | the archive, the tape and a volume of its own | nowhere |
+
+- **The limits are stated, never defaulted.** A container given none gets
+  4 CPUs and 1 GiB whatever it runs. A service's line states both, and a
+  line that states one is refused by name.
+- **Secrets arrive on standard input.** `run-service.sh` reads a service's
+  secrets on the Mac with that service's token, as it does natively, and
+  writes them to the container, where `with-secrets` receives them. No token
+  enters a container. Not `container run -e`: Apple's container writes what
+  it is passed that way into its own state, where `container inspect` shows
+  it.
+- **The broker answers at this Mac's tailnet name and nowhere else.** Its
+  port is published on the tailnet address, which a container and another
+  machine both reach; `tailscale serve` does not answer a container. While
+  the tailnet is down the broker is refused, not published elsewhere. Set
+  `[broker] url` to `nats://<this Mac's tailnet name>:4222` when it moves;
+  the tower reads the same line.
+- **A container is given its own roots**, where `[paths]` and `[ledger]` put
+  them, and a copy of the configuration taken at each start. A root that
+  does not exist is refused, never created.
+- **The lane runs five flows in a container, not seven.** Deriving the
+  signals and refreshing the reference data need galata-research, and are
+  left out of the image. They stop running when the lane moves.
+  `container exec galata-flows cereyan runs ls` looks at the lane.
+- **Images are built from a tree someone can name.** `build-images.sh`
+  refuses uncommitted work, labels each image with `git describe`, and
+  gives the builder 8 CPUs and 12 GB: at its default 2 GB the linker is
+  killed.
+- **A check starts nothing.** `scripts/check-container-launch.sh` holds the
+  rules above against the launcher's own text and the lines it would start.
+
 ---
 
 ## Development
