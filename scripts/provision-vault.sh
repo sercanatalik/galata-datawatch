@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 #
 # Create this deployment's vault project and move the broker passwords into it.
-# Run ONCE, with com.galata.vault running.
+# Run ONCE, against the deployment's vault.
 #
-#   provision-vault.sh
+#   provision-vault.sh <vault address>
+#
+#   <vault address>   where the vault answers, and the address the project is
+#                     pinned to: the name its recovery kit and its tokens'
+#                     vault carry from then on. For the hosted vault that is
+#                     its https:// name on the tailnet, which galata-vault's
+#                     `gv-container up` prints. GV_SERVER, when no argument is
+#                     given.
+#
+# **No address is assumed.** This once said `http://127.0.0.1:8750`, the
+# vault this deployment ran itself. A project provisioned at the wrong
+# address is pinned there, and moving one is not something the vault does.
 #
 #   1. gv init galata-datawatch — the recovery kit is written to
 #      var/galata-datawatch-recovery.gvkit (0600). It is the ONLY way to
@@ -22,7 +33,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/vault-tools.sh
 source "$ROOT/scripts/lib/vault-tools.sh"
-SERVER="http://127.0.0.1:8750"
+SERVER="${1:-${GV_SERVER:-}}"
+SERVER="${SERVER%/}"
 PROJECT="galata-datawatch"
 ENV="$PROJECT/prod"
 KIT="$ROOT/var/$PROJECT-recovery.gvkit"
@@ -30,7 +42,17 @@ SECRETS="$ROOT/var/broker.env"
 
 refuse() { echo "provision-vault: REFUSED — $1" >&2; exit 1; }
 GV="$(gv_tool 2>&1)" || refuse "$GV"
-curl -s -o /dev/null "$SERVER/" || refuse "no vault at $SERVER — scripts/install-services.sh vault"
+[[ -n "$SERVER" ]] \
+    || refuse "say where the vault answers: provision-vault.sh <vault address> — for the hosted vault, the https:// name its \`gv-container up\` prints"
+# The rule gv itself applies, said here before anything is created: https://,
+# or plain http:// to this machine only.
+case "$SERVER" in
+    https://?*) ;;
+    http://127.0.0.1|http://127.0.0.1:*|http://localhost|http://localhost:*|"http://[::1]"|"http://[::1]:"*) ;;
+    *) refuse "'$SERVER' is not an address a vault client accepts: https://, or plain http:// to this machine only" ;;
+esac
+curl -s -o /dev/null --max-time 10 "$SERVER/" \
+    || refuse "no vault answers at $SERVER — start the deployment's vault first (galata-vault: deploy/apple-container/gv-container up)"
 [[ -e "$KIT" ]] && refuse "$KIT exists: this project was provisioned already"
 [[ -f "$SECRETS" ]] || refuse "no $SECRETS to import"
 
