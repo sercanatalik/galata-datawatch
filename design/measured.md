@@ -4659,3 +4659,34 @@ without trades                        26M               530 MiB    about 300 eve
 `trades` left the `series` line on 2026-11-24: nothing that runs reads
 them. `quotes` stays: the top of book as it moved can be fetched from
 nowhere afterwards.
+
+## The scheduling lane in its container — its first runs, 2026-11-24
+
+`containerise-host-services`. The first service moved: `flows` listed in
+var/containers.conf at 4 CPUs and 12 GB, installed as `com.galata.flows`,
+from the images built at `65aa324`. The same Mac as the section above, where
+capture has not run since 2026-11-19, so nothing new was arriving to project.
+
+```text
+the launchd job's process                    container
+the container                                running, 4 CPUs, 12,288 MB, no twin
+flows registered                             5 (derive-the-signals and update-the-reference are not in the image)
+published ports                              none
+its environment                              no password, no token, nothing of the vault's
+first start                                  made the volume galata-flows-state and a 0700 copy of the configuration
+
+compact-the-archive                          completed, 6.7 s
+project-the-recent-days                      completed, 1.4 s        nothing in its window to project
+rebuild-one-day, 2026-11-19                  FAILED after its three retries, 13 min 54 s
+    the day's five market datasets           rewritten on the first attempt, peak 8.1 GiB, no memory kill
+    against a clean native rebuild           byte for byte the same, all five
+judge-the-record                             FAILED, 9 findings
+the 23:20 compaction, queued behind the rebuild   ran when it ended: one writer at a time, as declared
+```
+
+**Neither failure is the container's.** Both name the same nine pairs of
+segments in `var/tape/kind=signals/date=2026-11-18`, which claim overlapping
+sequences. They were written natively on 2026-11-18, and the judge run
+natively against the same record reports the same nine. The rebuild writes
+its day, then checks the tape, finds them, and exits 1; so on this record
+every rebuild fails after doing its work, in a container or out of one.
