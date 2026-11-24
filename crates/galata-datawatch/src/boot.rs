@@ -138,6 +138,15 @@ pub fn boot(
         // declared walk widths are checked against the venue's own names below
         // before a single request is made.
         let adapter = adapters::build(adapter_config.clone())?;
+        // **What follows from the set, beside it.** A venue of options
+        // captures its underlyings' indexes, which nobody declares; they join
+        // the declared subscriptions here, once, so everything after this
+        // holds, counts and gaps them like any other.
+        let mut declared = declared;
+        declared.extend(adapter.implied_subscriptions());
+        // A venue that serves no history has no walk, no bar width to resume
+        // one from, and nothing to fill a gap with. It still streams.
+        let serves_history = !adapter.declaration().historical.is_empty();
         // Which history to walk, taken from the venue's own declaration: the
         // series it hands back on request, at the bar width it PUSHES — which
         // is the one width that may resume from the record, because live
@@ -155,7 +164,7 @@ pub fn boot(
         // **Only a streaming venue has a bar width to resume from.** A chain
         // has none, and asking it for one before noticing that is how a
         // cursor venue got refused for not being a stream.
-        let live_interval = if streams {
+        let live_interval = if streams && serves_history {
             adapter.live_interval_micros().ok_or_else(|| {
                 "this venue pushes no bar width, so no walk may resume from the record".to_string()
             })?
@@ -168,7 +177,7 @@ pub fn boot(
         // the venue's whole reach. Refused here, before the universe check or
         // any socket, if the venue cannot name one: a walk for a width it
         // does not serve would spend the budget on refusals.
-        let walk_items: Vec<(Series, WalkInterval)> = if streams {
+        let walk_items: Vec<(Series, WalkInterval)> = if streams && serves_history {
             crate::capture::walk_items(
                 adapter.declaration(),
                 |label| adapter.interval_micros(label),
@@ -182,7 +191,11 @@ pub fn boot(
             Vec::new()
         };
 
-        adapters::check_universe(&adapter_config).await?;
+        // The reference answers the check read, where checking the venue meant
+        // reading its reference data. Taken through the one path below, so
+        // the record holds what this boot was decided on.
+        let reference_pages =
+            adapters::check_universe(&adapter_config, SystemClock.now_micros()).await?;
 
         // **The boot asymmetry.** A broker that is ABSENT is an outage the
         // record survives, so capture runs on a NullSink and says so. A broker
@@ -263,6 +276,13 @@ pub fn boot(
             tracing::info!(gaps, "published the window this process was not covering");
         }
 
+        // **Before the subscription**, as the walk is: an instrument the
+        // venue's reference data says has expired leaves the set here, so the
+        // first subscribe never names it.
+        for page in reference_pages {
+            capture.take(page)?;
+        }
+
         // **One arm per transport, matched.** This used to be "not a stream,
         // so a cursor" — and a poll venue would have been captured as a chain.
         // A match makes the next transport a compile error here rather than a
@@ -333,6 +353,48 @@ pub fn boot(
         // usual timer while it runs, because a backfill of several hundred
         // requests is minutes of work and a silent process is indistinguishable
         // from a stuck one.
+        // **The reference refresh, where the venue has one.** The boot's
+        // answers were taken above; this asks again on the venue's own
+        // interval, as its own task, so a delisting is learned while running.
+        if let (Some(reference), Some(source)) = (
+            capture.venue_reference(),
+            adapters::ReferenceSource::for_config(&walk_config)?,
+        ) {
+            // The loop owns the clock; this is the binary's reading of it,
+            // taken as each answer arrives.
+            let now: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| SystemClock.now_micros());
+            capture.refresh_reference_with(reference.interval_micros, move |symbols| {
+                let source = source.clone();
+                let now = now.clone();
+                async move { source.fetch(symbols, now).await }
+            });
+            tracing::info!(
+                every_secs = reference.interval_micros / 1_000_000,
+                "asking the venue for its reference data again while running"
+            );
+        }
+
+        // **A venue with no history streams and nothing else.** No walk, no
+        // fill and no settle: there is nothing the venue would hand back.
+        if !serves_history {
+            if import_dir.is_some() {
+                return Err(format!(
+                    "{venue_name} serves no history, and an import is taken beside a walk"
+                )
+                .into());
+            }
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let signal = shutdown.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                signal.cancel();
+            });
+            return capture
+                .run(shutdown)
+                .await
+                .map_err(Box::<dyn std::error::Error>::from);
+        }
+
         let history = History::for_config(&walk_config)?;
 
         // **The rescue, through the one path, after the restart gap and before

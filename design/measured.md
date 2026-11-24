@@ -4520,3 +4520,129 @@ install-services.sh --status                every service ready to start again;
 The first `flows` start refused four times, by name: `py/signals` is locked
 to a `galata-research` checkout beside this one, and a new machine has none.
 Cloning it there was the whole fix.
+
+## Derive, before the adapter was written — 2026-11-24
+
+Taken against `wss://api.derive.xyz/v3/ws` and `https://api.derive.xyz/v3`
+with no credential, for `add-derive-options-venue`. The seven payloads these
+were read from are verbatim under
+`crates/galata-datawatch/tests/fixtures/derive_xyz/`.
+
+**Volume: one socket, 630 s, 50 options and their 4 underlying indexes.** The
+50 were the venue's most-traded options that day expiring after 2026-11-26, on
+BTC, ETH, HYPE and SOL.
+
+| channel | messages | bytes | per second |
+|---|---|---|---|
+| `ticker_slim.<name>.1000` | 31,134 | 17,091,287 | 49.4 msg, 27.1 KB |
+| `spot_feed.<ccy>` | 840 | 221,751 | 1.3 msg, 0.35 KB |
+| subscribe acknowledgement | 1 | 4,412 | once |
+| **total** | 31,975 | 17,317,450 | **50.8 msg, 27.5 KB** |
+
+- **The ticker is sent every second whether or not anything changed**: 0.988
+  messages a second per option, 549 bytes each. It is not event-driven.
+- **2.26 GiB a day raw** for a full set of 50. Hyperliquid's `bbo` was
+  567 MiB a day for six instruments (2026-09-21), so a full set here is four
+  times that before compression. The compressed figure is not measured.
+- Each ticker normalises to three events, so 50 options are about 150 events
+  a second on the bus, against the ~300 the programme estimated for 50
+  Hyperliquid tickers without trades.
+- The planning for this change expected the volume to be "well under
+  Hyperliquid's `bbo`". **It is not.** `1000` is the slowest interval the
+  venue offers.
+- An index is sent every three seconds per currency.
+
+**Keepalive and lifetime.**
+
+- The server pinged every **30 s**, twenty times in 630 s. Its documentation
+  says about every 180 s.
+- The venue did not close the socket in 630 s; this side closed it. **No
+  lifetime is known**, so the adapter rotates ahead of none.
+- A text `ping` is answered with a text `pong`.
+
+**How the venue answers a subscription it cannot serve.** One socket each,
+twelve seconds, beside a live option:
+
+| subscribed to | acknowledgement | then |
+|---|---|---|
+| an option that expired that morning (`BTC-20261124-75000-P`) | `"ok"` | nothing, ever |
+| a name it has never listed (`BTC-20261225-61234-P`) | `"ok"` | nothing, ever |
+| something that is not a name (`NOPE`) | `"ok"` | nothing, ever |
+
+The live option beside each delivered twelve tickers in twelve seconds. **It
+does not close the connection**, as Hyperliquid does for an unlisted coin, and
+it does not refuse — so a mistyped name is captured as silence unless it is
+caught before subscribing. The reference check at boot is what catches it.
+
+**Reference data, `public/get_instrument`.**
+
+- One option of each of the 18 underlyings: every `option_details.index` is
+  `<CCY>-USD` (ADA, ANT, BTC, CC, DRV, ETH, HYPE, LIT, NVDA, PUMP, SOL, US100,
+  US500, VVV, WTI, XAUT, XRP, ZEC). The index ticker is composed on that
+  basis, and the boot refuses an option whose index is anything else.
+- **The hour of expiry is not in the name.** Under names of one shape:
+  crypto and gold options expire at 08:00 UTC, NVDA, US100 and US500 at 21:00,
+  WTI at 19:30. `option_details.expiry` (seconds) is the only source.
+- An expired option is still answered for, with `is_active: false` and a
+  `settlement_price`.
+- A name the venue does not know is **HTTP 200** with
+  `{"error":{"code":12001,"message":"Instrument not found"}}`, for a name of
+  the right shape and for one of none.
+- The venue's clock and this machine's differed by 126 ms.
+
+**Not measured:** the compressed size on disk, a socket held for hours, and
+the request limit under load (the documentation states 25 requests per five
+seconds without a credential; a live read of the remaining budget suggested
+about four times that, and the adapter declares the documented one).
+
+## Derive, captured — 2026-11-24
+
+`galata-datawatch derive-xyz`, built with `--features derive-xyz`, against
+mainnet from a local configuration: five live options on three underlyings
+(`BTC-20261225-60000-P`, `BTC-20270129-75000-C`, `BTC-20261204-60000-P`,
+`ETH-20261225-2000-C`, `SOL-20261211-65-P`) and one that had expired that
+morning (`BTC-20261124-75000-P`), no `[broker]` block. One session, 1,020 s,
+stopped by SIGTERM; then `galata-tape-rebuild derive-xyz 2026-11-24` and
+`galata-watch`.
+
+```text
+  6,093 payloads -> 16,192 rows in 4 segments, 0 unparsed
+
+  quotes           1,010 rows per option, over 1,020 s
+  marks            1,010 rows per option; 340 or 341 per index (BTC-USD, ETH-USD, SOL-USD)
+  option_pricing   1,010 rows per option
+  instruments      4 rows per live option (the boot and three refreshes), all active;
+                   1 row for the expired one, inactive
+  gaps             none
+  galata-watch     "nothing to report", exit 0
+```
+
+- **The expired option was never subscribed.** The boot's reference answer
+  retired it before the first subscribe: `subs_declared` was 8 (five options
+  and three indexes), `subs_held` 8, `subs_refused` 0, and the status file
+  listed it under `left` with the reason `expired` for the whole run.
+- **The reference refresh ran on its interval**, three times in seventeen
+  minutes, asking about the five live options and not the one that had left.
+- **The archive was 2.1 MB for 1,020 s**, in the two-second segments capture
+  writes before compaction: about 178 MB a day for five options, so roughly
+  1.7 GiB a day for a full set of 50 **before compaction**. The compacted size
+  is not measured; a segment of two seconds is mostly its own footer.
+- No log line above `INFO` in the run.
+
+**The starts that are refused**, each exiting 1 before any connection and
+writing no record:
+
+| the configuration | the refusal names |
+|---|---|
+| a name the venue never listed | the name, and the form a name takes |
+| 51 options | 51, and the cap of 50 |
+| `series = ["quotes", "trades"]` | the series `trades` |
+| `BTC-PERP` as an instrument | the name, and the form a name takes |
+| two options, both expired | each option and the day it expired |
+
+A second run on the build as committed (377 s, the same set) wrote 2,257
+payloads to 5,990 rows with 0 unparsed and one reference refresh.
+
+**Not exercised live:** an option expiring *while* capture ran (the loop's
+tests cover it on a test clock; none of the six expired inside a run), and a
+lost connection.

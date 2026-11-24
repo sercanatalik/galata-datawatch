@@ -85,6 +85,7 @@ impl RhCrypto {
                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 0 },
                 ws_url: "",
                 rest_url: REST_URL,
+                max_instruments: None,
             },
             tickers,
             interval_micros: i64::from(config.poll_secs) * 1_000_000,

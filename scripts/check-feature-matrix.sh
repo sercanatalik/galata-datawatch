@@ -64,14 +64,18 @@ COMBINATIONS=(
     "hyperliquid"
     "rh-chain"
     "rh-crypto"
+    "derive-xyz"
     "capture,hyperliquid"
     "capture,rh-chain"
     "capture,rh-crypto"
+    "capture,derive-xyz"
     "hyperliquid,rh-chain,rh-crypto"
+    "hyperliquid,rh-chain,rh-crypto,derive-xyz"
     "bin"
     "bin,hyperliquid"
     "bin,rh-chain"
     "bin,rh-crypto"
+    "bin,derive-xyz"
 )
 
 # The one combination checked with EVERY target. The five binaries, the eleven
@@ -82,7 +86,7 @@ COMBINATIONS=(
 # against a single-venue feature set fails on the examples' own imports rather
 # than on anything about the crate's feature graph, and a guard that fails for a
 # reason it is not about is a guard people learn to override.
-ALL_TARGETS_COMBINATION="bin,hyperliquid,rh-chain,rh-crypto"
+ALL_TARGETS_COMBINATION="bin,hyperliquid,rh-chain,rh-crypto,derive-xyz"
 
 failed=0
 for features in "${COMBINATIONS[@]}" "$ALL_TARGETS_COMBINATION"; do

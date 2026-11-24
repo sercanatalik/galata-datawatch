@@ -1,0 +1,1 @@
+{"method":"subscription","params":{"channel":"spot_feed.BTC","data":{"timestamp":1795561679143,"feeds":{"BTC":{"price":"59962.839271709774","confidence":"1","price_prev_daily":"61007.86753703399","confidence_prev_daily":"1","timestamp_prev_daily":1795475279143}}}}}

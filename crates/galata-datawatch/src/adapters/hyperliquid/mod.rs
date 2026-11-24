@@ -287,6 +287,9 @@ impl Construct for Hyperliquid {
             },
             ws_url: config.market.ws_url(),
             rest_url: config.market.rest_url(),
+            // No cap is stated here. Capping this venue's set belongs to the
+            // change that gives the set a door to be edited through.
+            max_instruments: None,
         };
         declaration.validate()?;
 

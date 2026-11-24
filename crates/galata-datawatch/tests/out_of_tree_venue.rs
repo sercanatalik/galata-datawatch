@@ -47,6 +47,8 @@ impl Bazaar {
                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 30 },
                 ws_url: "wss://bazaar.invalid/stream",
                 rest_url: "https://bazaar.invalid",
+                // This venue states no cap on its instrument set.
+                max_instruments: None,
             },
             symbols: BTreeMap::from([("XBT".into(), Ticker::new("BTC").expect("legal"))]),
         }

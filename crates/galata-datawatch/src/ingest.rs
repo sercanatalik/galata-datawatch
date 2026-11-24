@@ -46,6 +46,24 @@ pub struct Ingested {
     /// the latency it publishes, and normalising a second time to get it would
     /// double the parse cost of every frame.
     pub venue_times: Vec<(Ticker, i64)>,
+    /// What the venue's reference data said of each instrument this payload
+    /// named: whether it is listed, and when it expires where it does.
+    ///
+    /// Handed up so the loop that owns the clock can stop expecting an
+    /// instrument that no longer exists, without parsing the payload a second
+    /// time and without the normaliser knowing what a subscription is.
+    pub listings: Vec<Listing>,
+}
+
+/// One instrument's standing, as the venue's reference data stated it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    /// Which instrument.
+    pub ticker: Ticker,
+    /// Whether the venue lists it as active.
+    pub active: bool,
+    /// When it expires, where the venue states an expiry.
+    pub expiry_micros: Option<i64>,
 }
 
 /// The one ingestion function.
@@ -155,6 +173,14 @@ fn one_path(
         let envelope = envelope.stamped(seq);
         if let (Some(at), Some(ticker)) = (envelope.at_micros, envelope.ticker()) {
             result.venue_times.push((ticker.clone(), at));
+        }
+        if let (Event::Instrument(instrument), Some(ticker)) = (&envelope.event, envelope.ticker())
+        {
+            result.listings.push(Listing {
+                ticker: ticker.clone(),
+                active: instrument.active,
+                expiry_micros: instrument.expiry_micros,
+            });
         }
         match sink.emit(&envelope) {
             Ok(()) => result.emitted += 1,

@@ -1111,6 +1111,18 @@ A swap of two pairs with similar ρ stays inside it.
 
 ---
 
+## Tier 17 — derive-xyz, and instruments that expire
+
+*Built 2026-11-24, not deployed. The argument is
+[`planning/add-derive-options-venue.md`](../planning/add-derive-options-venue.md).*
+
+Options on Derive, from public data: a set of up to 50 named options, each
+leaving the set at the hour the venue states, with the `option_pricing`
+dataset for the venue's own implied volatility and greeks. The tier is here,
+after signals, because nothing before it depends on it and it depends on
+nothing unbuilt; the mechanism it adds, an instrument leaving a running set,
+is venue-agnostic and is what the programme's ticker-set change will reuse.
+
 ## Rough scale
 
 Grounded in legacy's own line counts, `src` only, tests excluded.

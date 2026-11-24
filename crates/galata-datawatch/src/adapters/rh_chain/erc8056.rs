@@ -182,6 +182,10 @@ pub fn instrument(
         venue_index: None,
         ui_multiplier: read.ui_multiplier,
         observed_at,
+        // A token is not an option.
+        strike: None,
+        expiry_micros: None,
+        right: None,
     }
 }
 

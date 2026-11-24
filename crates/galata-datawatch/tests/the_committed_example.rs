@@ -19,6 +19,12 @@ impl Adapters for Resolver {
     fn known_names(&self) -> Vec<&'static str> {
         adapters::known()
     }
+    fn max_instruments(&self, venue: &str) -> Option<u32> {
+        adapters::max_instruments(venue)
+    }
+    fn instrument_problem(&self, venue: &str, ticker: &str) -> Option<String> {
+        adapters::instrument_problem(venue, ticker)
+    }
 }
 
 fn example() -> (PathBuf, String) {

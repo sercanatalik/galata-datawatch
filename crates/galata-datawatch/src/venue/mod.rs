@@ -116,6 +116,14 @@ pub enum ConstructError {
     Declaration(#[from] DeclarationError),
 }
 
+/// The channel a reference answer is classified under, whatever the venue
+/// calls its own request.
+///
+/// One name, so the loop can ask an adapter which instrument a reference
+/// symbol is without knowing the venue's spelling of the request that fetched
+/// it.
+pub const REFERENCE_CHANNEL: &str = "reference";
+
 /// Reference data a venue will only answer when asked.
 ///
 /// **Measured 2026-09-21:** fifty thousand blocks of NVDA carry no multiplier
@@ -172,6 +180,9 @@ pub struct Reference {
 ///                 connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 30 },
 ///                 ws_url: "wss://my-venue.invalid/stream",
 ///                 rest_url: "https://my-venue.invalid",
+///                 // No cap on the instrument set. A venue that states one
+///                 // has a configuration over it refused at load.
+///                 max_instruments: None,
 ///             },
 ///         }
 ///     }
@@ -305,6 +316,20 @@ pub trait Adapter: Normalise {
     /// would apply one venue's answer to the next one.
     fn reference(&self) -> Option<Reference> {
         None
+    }
+
+    /// Subscriptions that follow from the declared set, which nobody declares.
+    ///
+    /// An option is priced against its underlying's index, so a venue of
+    /// options captures one index per underlying in the set — and which
+    /// underlyings those are is a consequence of the set, not a second list for
+    /// an operator to keep in step with it. They are held, counted, gapped and
+    /// reported like any declared subscription; they are not counted toward
+    /// [`Declaration::max_instruments`].
+    ///
+    /// Empty for a venue whose declared set is the whole of what it asks for.
+    fn implied_subscriptions(&self) -> Vec<Subscription> {
+        Vec::new()
     }
 
     /// The venue's own string for a ticker — the inverse of

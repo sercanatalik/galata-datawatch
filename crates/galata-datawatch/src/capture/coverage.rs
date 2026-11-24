@@ -283,6 +283,17 @@ impl Coverage {
         out
     }
 
+    /// Stop accounting for an instrument: it left the set.
+    ///
+    /// Every pair of it is dropped, so a later loss of the connection records
+    /// no gap for something that was not there to be lost, and it stops
+    /// appearing as a pair whose coverage went stale. **Not a gap**: a gap
+    /// says coverage was lost, and an instrument that expired was covered
+    /// until it stopped existing.
+    pub fn forget(&mut self, ticker: &Ticker) {
+        self.pairs.retain(|(t, _), _| t != ticker);
+    }
+
     /// The same, for every pair the ledger knows.
     pub fn gaps_for_all(&mut self, to_micros: i64, cause: GapCause) -> Vec<(Ticker, Gap)> {
         let pairs = self.pairs();

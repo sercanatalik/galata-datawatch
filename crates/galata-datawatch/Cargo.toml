@@ -94,6 +94,12 @@ hyperliquid = []
 # shape of venue from an exchange, and a consumer who wants quotes should not
 # link a hash trail and a reorganisation join to get them.
 rh-chain = []
+# **Options, whose instruments expire.** Off by default, as `rh-chain` is: a
+# venue of named, dated instruments is a different shape from a perp venue, and
+# a consumer who wants perp quotes should not link an option-name grammar and a
+# reference-data client to get them. Public data only, so it carries no signing
+# dependency.
+derive-xyz = []
 # **The signing venue.** Ed25519 and base64 are here rather than unconditional
 # so a tape reader links neither: a signature is a pure function, but it is a
 # pure function nothing reading parquet has any use for.

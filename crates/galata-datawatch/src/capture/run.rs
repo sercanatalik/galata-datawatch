@@ -139,6 +139,16 @@ pub struct Capture {
     /// The gaps this process published while running, still to be asked of
     /// the venue — `None` until [`Capture::fill_with`] gives it a fetch.
     filler: Option<Filler>,
+    /// When each instrument expires, where the venue's reference data said.
+    ///
+    /// Kept so the loop can stop expecting an instrument **at** its expiry,
+    /// on its own clock, rather than up to one reference interval after it. A
+    /// reconnect in that interval would otherwise subscribe to something that
+    /// no longer exists.
+    expiries: BTreeMap<Ticker, i64>,
+    /// The reference refresh, where the venue has reference data it will only
+    /// answer when asked and the binary supplied a way to ask.
+    referencer: Option<Referencer>,
 }
 
 /// A historical fetch the live loop can start without waiting for it.
@@ -265,6 +275,29 @@ struct Filler {
     settle: Option<Settle>,
 }
 
+/// The fetch behind a reference refresh: the venue's symbols in, one answer
+/// each out, or the reason there was none.
+pub type ReferenceFetch = Arc<
+    dyn Fn(
+            Vec<String>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<FetchResult>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// A reference refresh in progress or waiting for its next turn.
+///
+/// The same shape as [`Filler`]: the request is its own task, its answers come
+/// back over a channel, and the read loop is never made to wait for either.
+struct Referencer {
+    every_micros: i64,
+    next_micros: i64,
+    fetch: ReferenceFetch,
+    in_flight: bool,
+    sender: tokio::sync::mpsc::UnboundedSender<Vec<FetchResult>>,
+    results: tokio::sync::mpsc::UnboundedReceiver<Vec<FetchResult>>,
+}
+
 /// When to settle, and how far each pair has been.
 ///
 /// See [`Capture::settle_step`].
@@ -333,6 +366,8 @@ impl Capture {
             sink_reachable: true,
             walking: None,
             filler: None,
+            expiries: BTreeMap::new(),
+            referencer: None,
         }
     }
 
@@ -432,6 +467,12 @@ impl Capture {
             && let Some(series) = self.wiring.adapter.series_of_channel(&channel)
         {
             for ticker in covered {
+                // A venue may keep sending for an instrument this loop has
+                // stopped expecting. It is archived above, as everything is;
+                // it is not coverage of anything in the set.
+                if self.held.is_retired(&ticker) {
+                    continue;
+                }
                 self.coverage.received(&ticker, series, recv_micros);
                 // **Held means DELIVERING**, which is what the word means and
                 // what `subs_held` claims. Marking it on SEND made the surface
@@ -447,7 +488,166 @@ impl Capture {
             // number that matters. Taken from what ingest already normalised,
             // rather than parsing a second time.
             for (ticker, at) in result.venue_times {
+                if self.held.is_retired(&ticker) {
+                    continue;
+                }
                 self.last_event.insert((ticker, series), at);
+            }
+        }
+        self.heed_listings(result.listings, recv_micros);
+        Ok(())
+    }
+
+    /// Act on what the venue's reference data said of its instruments.
+    ///
+    /// **A subscribing venue only.** A cursor venue addresses by contract and
+    /// holds no subscription to stop asking for, and its reference data reads
+    /// `active = false` when a contract did not answer — which is a finding
+    /// about one read, not an instrument that ceased to exist.
+    fn heed_listings(&mut self, listings: Vec<crate::ingest::Listing>, at_micros: i64) {
+        if listings.is_empty() || !self.wiring.adapter.transport().is_stream() {
+            return;
+        }
+        for listing in listings {
+            if !listing.active {
+                let reason = match listing.expiry_micros {
+                    Some(expiry) if expiry <= at_micros => "expired",
+                    _ => "no longer listed",
+                };
+                self.retire(&listing.ticker, reason, at_micros);
+            } else if let Some(expiry) = listing.expiry_micros {
+                self.expiries.insert(listing.ticker, expiry);
+            }
+        }
+    }
+
+    /// An instrument left the set: stop expecting it, and say why.
+    ///
+    /// Its subscriptions are no longer declared, so a reconnect does not ask
+    /// for them and a handover does not carry them. Its coverage is forgotten,
+    /// so a lost connection records no gap for it: **nothing was lost.** The
+    /// reason and the time stay on the status surface until the operator
+    /// declares a set without it.
+    ///
+    /// Venue-agnostic on purpose: it reads the vocabulary, never a venue's
+    /// name, so any venue whose reference data states an expiry or an inactive
+    /// instrument gets the same behaviour.
+    pub fn retire(&mut self, ticker: &Ticker, reason: &str, at_micros: i64) -> bool {
+        if !self.held.retire(ticker, reason, at_micros) {
+            return false;
+        }
+        self.wiring.declared.retain(|s| &s.ticker != ticker);
+        self.coverage.forget(ticker);
+        self.expiries.remove(ticker);
+        self.last_event.retain(|(t, _), _| t != ticker);
+        tracing::info!(
+            ticker = ticker.as_str(),
+            reason,
+            remaining = self.wiring.declared.len(),
+            "an instrument left the set; the others are unaffected"
+        );
+        true
+    }
+
+    /// Retire every instrument whose stated expiry has passed.
+    ///
+    /// On the loop's clock, so an expiry is acted on when it happens rather
+    /// than at the next reference refresh.
+    pub fn retire_step(&mut self, now_micros: i64) {
+        let due: Vec<Ticker> = self
+            .expiries
+            .iter()
+            .filter(|(_, expiry)| **expiry <= now_micros)
+            .map(|(ticker, _)| ticker.clone())
+            .collect();
+        for ticker in due {
+            if !self.retire(&ticker, "expired", now_micros) {
+                // Known to expire, and not in the set: nothing to stop asking
+                // for, and nothing to ask about again.
+                self.expiries.remove(&ticker);
+            }
+        }
+    }
+
+    /// Ask the venue for its reference data again, every `every_micros`.
+    ///
+    /// The first answers are the boot's, taken before the subscription; this
+    /// is the refresh after them. Without it a running capture learns of a
+    /// delisting only from its own restart.
+    pub fn refresh_reference_with<F, Fut>(&mut self, every_micros: i64, fetch: F)
+    where
+        F: Fn(Vec<String>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Vec<FetchResult>> + Send + 'static,
+    {
+        let (sender, results) = tokio::sync::mpsc::unbounded_channel();
+        let now = self.wiring.clock.now_micros();
+        self.referencer = Some(Referencer {
+            every_micros,
+            next_micros: now.saturating_add(every_micros),
+            fetch: Arc::new(move |symbols| Box::pin(fetch(symbols))),
+            in_flight: false,
+            sender,
+            results,
+        });
+    }
+
+    /// The venue symbols a reference refresh asks about: what the venue says
+    /// it must be asked for, less whatever has left the set.
+    fn reference_symbols(&self) -> Vec<String> {
+        let Some(reference) = self.wiring.adapter.reference() else {
+            return Vec::new();
+        };
+        reference
+            .symbols
+            .into_iter()
+            .filter(|symbol| {
+                self.wiring
+                    .adapter
+                    .venue_ticker(crate::venue::REFERENCE_CHANNEL, symbol)
+                    .is_none_or(|ticker| !self.held.is_retired(&ticker))
+            })
+            .collect()
+    }
+
+    /// Take a finished reference refresh, and start one that is due.
+    ///
+    /// **Never awaits**, for the reason [`Capture::fill_step`] does not: the
+    /// read is never cancelled for a request. Every answer crosses the one
+    /// path, so reference data is archived verbatim before it is believed.
+    pub fn reference_step(&mut self, now_micros: i64) -> Result<(), CaptureError> {
+        let mut answers = Vec::new();
+        if let Some(referencer) = &mut self.referencer {
+            while let Ok(batch) = referencer.results.try_recv() {
+                referencer.in_flight = false;
+                answers.extend(batch);
+            }
+        }
+        let mut failed = 0usize;
+        for answer in answers {
+            match answer {
+                Ok(payload) => self.take(payload)?,
+                Err(_) => failed += 1,
+            }
+        }
+        if failed > 0 {
+            tracing::warn!(
+                failed,
+                "reference data could not be read for some instruments; asked again next refresh"
+            );
+        }
+        let symbols = self.reference_symbols();
+        if let Some(referencer) = &mut self.referencer
+            && !referencer.in_flight
+            && now_micros >= referencer.next_micros
+        {
+            referencer.next_micros = now_micros.saturating_add(referencer.every_micros);
+            if !symbols.is_empty() {
+                referencer.in_flight = true;
+                let pending = (referencer.fetch)(symbols);
+                let sender = referencer.sender.clone();
+                tokio::spawn(async move {
+                    let _ = sender.send(pending.await);
+                });
             }
         }
         Ok(())
@@ -661,6 +861,15 @@ impl Capture {
             sink_dropped: self.wiring.sink.dropped(),
             walking: self.walking.clone(),
             pairs,
+            left: self
+                .held
+                .retired()
+                .map(|(ticker, why)| crate::capture::status::LeftStatus {
+                    ticker: ticker.clone(),
+                    reason: why.reason.clone(),
+                    at_micros: why.at_micros,
+                })
+                .collect(),
         }
     }
 
@@ -991,6 +1200,10 @@ impl Capture {
                 // cancelled for either.
                 self.settle_step(now);
                 self.fill_step(now)?;
+                // An expiry is acted on here, on this loop's clock, and a
+                // finished reference refresh is taken. Neither awaits.
+                self.retire_step(now);
+                self.reference_step(now)?;
 
                 match source.next_frame().await {
                     Ok(Frame::Bytes(bytes)) => {

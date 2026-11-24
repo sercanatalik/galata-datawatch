@@ -94,6 +94,20 @@ pub struct PairStatus {
     pub reason: Option<String>,
 }
 
+/// An instrument that left the set while this process ran.
+///
+/// A fact, like every other field here: which, why and when. Whether the
+/// operator should replace it is theirs to decide.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LeftStatus {
+    /// Which instrument.
+    pub ticker: Ticker,
+    /// In plain words: `expired`, or `no longer listed`.
+    pub reason: String,
+    /// When the loop stopped expecting it, on **our** clock.
+    pub at_micros: i64,
+}
+
 /// A walk in progress.
 ///
 /// **Present only while one is running.** An absent field is the honest answer
@@ -179,6 +193,11 @@ pub struct Status {
     pub walking: Option<WalkStatus>,
     /// Every pair the process knows about, declared or merely seen.
     pub pairs: Vec<PairStatus>,
+    /// Instruments that left the set while this process ran — **absent while
+    /// there are none**, so the snapshot of a venue whose instruments never
+    /// expire is byte for byte what it was before this field existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<LeftStatus>,
 }
 
 impl Status {
@@ -265,7 +284,25 @@ mod tests {
                 count: 42,
                 reason: None,
             }],
+            left: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_instrument_that_left_is_named_with_its_reason_and_time() {
+        let mut s = status();
+        // Absent while nothing has left: a venue whose instruments never
+        // expire writes the snapshot it always wrote.
+        assert!(!s.to_json().contains("\"left\""));
+        s.left.push(LeftStatus {
+            ticker: Ticker::new("BTC-20261124-75000-P").unwrap(),
+            reason: "expired".into(),
+            at_micros: 1_795_507_200_000_000,
+        });
+        let json: serde_json::Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(json["left"][0]["ticker"], "BTC-20261124-75000-P");
+        assert_eq!(json["left"][0]["reason"], "expired");
+        assert_eq!(json["left"][0]["at_micros"], 1_795_507_200_000_000_i64);
     }
 
     #[test]

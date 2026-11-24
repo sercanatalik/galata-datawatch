@@ -688,6 +688,7 @@ mod tests {
             connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 20 },
             ws_url: "wss://example.invalid",
             rest_url: "https://example.invalid",
+            max_instruments: None,
         }
     }
 

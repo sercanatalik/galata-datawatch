@@ -289,6 +289,11 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("venue_index", DataType::UInt32, true),
             Field::new("ui_multiplier", PRICE, true),
             Field::new("observed_at", DataType::Int64, false),
+            // An option's terms. Appended, so the columns before them keep
+            // their places, and null for everything that is not an option.
+            Field::new("strike", PRICE, true),
+            Field::new("expiry_micros", DataType::Int64, true),
+            Field::new("right", DataType::Utf8, true),
         ]),
 
         // **The one absence that can be proved** rather than inferred: rows
@@ -298,6 +303,22 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("to_block", DataType::UInt64, false),
             Field::new("old_hash", DataType::Utf8, false),
             Field::new("new_hash", DataType::Utf8, false),
+        ]),
+
+        // What a venue's own model says an option is worth. Every value
+        // nullable: a venue need not print all of them, and a volatility with
+        // no quote behind it is absent rather than zero.
+        Kind::OptionPricing => with(vec![
+            Field::new("iv", PRICE, true),
+            Field::new("bid_iv", PRICE, true),
+            Field::new("ask_iv", PRICE, true),
+            Field::new("delta", PRICE, true),
+            Field::new("gamma", PRICE, true),
+            Field::new("vega", PRICE, true),
+            Field::new("theta", PRICE, true),
+            Field::new("rho", PRICE, true),
+            Field::new("forward", PRICE, true),
+            Field::new("discount_factor", PRICE, true),
         ]),
 
         // A dataset this build does not know how to project. Not a panic and

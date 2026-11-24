@@ -36,7 +36,7 @@ pub use poll::{Polls, Refusal};
 pub use run::{Capture, CaptureError, Fetch, FetchFailure, FetchResult, WalkRequest, Wiring};
 pub use session::{Act, Session};
 pub use status::{Connection, PairState, PairStatus, Status, StatusFile};
-pub use subscriptions::{Held, Outcome};
+pub use subscriptions::{Held, Outcome, Retirement};
 pub use walk::{
     Ask, FailedFetch, Step, Walk, WalkInterval, WalkOutcome, WalkWidthError, walk_items,
 };

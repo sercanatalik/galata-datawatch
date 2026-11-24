@@ -150,6 +150,51 @@ instruments = [
 # before and after a corporate action would otherwise carry amounts computed
 # under different multipliers with nothing saying which.
 
+# DERIVE IS NOT DECLARED HERE, AND ITS INSTRUMENTS EXPIRE.
+#
+# Options on Derive (derive.xyz), from public data, behind the `derive-xyz`
+# feature. To capture them:
+#
+#   [venue.derive-xyz]
+#   market = "mainnet"
+#   # `quotes` is the venue's ticker, once a second per option. One payload
+#   # is three datasets: the option's top of book (`quotes`), its mark, index
+#   # and open interest (`marks`), and the venue's own implied volatility and
+#   # greeks (`option_pricing`). A gap in `quotes` is a gap in all three.
+#   #
+#   # NOT `trades`: the venue has the channel and this capture does not take
+#   # it, so naming it here is refused at load. No `candle` either -- the
+#   # venue pushes no bars.
+#   series = ["quotes"]
+#   # THE VENUE'S OWN NAMES, each one option: <CCY>-<YYYYMMDD>-<STRIKE>-<C|P>,
+#   # a fractional strike spelled with `_` (ADA-20261127-0_15-C). AT MOST 50,
+#   # counted apart from every other venue's instruments. A name twice, a name
+#   # of another shape, or a fifty-first is refused at load.
+#   #
+#   # The index of each underlying named here is captured beside its options
+#   # (as BTC-USD, ETH-USD) without being declared, and is not counted.
+#   instruments = [
+#     { ticker = "BTC-20261225-60000-P" },
+#     { ticker = "ETH-20261225-2000-C" },
+#   ]
+#
+# AN OPTION EXPIRES, AND THEN IT LEAVES THE SET. At boot each name is asked of
+# the venue: one it has never listed refuses the start, because the venue
+# acknowledges a subscription to an unknown name and then sends nothing
+# (measured 2026-11-24); one that has expired is dropped for this run and the
+# rest are captured. While running, an option leaves at the hour the venue
+# states -- 08:00 UTC for crypto, 21:00 for equities, 19:30 for crude -- and
+# the status file lists it under `left` with its reason and time. If EVERY
+# declared option has expired the process exits non-zero, naming each.
+#
+# NOTHING ROLLS A SLOT. Replacing an expired option is an edit here and a
+# restart, and until then the slot is empty.
+#
+# MEASURED 2026-11-24, 50 OPTIONS AND 4 INDEXES FOR 630 s: the venue sends
+# every ticker every second whether or not anything changed -- 27.5 KB/s,
+# 2.26 GiB a day before compression, four times what Hyperliquid's `bbo` was
+# for six instruments (567 MiB). See design/measured.md.
+
 # ROBINHOOD CRYPTO IS NOT DECLARED HERE, BECAUSE EVERY REQUEST IS SIGNED.
 #
 # Market data included: there is no anonymous read. To poll it:

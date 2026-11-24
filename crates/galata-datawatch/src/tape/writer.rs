@@ -494,6 +494,23 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(u32s(rows, |e| instrument(e).and_then(|i| i.venue_index)));
             columns.push(dec(rows, |e| instrument(e).and_then(|i| i.ui_multiplier))?);
             columns.push(int(rows, |e| instrument(e).map(|i| i.observed_at)));
+            columns.push(dec(rows, |e| instrument(e).and_then(|i| i.strike))?);
+            columns.push(int(rows, |e| instrument(e).and_then(|i| i.expiry_micros)));
+            columns.push(text(rows, |e| {
+                instrument(e).and_then(|i| i.right.as_deref())
+            }));
+        }
+        Kind::OptionPricing => {
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.iv))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.bid_iv))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.ask_iv))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.delta))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.gamma))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.vega))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.theta))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.rho))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.forward))?);
+            columns.push(dec(rows, |e| pricing(e).and_then(|p| p.discount_factor))?);
         }
         Kind::Reorgs => {
             columns.push(u64s(rows, |r| {
@@ -597,6 +614,7 @@ project!(unparsed, Unparsed, galata_wire::Unparsed);
 project!(session, Session, galata_wire::Session);
 project!(instrument, Instrument, galata_wire::Instrument);
 project!(reorg, Reorg, galata_wire::Reorg);
+project!(pricing, OptionPricing, galata_wire::OptionPricing);
 
 #[cfg(test)]
 mod tests {
@@ -923,5 +941,155 @@ mod tests {
         let batch = read(&written[0]);
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(strings(&batch, "side").len(), 2);
+    }
+    fn decimals(batch: &arrow::record_batch::RecordBatch, name: &str) -> Vec<Option<i128>> {
+        use arrow::array::Array;
+        let array = batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Decimal128Array>()
+            .unwrap()
+            .clone();
+        (0..array.len())
+            .map(|i| (!array.is_null(i)).then(|| array.value(i)))
+            .collect()
+    }
+
+    fn an_option(ticker: &str, event: Event) -> Row {
+        Row {
+            stream_seq: 4,
+            source_recv_micros: DAY,
+            envelope: Envelope::new(
+                Venue::new("derive-xyz").unwrap(),
+                Ticker::new(ticker).unwrap(),
+                Some(DAY),
+                DAY,
+                event,
+            ),
+        }
+    }
+
+    #[test]
+    fn an_option_pricing_row_is_exact_and_an_absent_volatility_is_null() {
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(an_option(
+            "ETH-20261127-1650-C",
+            Event::OptionPricing(galata_wire::OptionPricing {
+                iv: Some(Num::from_str("0.66267").unwrap()),
+                // Nobody bids it: absent, where the venue printed a zero.
+                bid_iv: None,
+                ask_iv: Some(Num::from_str("0.68990").unwrap()),
+                // A greek of zero is a value, and is written as one.
+                delta: Some(Num::from_str("0").unwrap()),
+                gamma: Some(Num::from_str("0.00410149").unwrap()),
+                vega: Some(Num::from_str("0.50759").unwrap()),
+                theta: Some(Num::from_str("-6.97601").unwrap()),
+                rho: Some(Num::from_str("0.35471").unwrap()),
+                forward: Some(Num::from_str("1681.4").unwrap()),
+                discount_factor: Some(Num::from_str("0.999").unwrap()),
+            }),
+        ));
+        let written = tape.commit().unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].to_string_lossy().contains("kind=option_pricing"),
+            "{}",
+            written[0].display()
+        );
+        let batch = read(&written[0]);
+        // Exactly: 0.00410149 at scale 18.
+        assert_eq!(decimals(&batch, "gamma"), vec![Some(4_101_490_000_000_000)]);
+        assert_eq!(
+            decimals(&batch, "theta"),
+            vec![Some(-6_976_010_000_000_000_000)]
+        );
+        assert_eq!(decimals(&batch, "delta"), vec![Some(0)]);
+        assert_eq!(decimals(&batch, "bid_iv"), vec![None]);
+        assert_eq!(strings(&batch, "ticker"), vec!["ETH-20261127-1650-C"]);
+    }
+
+    fn an_instrument(strike: Option<&str>, right: Option<&str>) -> Event {
+        Event::Instrument(galata_wire::Instrument {
+            tick_size: Num::from_str("1").unwrap(),
+            lot_size: Num::from_str("0.00001").unwrap(),
+            min_size: Num::from_str("0.01").unwrap(),
+            contract_type: "option".into(),
+            base: "BTC".into(),
+            quote: "USDC".into(),
+            hours: "continuous".into(),
+            active: true,
+            venue_index: None,
+            ui_multiplier: None,
+            observed_at: DAY,
+            strike: strike.map(|s| Num::from_str(s).unwrap()),
+            expiry_micros: strike.map(|_| 1_798_185_600_000_000),
+            right: right.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn the_instrument_columns_end_with_an_options_terms() {
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(an_option(
+            "BTC-20261225-60000-P",
+            an_instrument(Some("60000"), Some("put")),
+        ));
+        let written = tape.commit().unwrap();
+        let batch = read(&written[0]);
+        let schema = batch.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        // Appended: every column an older reader knows keeps its place.
+        assert_eq!(
+            &names[names.len() - 4..],
+            ["observed_at", "strike", "expiry_micros", "right"]
+        );
+        assert_eq!(
+            decimals(&batch, "strike"),
+            vec![Some(60_000_000_000_000_000_000_000)]
+        );
+        assert_eq!(strings(&batch, "right"), vec!["put"]);
+    }
+
+    #[test]
+    fn an_instruments_segment_written_before_options_is_still_read() {
+        // A segment on disk from before the three option columns holds eleven
+        // dataset columns, not fourteen. The tape is a cache and a rebuild
+        // rewrites it, but until one runs the reader must still return it.
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(an_option("BTC", an_instrument(None, None)));
+        let written = tape.commit().unwrap();
+        let new = read(&written[0]);
+        let old_width = new.num_columns() - 3;
+        let old = new.project(&(0..old_width).collect::<Vec<_>>()).unwrap();
+        std::fs::remove_file(&written[0]).unwrap();
+        galata_segments::write_segment_labelled(
+            written[0].parent().unwrap(),
+            Cursor::Seq { first: 4, last: 4 },
+            &old,
+            Codec::Zstd,
+            &PRUNE_ON,
+            &[
+                (VENUE_LABEL, "derive-xyz"),
+                (SOURCE_DAY_LABEL, "1970-01-02"),
+            ],
+        )
+        .unwrap();
+
+        let reader = crate::tape::Reader::open(root.path(), &["kind=instruments"]).unwrap();
+        let rows = reader
+            .view(crate::tape::Window {
+                kind: Kind::Instruments,
+                from_micros: 0,
+                to_micros: 3 * DAY,
+                ticker: None,
+            })
+            .unwrap();
+        assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        assert_eq!(rows[0].num_columns(), old_width);
+        assert!(rows[0].column_by_name("strike").is_none());
     }
 }

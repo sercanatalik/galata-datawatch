@@ -111,6 +111,11 @@ pub enum Kind {
     /// row stands behind it and no rebuild writes it; it may span venues, so
     /// it names none of them.
     Signals,
+    /// What a venue's own model says an option is worth: implied volatility
+    /// and greeks, each as the venue printed it. **Captured, never computed**,
+    /// and it rides the option's ticker the way marks ride an asset context,
+    /// so it is not separately declarable.
+    OptionPricing,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -223,7 +228,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 20] = [
+    pub const ALL: [Kind; 21] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -244,6 +249,7 @@ impl Kind {
         Kind::FundingPayments,
         Kind::LedgerUpdates,
         Kind::Signals,
+        Kind::OptionPricing,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -264,7 +270,8 @@ impl Kind {
             | Kind::Unparsed
             | Kind::Sessions
             | Kind::Instruments
-            | Kind::Reorgs => Addressing::Venue,
+            | Kind::Reorgs
+            | Kind::OptionPricing => Addressing::Venue,
             Kind::Margin
             | Kind::Positions
             | Kind::Accounts
@@ -298,6 +305,7 @@ impl Kind {
             Kind::FundingPayments => "funding_payments",
             Kind::LedgerUpdates => "ledger_updates",
             Kind::Signals => "signals",
+            Kind::OptionPricing => "option_pricing",
         }
     }
 }
@@ -334,7 +342,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 20);
+        assert_eq!(Kind::ALL.len(), 21);
     }
 
     #[test]
@@ -360,6 +368,7 @@ mod tests {
             Kind::Positions,
             Kind::Accounts,
             Kind::Signals,
+            Kind::OptionPricing,
         ] {
             assert!(!declarable.contains(&kind), "{kind} must not be declarable");
         }
