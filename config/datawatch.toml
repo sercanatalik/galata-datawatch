@@ -76,7 +76,18 @@ walk_candles = ["1h", "4h", "1d"]
 # The bill: 6.72 KiB/s over six instruments, 567 MiB/day raw, 32.9 MiB/day at
 # the archive's measured zstd ratio — 5.5 MiB/day/ticker, against the
 # predecessor's 44 MB/day/ticker for candles.
-series = ["trades", "quotes", "candles", "funding"]
+#
+# No `trades`, since 2026-11-24. The venue's public prints were a fifth of
+# everything captured (1.09M rows and 23 MiB of tape a day over nine
+# instruments, measured 2026-11-18), and nothing that runs reads them: the
+# desk and the signals read candles, which already carry volume and trade
+# count. They were for tick-level research, which is set aside. An account's
+# own fills are the ledger's, and are not this.
+#
+# What is not captured is not in the record. The venue publishes its fills
+# after the fact, so the trades can be fetched later. The top of book as it
+# moved can be fetched from nowhere, which is why `quotes` stays.
+series = ["quotes", "candles", "funding"]
 instruments = [
   # The main perp dex. Continuous — this venue never closes.
   { ticker = "BTC" },
