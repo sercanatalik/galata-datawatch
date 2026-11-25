@@ -283,6 +283,16 @@ pub struct Declaration {
     pub ws_url: &'static str,
     /// The REST root for history and reference data. Same rule.
     pub rest_url: &'static str,
+    /// The most instruments one capture of this venue may be declared, where
+    /// the venue states a cap.
+    ///
+    /// **`None` is no cap, not zero.** Each venue's cap counts that venue's
+    /// own declared instruments and nothing else: not another venue's, and not
+    /// the subscriptions a venue adds beside the set
+    /// ([`Adapter::implied_subscriptions`](super::Adapter::implied_subscriptions)).
+    /// A configuration over it is refused when it is loaded, stating the cap
+    /// and the count.
+    pub max_instruments: Option<u32>,
 }
 
 /// Why a declaration is not usable.
@@ -366,6 +376,7 @@ mod tests {
             },
             ws_url: "wss://example.invalid",
             rest_url: "https://example.invalid",
+            max_instruments: None,
         }
     }
 

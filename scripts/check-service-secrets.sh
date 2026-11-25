@@ -69,13 +69,14 @@ mkdir -p "$stubs/silent"; printf '#!/bin/sh\nexit 0\n' > "$stubs/silent/gv"; chm
 accepted "$stubs/silent" && say "a gv that reports no version is accepted"
 
 # --- 2. the names ---------------------------------------------------------
-# The broker identities run-service.sh starts services under, read from it so
-# a new one is covered the day it is added.
+# The broker identities, read from the generated authorization file the broker
+# and its token are both read from (run-service.sh, mint-service-tokens.sh), so
+# a new one is covered the day it is generated; plus any run-service.sh names
+# directly.
 identities="$(grep -Eo 'password_var "?[a-z$"-]+[a-z-]*' "$ROOT/scripts/run-service.sh" \
     | sed -E 's/password_var "?//' | grep -v '\$' | sort -u || true)"
 identities="$identities
-$(grep -Eo 'for id in [a-z -]+;' "$ROOT/scripts/run-service.sh" | sed -E 's/for id in //; s/;//' | tr ' ' '\n')
-datawatch-hyperliquid"
+$(awk '$1 == "user:" { print $2 }' "$ROOT/config/nats-authorization.conf" 2>/dev/null)"
 count=0
 while IFS= read -r id; do
     [[ -n "$id" ]] || continue
@@ -83,11 +84,12 @@ while IFS= read -r id; do
     count=$((count + 1))
     is_env_name "$name" || say "the broker identity $id becomes the secret name $name, which cannot be an environment variable: gv run would start the service without it"
 done <<< "$identities"
-(( count >= 3 )) || say "found only $count broker identities in run-service.sh — refusing to pass on nothing"
+(( count >= 3 )) || say "found only $count broker identities in config/nats-authorization.conf and run-service.sh — refusing to pass on nothing"
 
-# The names minted by hand in mint-service-tokens.sh.
+# The names minted by hand in mint-service-tokens.sh. A word that expands
+# (`"${broker_names[@]}"`) is read from the authorization file, covered above.
 while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
+    [[ -n "$name" && "$name" != *'$'* ]] || continue
     is_env_name "$name" || say "mint-service-tokens.sh mints a token for $name, which cannot be an environment variable"
 done < <(grep -E '^mint [a-z-]+ ' "$ROOT/scripts/mint-service-tokens.sh" | cut -d' ' -f3- | tr ' ' '\n')
 

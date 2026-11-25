@@ -460,6 +460,15 @@ prove "check-container-launch (a service with no line starts at the default)" \
       $'\n        echo "$conf states no CPU or memory limit for $spec, so it does not start' \
       $'\n        printf \'4 1G\'; return 0\n        echo "$conf states no CPU or memory limit for $spec, so it does not start'
 
+# The broker handed a fixed list of identities that the generated
+# authorization file has outgrown: the server refuses a password variable it
+# is not given, so the broker would not restart (Derive's, 2026-11-25).
+prove "check-container-launch (the broker is handed fewer identities than its file names)" \
+      ./scripts/check-container-launch.sh \
+      scripts/run-service.sh replace \
+      $'done < <(awk \'$1 == "user:" { print $2 }\' "$ROOT/config/nats-authorization.conf")' \
+      $'done < <(printf \'%s\\n\' datawatch-hyperliquid datawatch-rh-chain reader)'
+
 # A stopped tailnet giving its last address, to publish on.
 prove "check-container-launch (a stopped tailnet gives an address)" \
       ./scripts/check-container-launch.sh \

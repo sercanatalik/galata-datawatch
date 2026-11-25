@@ -35,8 +35,8 @@ pub use dataset::{Addressing, Kind, Series};
 pub use event::{
     AccountMode, AccountSeen, Address, Book, BookLevel, Candle, Clipped, Counterparty, DexEffect,
     Effect, Envelope, Event, EventsReach, Fill, Funding, FundingPayment, Gap, GapCause, Instrument,
-    LedgerUpdate, Margin, Mark, Mint, Origin, Position, Quote, Reach, Reorg, Session, SessionKind,
-    Side, Trade, Transfer, Unparsed,
+    LedgerUpdate, Margin, Mark, Mint, OptionPricing, Origin, Position, Quote, Reach, Reorg,
+    Session, SessionKind, Side, Trade, Transfer, Unparsed,
 };
 pub use identity::{Account, MAX_TOKEN, Market, Ticker, TokenError, Venue};
 pub use token::{Num, NumError, Token, require};

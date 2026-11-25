@@ -10,6 +10,8 @@
 
 use std::collections::BTreeMap;
 
+use galata_wire::Ticker;
+
 use crate::venue::Subscription;
 
 /// What the venue said about one subscription.
@@ -52,6 +54,27 @@ pub enum Outcome {
 pub struct Held {
     declared: Vec<Subscription>,
     outcomes: BTreeMap<Subscription, Outcome>,
+    /// Instruments that left the set while this process ran, by ticker.
+    ///
+    /// **Beside the outcomes, not among them**, because the two have different
+    /// lives: an outcome is a fact about one connection and is forgotten when
+    /// that connection is lost, while an instrument that expired has expired
+    /// on the next connection too. Kept among the outcomes, a reconnect would
+    /// clear it and subscribe the venue to something that no longer exists.
+    retired: BTreeMap<Ticker, Retirement>,
+}
+
+/// Why an instrument left the set, and when this process noticed.
+///
+/// Not a refusal and not a gap. A refusal is the venue declining something
+/// that could have been served; a gap is coverage lost. An instrument that
+/// expired was served until it stopped existing, and nothing was lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retirement {
+    /// In plain words: `expired`, or `no longer listed`.
+    pub reason: String,
+    /// When the loop retired it, on the loop's own clock.
+    pub at_micros: i64,
 }
 
 /// What a convergence pass produced.
@@ -70,6 +93,12 @@ impl Held {
     /// Replace the declared set. **Only an explicit operator act reaches
     /// this** — configuration is never re-read because a file changed.
     pub fn declare(&mut self, declared: Vec<Subscription>) {
+        // A new declaration is a new statement of what is wanted. An
+        // instrument retired under the old one is asked for again if the new
+        // one names it, and retired again by the same evidence if it is still
+        // gone — which costs one pass and keeps this from remembering a
+        // verdict about a declaration that no longer exists.
+        self.retired.clear();
         self.declared = declared;
         // An outcome for something no longer declared is not a fact about the
         // current declaration, and keeping it would let a retired instrument
@@ -151,6 +180,45 @@ impl Held {
             .values()
             .filter(|o| **o == Outcome::Held)
             .count()
+    }
+
+    /// An instrument left the set: every series of it stops being declared,
+    /// its outcomes are dropped, and the reason is kept.
+    ///
+    /// Returns whether anything changed, so a caller that retires on every
+    /// reference refresh logs it once rather than every five minutes.
+    pub fn retire(&mut self, ticker: &Ticker, reason: impl Into<String>, at_micros: i64) -> bool {
+        if self.retired.contains_key(ticker) {
+            return false;
+        }
+        if !self.declared.iter().any(|s| &s.ticker == ticker) {
+            return false;
+        }
+        self.declared.retain(|s| &s.ticker != ticker);
+        self.outcomes.retain(|s, _| &s.ticker != ticker);
+        self.retired.insert(
+            ticker.clone(),
+            Retirement {
+                reason: reason.into(),
+                at_micros,
+            },
+        );
+        true
+    }
+
+    /// Every instrument that left the set, in ticker order.
+    pub fn retired(&self) -> impl Iterator<Item = (&Ticker, &Retirement)> {
+        self.retired.iter()
+    }
+
+    /// Whether this instrument left the set.
+    pub fn is_retired(&self, ticker: &Ticker) -> bool {
+        self.retired.contains_key(ticker)
+    }
+
+    /// How many instruments left the set.
+    pub fn count_retired(&self) -> usize {
+        self.retired.len()
     }
 
     /// How many the venue refused.
@@ -243,5 +311,68 @@ mod tests {
         held.mark_refused(&sub("ETH", Series::Quotes), "gone");
         held.declare(vec![sub("BTC", Series::Quotes)]);
         assert_eq!(held.count_refused(), 0);
+    }
+
+    #[test]
+    fn a_retired_instrument_is_not_asked_for_again() {
+        let mut held = Held::new();
+        held.declare(declared());
+        for s in declared() {
+            held.mark_held(&s);
+        }
+        let btc = Ticker::new("BTC").unwrap();
+        assert!(held.retire(&btc, "expired", 77));
+
+        // Both of its series are gone from the declaration, and it is neither
+        // held nor refused: it is not there to be either.
+        assert_eq!(held.declared(), [sub("ETH", Series::Quotes)]);
+        assert_eq!(held.count_held(), 1);
+        assert_eq!(held.count_refused(), 0);
+        assert_eq!(held.count_retired(), 1);
+        assert!(held.converge().to_subscribe.is_empty());
+        let (ticker, why) = held.retired().next().unwrap();
+        assert_eq!(ticker, &btc);
+        assert_eq!(why.reason, "expired");
+        assert_eq!(why.at_micros, 77);
+    }
+
+    #[test]
+    fn a_reconnect_does_not_bring_a_retired_instrument_back() {
+        // An outcome is forgotten with its connection. An expiry is not: the
+        // instrument has expired on the next connection too.
+        let mut held = Held::new();
+        held.declare(declared());
+        held.retire(&Ticker::new("BTC").unwrap(), "expired", 1);
+
+        held.connection_lost();
+        assert_eq!(
+            held.converge().to_subscribe,
+            vec![sub("ETH", Series::Quotes)]
+        );
+        assert!(held.is_retired(&Ticker::new("BTC").unwrap()));
+    }
+
+    #[test]
+    fn retiring_twice_or_retiring_a_stranger_changes_nothing() {
+        let mut held = Held::new();
+        held.declare(declared());
+        let btc = Ticker::new("BTC").unwrap();
+        assert!(held.retire(&btc, "expired", 1));
+        // The second says nothing new, and keeps the first reason and time.
+        assert!(!held.retire(&btc, "no longer listed", 2));
+        assert_eq!(held.retired().next().unwrap().1.at_micros, 1);
+        // An instrument that was never declared cannot leave.
+        assert!(!held.retire(&Ticker::new("SOL").unwrap(), "expired", 3));
+        assert_eq!(held.count_retired(), 1);
+    }
+
+    #[test]
+    fn a_new_declaration_forgets_who_retired() {
+        let mut held = Held::new();
+        held.declare(declared());
+        held.retire(&Ticker::new("BTC").unwrap(), "expired", 1);
+        held.declare(declared());
+        assert_eq!(held.count_retired(), 0);
+        assert_eq!(held.converge().to_subscribe.len(), 3);
     }
 }

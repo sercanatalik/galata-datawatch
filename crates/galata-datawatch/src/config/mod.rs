@@ -151,6 +151,18 @@ pub enum ConfigError {
         /// What it must be.
         bound: &'static str,
     },
+    /// A venue's declared instrument set cannot be captured as written: a
+    /// name twice, a name that is not one the venue's names can be, or more
+    /// instruments than the venue's capture follows.
+    #[error("{origin}: [venue.{venue}] {detail}")]
+    Instruments {
+        /// Where it came from.
+        origin: Origin,
+        /// Which venue.
+        venue: String,
+        /// What is wrong, in words an operator can act on.
+        detail: String,
+    },
     /// A venue declares a series its adapter cannot supply.
     #[error(
         "{origin}: [venue.{venue}] declares series `{series}`, which this venue neither streams \
@@ -419,8 +431,14 @@ pub struct VenueConfig {
     pub market: String,
     /// What to capture.
     pub series: Vec<Series>,
-    /// The bar width subscribed live.
-    pub candle: String,
+    /// The bar width subscribed live, **for a venue that pushes bars**.
+    ///
+    /// Optional here because a venue of options pushes none and has nothing to
+    /// say; required by each venue that does, which refuses its absence by
+    /// name when its adapter is resolved. A default would be a width nobody
+    /// chose.
+    #[serde(default)]
+    pub candle: Option<String>,
     /// Bar widths the walk **fetches** beside `candle`, never subscribed live.
     ///
     /// The venue serves a rolling window of each width (Hyperliquid's most
@@ -647,6 +665,18 @@ pub trait Adapters {
     fn known(&self, venue: &str) -> bool;
     /// What it does implement, for a refusal that says what to do next.
     fn known_names(&self) -> Vec<&'static str>;
+    /// The most instruments one capture of a venue may be declared, where the
+    /// venue states a cap. **`None` is no cap.**
+    fn max_instruments(&self, venue: &str) -> Option<u32> {
+        let _ = venue;
+        None
+    }
+    /// What is wrong with a declared instrument's name, where the venue's
+    /// names have a form that can be checked without asking it.
+    fn instrument_problem(&self, venue: &str, ticker: &str) -> Option<String> {
+        let _ = (venue, ticker);
+        None
+    }
     /// What a venue's ledger costs, **where this build keeps a ledger for it**.
     fn ledger_cost(&self, venue: &str) -> Option<LedgerCost> {
         let _ = venue;
@@ -884,6 +914,40 @@ impl Config {
                         bound: "a venue whose series include `funding`: there is no funding walk to deepen",
                     });
                 }
+            }
+            // **The set, checked before anything is asked of the venue.** Each
+            // of these would otherwise surface as a refusal at connect, or as
+            // a subscription the venue acknowledges and never serves.
+            let mut seen = std::collections::BTreeSet::new();
+            for instrument in &venue.instruments {
+                if !seen.insert((instrument.ticker.as_str(), instrument.dex.as_deref())) {
+                    return Err(ConfigError::Instruments {
+                        origin: origin.clone(),
+                        venue: name.clone(),
+                        detail: format!("{} is declared twice", instrument.ticker),
+                    });
+                }
+                if let Some(problem) = adapters.instrument_problem(name, &instrument.ticker) {
+                    return Err(ConfigError::Instruments {
+                        origin: origin.clone(),
+                        venue: name.clone(),
+                        detail: problem,
+                    });
+                }
+            }
+            if let Some(cap) = adapters.max_instruments(name)
+                && venue.instruments.len() > cap as usize
+            {
+                return Err(ConfigError::Instruments {
+                    origin: origin.clone(),
+                    venue: name.clone(),
+                    detail: format!(
+                        "{} instruments are declared, and this venue's capture follows at most \
+                         {cap}. Another venue's instruments are not counted, and neither is \
+                         anything this venue captures beside the set",
+                        venue.instruments.len()
+                    ),
+                });
             }
             for series in &venue.series {
                 // Refused HERE, not at connect. A process that starts and then
@@ -1220,6 +1284,99 @@ instruments = [
 
     fn load(text: &str) -> Result<Config, ConfigError> {
         Config::load_from_str(text, origin(), &Fake)
+    }
+
+    /// A venue that states a cap of two and names that must begin with `OK`.
+    struct Capped;
+
+    impl Adapters for Capped {
+        fn supplies(&self, venue: &str, series: Series) -> bool {
+            Fake.supplies(venue, series)
+        }
+        fn known(&self, venue: &str) -> bool {
+            Fake.known(venue)
+        }
+        fn known_names(&self) -> Vec<&'static str> {
+            Fake.known_names()
+        }
+        fn max_instruments(&self, _venue: &str) -> Option<u32> {
+            Some(2)
+        }
+        fn instrument_problem(&self, _venue: &str, ticker: &str) -> Option<String> {
+            (!ticker.starts_with("OK")).then(|| format!("{ticker:?} does not begin with OK"))
+        }
+    }
+
+    fn with_instruments(instruments: &str) -> String {
+        GOOD.replace(
+            "  { ticker = \"BTC\" },\n  { ticker = \"XYZ100\", dex = \"xyz\" },\n",
+            instruments,
+        )
+    }
+
+    #[test]
+    fn a_set_at_the_venues_cap_loads_and_one_over_is_refused_with_both_numbers() {
+        let two = with_instruments("  { ticker = \"OK1\" },\n  { ticker = \"OK2\" },\n");
+        assert!(Config::load_from_str(&two, origin(), &Capped).is_ok());
+
+        let three = with_instruments(
+            "  { ticker = \"OK1\" },\n  { ticker = \"OK2\" },\n  { ticker = \"OK3\" },\n",
+        );
+        let refusal = Config::load_from_str(&three, origin(), &Capped)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("[venue.hyperliquid]"), "{refusal}");
+        assert!(refusal.contains("3 instruments"), "{refusal}");
+        assert!(refusal.contains("at most 2"), "{refusal}");
+    }
+
+    #[test]
+    fn a_venue_that_states_no_cap_loads_a_set_of_any_size() {
+        let many: String = (0..200)
+            .map(|i| format!("  {{ ticker = \"T{i}\" }},\n"))
+            .collect();
+        assert_eq!(
+            load(&with_instruments(&many)).unwrap().venue["hyperliquid"]
+                .instruments
+                .len(),
+            200
+        );
+    }
+
+    #[test]
+    fn an_instrument_declared_twice_is_refused_by_name() {
+        let twice = with_instruments("  { ticker = \"BTC\" },\n  { ticker = \"BTC\" },\n");
+        let refusal = load(&twice).unwrap_err().to_string();
+        assert!(refusal.contains("BTC is declared twice"), "{refusal}");
+        // One ticker on two dexes is two instruments at this level. Whether a
+        // venue can hold both is the venue's to say, and one does refuse it.
+        let two_dexes =
+            with_instruments("  { ticker = \"BTC\" },\n  { ticker = \"BTC\", dex = \"xyz\" },\n");
+        assert!(load(&two_dexes).is_ok());
+    }
+
+    #[test]
+    fn a_name_the_venues_names_cannot_be_is_refused_with_the_venues_reason() {
+        let bad = with_instruments("  { ticker = \"OK1\" },\n  { ticker = \"NOPE\" },\n");
+        let refusal = Config::load_from_str(&bad, origin(), &Capped)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("\"NOPE\" does not begin with OK"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_venue_block_may_state_no_bar_width() {
+        // A venue that pushes no bars has none to state. Whether THIS venue
+        // needs one is its adapter's to say when it is resolved, and it does.
+        let none = GOOD.replace("candle = \"1m\"\n", "");
+        assert_eq!(load(&none).unwrap().venue["hyperliquid"].candle, None);
+        assert_eq!(
+            load(GOOD).unwrap().venue["hyperliquid"].candle.as_deref(),
+            Some("1m")
+        );
     }
 
     const LEDGER: &str = r#"

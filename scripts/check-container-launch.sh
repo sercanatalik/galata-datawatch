@@ -46,6 +46,10 @@ say() { echo "$me: $1" >&2; fails=$((fails + 1)); }
 [[ -f "$LIB" ]] || { echo "$me: no $LIB" >&2; exit 2; }
 # shellcheck source=scripts/lib/container-tools.sh
 source "$LIB"
+# password_var, for the broker's identities: the names, as the launcher makes
+# them.
+# shellcheck source=scripts/lib/vault-tools.sh
+source "$ROOT/scripts/lib/vault-tools.sh"
 
 stubs="$(mktemp -d)"
 trap 'rm -rf "$stubs"' EXIT
@@ -331,7 +335,12 @@ broker_would_start() {  # broker_would_start <tailscale stub>
     GALATA_CONTAINERS_CONF="$scratch/containers.conf" GALATA_TAILSCALE_BIN="$1" \
         /bin/bash "$scratch/scripts/run-service.sh" --check nats 2>&1
 }
-passwords="GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID GALATA_BROKER_PASSWORD_DATAWATCH_RH_CHAIN GALATA_BROKER_PASSWORD_READER"
+# Every identity the generated authorization file names, in its order: the
+# server refuses to start on a password variable it is not handed, so a
+# launcher that hands over fewer is a broker that will not restart.
+passwords="$(awk '$1 == "user:" { print $2 }' "$scratch/config/nats-authorization.conf" \
+    | while read -r id; do password_var "$id"; echo; done | paste -sd ' ' -)"
+[[ "$(wc -w <<< "$passwords")" -ge 3 ]] || say "the generated authorization file names fewer than three identities: $passwords"
 line="$(broker_would_start "$stubs/ts-up/tailscale" || true)"
 if [[ "$line" != ready:* ]]; then
     say "the broker, listed in containers.conf, does not check as ready with the tailnet up: $line"
@@ -340,9 +349,9 @@ else
     has " --publish 100.64.0.7:4222:4222 " "its port is published on the tailnet address"
     has " run --rm --name galata-nats --cpus 1 --memory 256M " "it runs under its own name with the limits its line states"
     has "source=$scratch/config,target=/etc/galata,readonly" "it is given the generated authorization file, read-only"
-    has "hand-secrets.sh $passwords -- " "the three passwords are handed over standard input, by name"
+    has "hand-secrets.sh $passwords -- " "every identity's password is handed over standard input, by name"
     has " with-secrets $passwords -- nats-server -c /etc/galata/nats-authorization.conf -a 0.0.0.0 -p 4222" \
-        "the entrypoint receives the three names, then becomes the server, listening where the published port arrives"
+        "the entrypoint receives every identity's name, then becomes the server, listening where the published port arrives"
     [[ "$line" == *"127.0.0.1"* ]] && say "the broker's container line names loopback, which no container reaches"
     [[ "$line" == *"/var/"*":/"* ]] && say "the broker's container is given a root of the record"
     [[ "$line" =~ -e\ +\"?GALATA_BROKER_PASSWORD ]] && say "one of the broker's passwords is passed with -e"

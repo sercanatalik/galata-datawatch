@@ -691,6 +691,7 @@ mod tests {
             },
             ws_url: "wss://example.invalid",
             rest_url: "https://example.invalid",
+            max_instruments: None,
         }
     }
 

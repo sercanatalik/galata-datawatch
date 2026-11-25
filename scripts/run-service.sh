@@ -275,12 +275,19 @@ flows_state() {
 service="${1:-}"
 case "$service" in
     nats)
+        # **Every identity the generated authorization file names**, read
+        # from it: the server refuses to start on a password variable it is
+        # not given. A fixed list here once fell behind the file — Derive's
+        # identity, added to the grants on 2026-11-24 — and the broker would
+        # not have restarted.
         only=()
         secrets=()
-        for id in datawatch-hyperliquid datawatch-rh-chain reader; do
+        while read -r id; do
+            [[ -n "$id" ]] || continue
             only+=(--only "$(password_var "$id")")
             secrets+=("$(password_var "$id")")
-        done
+        done < <(awk '$1 == "user:" { print $2 }' "$ROOT/config/nats-authorization.conf")
+        (( ${#secrets[@]} )) || refuse "config/nats-authorization.conf names no identity, so the broker would admit nobody"
         # Reached by the host's tailnet name, so published on the host's
         # tailnet address and on no other. A tailnet that is down is a reason
         # not to start: the only other addresses are loopback, which no

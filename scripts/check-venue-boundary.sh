@@ -32,7 +32,7 @@ fi
 
 # Every venue this tree knows how to name. A venue added to `adapters/` and not
 # here would be unguarded, so the list is checked against the directory below.
-VENUES=(hyperliquid rh-chain rh_chain rh-crypto rh_crypto)
+VENUES=(hyperliquid rh-chain rh_chain rh-crypto rh_crypto derive-xyz derive_xyz)
 
 if [[ "$VERB" == "plant" ]]; then
     f="$CRATE/sink.rs"

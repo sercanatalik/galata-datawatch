@@ -147,6 +147,7 @@ impl RhChain {
                 // endpoint that is actually dialled is `rpc_url` above, which
                 // is the one that can be held.
                 rest_url: PUBLIC_RPC,
+                max_instruments: None,
             },
             tickers,
             decimals,

@@ -240,6 +240,8 @@ pub enum Event {
     LedgerUpdate(LedgerUpdate),
     /// How far the ledger holds one kind of the account's history.
     EventsReach(EventsReach),
+    /// An option's implied volatility and greeks, as the venue computed them.
+    OptionPricing(OptionPricing),
 }
 
 impl Event {
@@ -265,6 +267,7 @@ impl Event {
             Event::Fill(_) => Kind::Fills,
             Event::FundingPayment(_) => Kind::FundingPayments,
             Event::LedgerUpdate(_) => Kind::LedgerUpdates,
+            Event::OptionPricing(_) => Kind::OptionPricing,
         }
     }
 }
@@ -442,6 +445,43 @@ pub struct Mark {
     /// The premium over the oracle that the venue computes funding from.
     #[serde(default)]
     pub premium: Option<Num>,
+}
+
+/// What a venue's own model says about one option: implied volatility and
+/// greeks, **each as the venue printed it and none computed here**.
+///
+/// A greek recomputed in transit is a greek from somebody else's model, and it
+/// disagrees with the venue's margin engine exactly when that matters. Every
+/// field is optional because a venue need not publish all of them, and because
+/// a volatility with no quote behind it is absent rather than zero: the venue
+/// this was written for prints `0` for the bid volatility of an option nobody
+/// bids, and a consumer averaging that zero has a number that means nothing.
+/// **A greek of zero is a value**, and is kept.
+///
+/// The option's mark is not here. It is a [`Mark`], beside the index and the
+/// open interest, where every other instrument's is.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct OptionPricing {
+    /// Implied volatility at the mark, as a fraction of one per year.
+    pub iv: Option<Num>,
+    /// Implied volatility at the best bid. Absent where nobody bids.
+    pub bid_iv: Option<Num>,
+    /// Implied volatility at the best ask. Absent where nobody offers.
+    pub ask_iv: Option<Num>,
+    /// Change in value per unit move of the underlying.
+    pub delta: Option<Num>,
+    /// Change in delta per unit move of the underlying.
+    pub gamma: Option<Num>,
+    /// Change in value per point of volatility, in the venue's own unit.
+    pub vega: Option<Num>,
+    /// Change in value per day, in the venue's own unit.
+    pub theta: Option<Num>,
+    /// Change in value per point of rate, in the venue's own unit.
+    pub rho: Option<Num>,
+    /// The forward the venue priced against.
+    pub forward: Option<Num>,
+    /// The discount factor the venue priced with.
+    pub discount_factor: Option<Num>,
 }
 
 /// The perpetual funding rate.
@@ -688,6 +728,22 @@ pub struct Instrument {
     pub ui_multiplier: Option<Num>,
     /// When the venue said all of the above.
     pub observed_at: i64,
+    /// An option's strike. Absent for anything that is not an option.
+    /// Defaulted, so an envelope serialised before it still reads.
+    #[serde(default)]
+    pub strike: Option<Num>,
+    /// When an option expires, **as the venue stated it**.
+    ///
+    /// Never derived from the instrument's name: the date in a name says which
+    /// day, and the hour is the venue's — measured 2026-11-24, one venue
+    /// settles crypto options at 08:00 UTC, equity ones at 21:00 and crude at
+    /// 19:30, all under names of the same shape. A capture loop that stops
+    /// expecting an instrument at this moment has to be told the moment.
+    #[serde(default)]
+    pub expiry_micros: Option<i64>,
+    /// `call` or `put`. Absent for anything that is not an option.
+    #[serde(default)]
+    pub right: Option<String>,
 }
 
 /// A chain reorganisation: rows previously written that the chain no longer
@@ -1248,6 +1304,62 @@ mod tests {
         let envelope = Envelope::new(venue(), ticker(), None, 20, a_quote());
         assert_eq!(envelope.at_micros, None);
         assert_eq!(envelope.recv_micros, 20);
+    }
+
+    #[test]
+    fn an_option_pricing_row_carries_no_float() {
+        // The greeks are the smallest numbers this vocabulary holds, and the
+        // ones a double is most tempted by. Rendered the way the bus renders
+        // them, every one must be text.
+        let pricing = OptionPricing {
+            iv: num("0.66267"),
+            bid_iv: None,
+            ask_iv: num("0.68990"),
+            delta: num("0.64729"),
+            gamma: num("0.00410149"),
+            vega: num("0.50759"),
+            theta: num("-6.97601"),
+            rho: num("0.35471"),
+            forward: num("1681.4"),
+            discount_factor: num("0.999"),
+        };
+        let envelope = Envelope::new(
+            Venue::new("derive-xyz").unwrap(),
+            Ticker::new("ETH-20261127-1650-C").unwrap(),
+            Some(1),
+            2,
+            Event::OptionPricing(pricing),
+        );
+        assert_eq!(envelope.kind(), Kind::OptionPricing);
+        let json = serde_json::to_value(&envelope).unwrap();
+        fn walk(v: &serde_json::Value, key: &str, bad: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Number(_)
+                    if !["seq", "at_micros", "recv_micros"].contains(&key) =>
+                {
+                    bad.push(format!("{key} = {v}"))
+                }
+                serde_json::Value::Object(map) => map.iter().for_each(|(k, v)| walk(v, k, bad)),
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, key, bad)),
+                _ => {}
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&json, "", &mut bad);
+        assert!(bad.is_empty(), "{bad:?}");
+        assert!(json.to_string().contains("\"0.00410149\""), "{json}");
+        assert_eq!(serde_json::from_value::<Envelope>(json).unwrap(), envelope);
+    }
+
+    #[test]
+    fn an_instrument_written_before_it_knew_options_still_decodes() {
+        // The three option fields are defaulted: a row on disk from before
+        // them is still a row.
+        let old = r#"{"tick_size":"0.1","lot_size":"0.001","min_size":"0.001","contract_type":"perp","base":"BTC","quote":"USD","hours":"continuous","active":true,"venue_index":0,"ui_multiplier":null,"observed_at":5}"#;
+        let instrument: Instrument = serde_json::from_str(old).unwrap();
+        assert_eq!(instrument.strike, None);
+        assert_eq!(instrument.expiry_micros, None);
+        assert_eq!(instrument.right, None);
     }
 
     #[test]

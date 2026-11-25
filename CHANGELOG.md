@@ -17,6 +17,70 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+**The next release is 0.2.0, not 0.1.1.** `galata_wire::Instrument` and
+`galata_datawatch::venue::Declaration` each gain a public field, which breaks a
+struct literal written against 0.1.0, `VenueConfig::candle` changes type, and
+both `ConnectionPolicy` variants gain `reply_secs`.
+
+### Added
+
+**`galata-wire`**
+
+- `Kind::OptionPricing` (`option_pricing`) and `Event::OptionPricing`: an
+  option's implied volatility, bid and ask volatility, delta, gamma, vega,
+  theta, rho, forward and discount factor, each as the venue printed it. Not
+  separately declarable: it rides an option's ticker.
+- `Instrument::strike`, `Instrument::expiry_micros` and `Instrument::right`,
+  for an option. Each is defaulted on deserialisation, so an envelope written
+  before them still reads. **Breaking** for a struct literal.
+
+**`galata-datawatch`**
+
+- The `derive-xyz` venue, behind a feature of that name and off by default:
+  options on Derive (derive.xyz), from public data. One ticker payload becomes
+  a `quotes` row, a `marks` row and an `option_pricing` row; the index of each
+  underlying in the set is captured beside its options. No credential, no
+  order method, and no public trades.
+- The **perpetual of each underlying** in a `derive-xyz` option set, captured
+  beside its options and declared by nobody: its top of book in `quotes`, its
+  mark in `marks` and its funding rate in `funding`. Not counted toward the
+  cap. One the venue does not list is retired before the first subscribe and
+  the options start without it. No book depth.
+- An instrument can **leave a running set**. When a venue's reference data
+  says an instrument is inactive, or the loop's clock passes its stated
+  expiry, its subscriptions stop being declared, a reconnect does not ask for
+  them, a lost connection records no gap for them, and the status snapshot
+  lists it under `left` with its reason and time. The mechanism reads the
+  vocabulary and names no venue. `Capture::retire`, `Capture::retire_step`,
+  `Held::retire`, `Retirement`, `Coverage::forget`.
+- A reference refresh on the stream path: `Capture::refresh_reference_with`
+  and `Capture::reference_step`, with `adapters::ReferenceSource`.
+- `Adapter::implied_subscriptions`: subscriptions that follow from the
+  declared set and are declared by nobody.
+- `Declaration::max_instruments`, and `Adapters::max_instruments` and
+  `Adapters::instrument_problem`: a venue may state a cap on its declared set
+  and a form its names take, and a configuration over the cap, or naming an
+  instrument twice, or naming one the venue's names cannot be, is refused when
+  it is loaded (`ConfigError::Instruments`). **Breaking** for a `Declaration`
+  struct literal.
+- The tape projects `option_pricing`, and the `instruments` dataset gains
+  `strike`, `expiry_micros` and `right`, appended and nullable.
+- `Status::left`, absent from the snapshot while it is empty.
+
+### Changed
+
+- **Breaking:** `VenueConfig::candle` is `Option<String>`. A venue that pushes
+  no bars states none; Hyperliquid still requires it and refuses its absence
+  by name.
+- `adapters::check_universe` takes the caller's clock reading and returns the
+  reference answers it read, which the boot takes through the one path.
+- A stream venue that serves no history boots without a walk.
+- **BREAKING: a venue declares how soon it answers a keepalive**
+  (`capture-recovers-dead-connections`). Both `ConnectionPolicy` variants gain
+  `reply_secs: Option<u64>`, read through `ConnectionPolicy::reply_secs`. An
+  out-of-tree venue adds `reply_secs: None` to keep today's behaviour, in which
+  nothing is inferred from a connection's silence. Hyperliquid declares 10 s.
+
 ### Fixed
 
 - **A connection that dies without closing is found, and its silence is a gap**
@@ -42,13 +106,6 @@ exists so the four above take no vault dependency.
   the identity still stops capture, whether at the start or on a later attempt,
   with the same words.
 
-### Changed
-
-- **BREAKING: a venue declares how soon it answers a keepalive**
-  (`capture-recovers-dead-connections`). Both `ConnectionPolicy` variants gain
-  `reply_secs: Option<u64>`, read through `ConnectionPolicy::reply_secs`. An
-  out-of-tree venue adds `reply_secs: None` to keep today's behaviour, in which
-  nothing is inferred from a connection's silence. Hyperliquid declares 10 s.
 
 ## [0.1.0] - 2026-09-29
 

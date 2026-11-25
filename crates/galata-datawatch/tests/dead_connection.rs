@@ -60,6 +60,7 @@ impl Deadwood {
                 },
                 ws_url,
                 rest_url: "http://deadwood.invalid",
+                max_instruments: None,
             },
         }
     }

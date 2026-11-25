@@ -93,7 +93,14 @@ PY
     fi
 }
 
-mint nats GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID GALATA_BROKER_PASSWORD_DATAWATCH_RH_CHAIN GALATA_BROKER_PASSWORD_READER
+# The broker reads every identity's password the generated authorization file
+# names, so its token is minted for exactly those (as run-service.sh reads them).
+broker_names=()
+while read -r id; do
+    [[ -n "$id" ]] && broker_names+=("$(password_var "$id")")
+done < <(awk '$1 == "user:" { print $2 }' "$ROOT/config/nats-authorization.conf")
+(( ${#broker_names[@]} )) || { echo "mint-service-tokens: config/nats-authorization.conf names no identity" >&2; exit 1; }
+mint nats "${broker_names[@]}"
 mint capture-hyperliquid GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
 mint tower GALATA_BROKER_PASSWORD_READER
 
