@@ -227,6 +227,14 @@ pub fn index_ticker_of(currency: &str) -> String {
     format!("{currency}-USD")
 }
 
+/// The venue's name for a currency's perpetual: `BTC-PERP`.
+///
+/// Composed, and asked of the venue at boot under exactly this name. Measured
+/// 2026-11-24: every one of the eighteen underlyings with options has one.
+pub fn perpetual_of(currency: &str) -> String {
+    format!("{currency}-PERP")
+}
+
 /// How the adapter is configured. Nothing here could hold a secret.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -296,6 +304,10 @@ impl Construct for DeriveXyz {
             // On its own channel only: the index is addressed by a currency,
             // and `BTC` must not resolve to it anywhere else.
             symbols.on_channel(wire::INDEX, currency, &index_ticker_of(currency))?;
+            // The underlying's perpetual, by the venue's own name, which is
+            // already a legal ticker.
+            let perpetual = perpetual_of(currency);
+            symbols.everywhere(&perpetual, &perpetual)?;
         }
 
         let declaration = Declaration {
@@ -349,6 +361,14 @@ impl DeriveXyz {
     /// The underlyings the declared options are on.
     pub fn currencies(&self) -> &[String] {
         &self.currencies
+    }
+
+    /// The perpetual of each underlying in the set, by the venue's name.
+    ///
+    /// Declared by nobody and counted toward no cap, as the indexes are: which
+    /// perpetuals these are follows from the options.
+    pub fn perpetuals(&self) -> Vec<String> {
+        self.currencies.iter().map(|c| perpetual_of(c)).collect()
     }
 
     /// Which network.
@@ -426,9 +446,13 @@ impl Adapter for DeriveXyz {
         if self.options.is_empty() {
             return None;
         }
+        // The options, then the perpetual of each underlying. One the loop
+        // has retired is left out of a refresh by the loop.
+        let mut symbols = self.options.clone();
+        symbols.extend(self.perpetuals());
         Some(Reference {
             interval_micros: REFERENCE_INTERVAL_MICROS,
-            symbols: self.options.clone(),
+            symbols,
         })
     }
 
@@ -447,10 +471,14 @@ impl Adapter for DeriveXyz {
         self.symbols.resolve(channel, venue_symbol).cloned()
     }
 
+    /// The index of each underlying in the set, then its perpetual: what a
+    /// hedge on this venue is priced from, beside the options it hedges.
     fn implied_subscriptions(&self) -> Vec<Subscription> {
         self.currencies
             .iter()
-            .filter_map(|currency| Ticker::new(index_ticker_of(currency)).ok())
+            .map(|currency| index_ticker_of(currency))
+            .chain(self.perpetuals())
+            .filter_map(|ticker| Ticker::new(ticker).ok())
             .map(|ticker| Subscription {
                 ticker,
                 series: Series::Quotes,
@@ -557,6 +585,45 @@ pub fn standing(name: &str, bytes: &[u8]) -> Result<Standing, String> {
         Ok(Standing::Left {
             expiry_micros: galata_wire::secs_to_micros(details.expiry),
         })
+    }
+}
+
+/// What the venue says of one underlying's perpetual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerpetualStanding {
+    /// Listed and active.
+    Live,
+    /// Known to the venue and not active. Its answer is taken through the one
+    /// path, and the loop retires it from what that answer says.
+    Inactive,
+    /// The venue has no instrument of this name.
+    Absent,
+}
+
+/// Judge a perpetual's reference answer at boot.
+///
+/// **An absent perpetual is not a refusal.** The options are what the
+/// operator declared, and a hedge instrument the venue does not list is a
+/// reason to capture them without it, said on the status surface. `Err` only
+/// for an answer that cannot be read at all, which is the venue not answering
+/// rather than answering no.
+pub fn perpetual_standing(name: &str, bytes: &[u8]) -> Result<PerpetualStanding, String> {
+    let answer: wire::InstrumentAnswer = serde_json::from_slice(bytes).map_err(|e| {
+        format!("{VENUE}: the answer for {name} is not what the venue documents: {e}")
+    })?;
+    match (answer.result, answer.error) {
+        (Some(spec), _) if spec.is_active => Ok(PerpetualStanding::Live),
+        (Some(_), _) => Ok(PerpetualStanding::Inactive),
+        (None, Some(error)) if error.code == wire::INSTRUMENT_NOT_FOUND => {
+            Ok(PerpetualStanding::Absent)
+        }
+        (None, Some(error)) => Err(format!(
+            "{VENUE}: the venue refused to answer for {name}: {} ({})",
+            error.message, error.code
+        )),
+        (None, None) => Err(format!(
+            "{VENUE}: the answer for {name} holds neither a result nor an error"
+        )),
     }
 }
 

@@ -4646,3 +4646,49 @@ payloads to 5,990 rows with 0 unparsed and one reference refresh.
 **Not exercised live:** an option expiring *while* capture ran (the loop's
 tests cover it on a test clock; none of the six expired inside a run), and a
 lost connection.
+
+## Derive's perpetuals and its order book — 2026-11-24 and 2026-11-25
+
+For `add-derive-perp-capture`. No credential.
+
+**Which exist.** `public/get_all_instruments` lists 21 active perpetuals, each
+named `<CCY>-PERP`. **Every one of the 18 underlyings with options has one**;
+BNB, DOGE and LINK have a perpetual and no options.
+
+**The ticker**, `ticker_slim.BTC-PERP.1000`, 40 s: one message a second, 431
+bytes, the option ticker's shape with `option_pricing` null and `f`, the
+funding rate, a string (`"0.000012500"`). About 36 MiB a day raw each.
+
+**The order book**, `orderbook.<name>.<group>.<depth>`, 40 s on one socket:
+
+| channel | messages a second | bytes each | bytes a second |
+|---|---|---|---|
+| `orderbook.BTC-PERP.1.10` | 3.4 | 589 | 2,018 |
+| `orderbook.BTC-PERP.1.20` | 3.6 | 1,000 | 3,603 |
+| `orderbook.ETH-PERP.10.10` | 4.0 | 559 | 2,209 |
+
+Every message is a whole snapshot, `[price, amount]` pairs a side with a
+`publish_id`, not a difference. Ten levels of one perpetual are 174 MiB a day
+raw, five times its ticker. **It is not captured**: the one planned reader
+wants the book at the moment it is asked, and asks the venue then.
+
+`public/get_instrument` for a perpetual has `option_details` null and
+`perp_details` with the index (`BTC-USD`) and the hourly funding bounds.
+
+**Captured, 2026-11-25.** The same five options and one expired as the run
+above, on the build with the perpetuals, 396 s, no broker:
+
+```text
+  3,527 payloads -> 9,758 rows in 5 segments, 0 unparsed
+
+  subs_declared 11, subs_held 11: five options, three indexes, three perpetuals
+  quotes, marks, funding   390 rows each for BTC-PERP, ETH-PERP, SOL-PERP
+  option_pricing           none for a perpetual; 389 or 390 per option
+  instruments              2 rows per perpetual (the boot and one refresh):
+                           perp, active, no strike, no expiry, no right
+  funding rate             0.0000125 (BTC, ETH), -0.00001332 (SOL), as printed
+  galata-watch             "nothing to report"
+```
+
+**Not exercised live:** an underlying whose perpetual the venue does not list.
+All eighteen have one, so the path is covered by tests only.

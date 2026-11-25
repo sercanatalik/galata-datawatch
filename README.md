@@ -214,7 +214,7 @@ cargo add galata-datawatch --features rh-chain
 | `hyperliquid` | Hyperliquid perps, including the HIP-3 `xyz` dex | WebSocket stream | none | BTC, ETH, HYPE, `xyz:WTIOIL`, `xyz:XYZ100`, `xyz:GOLD` |
 | `rh-chain` | Robinhood Chain (Arbitrum Orbit L2, chain 4663) | block cursor over `eth_getLogs`, bounded at finalized | provider RPC key | tokenized equities |
 | `rh-crypto` | Robinhood Crypto Trading API | signed REST poll (Ed25519) | API key + private key | top of book |
-| `derive-xyz` | Derive (derive.xyz) options | WebSocket stream, with reference data by REST | none | up to 50 named options, and each underlying's index |
+| `derive-xyz` | Derive (derive.xyz) options | WebSocket stream, with reference data by REST | none | up to 50 named options, and each underlying's index and perpetual |
 
 **Derive's instruments expire.** An option is named in full
 (`BTC-20261225-60000-P`), the set is capped at 50, and each option leaves the
@@ -223,6 +223,13 @@ others keep capturing, and nothing rolls the slot to another option. One
 ticker payload a second becomes three rows: the top of book in `quotes`, the
 mark, index and open interest in `marks`, and the venue's own implied
 volatility and greeks in `option_pricing`. Public trades are not captured.
+
+Beside the options, and declared by nobody, the venue's capture follows each
+underlying in the set: its index (`BTC-USD`, in `marks`) and its perpetual
+(`BTC-PERP`: its top of book in `quotes`, its mark in `marks` and its funding
+rate in `funding`). Neither counts toward the 50. A perpetual the venue does
+not list is left out and said so on the status file; the options start
+without it. Book depth is not captured.
 
 Hyperliquid captures `bbo`, trades, candles and `activeAssetCtx`. Its `bbo`
 and rh-crypto's `best_bid_ask` share one `quotes` dataset, so a cross-venue

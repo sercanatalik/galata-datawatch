@@ -151,6 +151,9 @@ pub struct Ticker {
     /// Index price.
     #[serde(rename = "I", default)]
     pub index: Option<Token>,
+    /// The funding rate. A string for a perpetual and `null` for an option.
+    #[serde(default)]
+    pub f: Option<Token>,
     /// 24-hour statistics. Only the open interest is normalised.
     #[serde(default)]
     pub stats: Option<Stats>,

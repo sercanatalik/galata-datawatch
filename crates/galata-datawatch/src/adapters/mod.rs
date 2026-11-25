@@ -53,6 +53,24 @@ pub fn known() -> Vec<&'static str> {
     .to_vec()
 }
 
+/// What a boot check learned from a venue, for the boot to act on.
+///
+/// Empty for a venue checked against a listing, which is not a thing the
+/// record keeps.
+#[cfg(feature = "capture")]
+#[derive(Debug, Default)]
+pub struct Universe {
+    /// The reference answers the check read: the venue's bytes, which the
+    /// boot takes through the one path so the record holds what the check
+    /// was decided on.
+    pub pages: Vec<Payload>,
+    /// Instruments the venue does not have, that capture would otherwise
+    /// subscribe to because they follow from the declared set, each with the
+    /// reason in plain words. The boot retires them before the first
+    /// subscribe.
+    pub absent: Vec<(galata_wire::Ticker, String)>,
+}
+
 /// Why a venue could not be resolved.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -490,7 +508,7 @@ impl AdapterConfig {
 /// than a refusal, and it takes every other subscription on the socket with
 /// it. One request per dex removes the whole failure mode.
 ///
-/// **Returns the reference answers it read**, where checking a venue means
+/// **Returns what it learned**, as a [`Universe`], where checking a venue means
 /// reading its reference data: they are the venue's bytes, and the caller
 /// takes them through the one path so the record holds what the check was
 /// decided on. Empty for a venue checked against a listing, which is not a
@@ -503,7 +521,7 @@ impl AdapterConfig {
 pub async fn check_universe(
     config: &AdapterConfig,
     now_micros: i64,
-) -> Result<Vec<Payload>, ResolveError> {
+) -> Result<Universe, ResolveError> {
     // See `History::for_config`: an empty `AdapterConfig` still needs an arm.
     #[cfg(not(any(
         feature = "hyperliquid",
@@ -513,7 +531,7 @@ pub async fn check_universe(
     )))]
     {
         let _ = config;
-        return Ok(Vec::new());
+        return Ok(Universe::default());
     }
     #[cfg(any(
         feature = "hyperliquid",
@@ -546,7 +564,7 @@ pub async fn check_universe(
                     }
                 })?;
             }
-            Ok(Vec::new())
+            Ok(Universe::default())
         }
         // A chain has no instrument universe to check against: a contract
         // either emits logs or it does not, and asking produces an empty
@@ -554,13 +572,13 @@ pub async fn check_universe(
         // equivalent guard, and it lives in the loop because it needs the
         // provider.
         #[cfg(feature = "rh-chain")]
-        AdapterConfig::RhChain(_) => Ok(Vec::new()),
+        AdapterConfig::RhChain(_) => Ok(Universe::default()),
         // **Unchecked, and said so.** The listing endpoint is signed like every
         // other, and how the venue answers an unknown symbol has not been
         // observed — no credentials were obtained. The first poll is where an
         // unlisted symbol shows itself, and the archive keeps that answer.
         #[cfg(feature = "rh-crypto")]
-        AdapterConfig::RhCrypto(_) => Ok(Vec::new()),
+        AdapterConfig::RhCrypto(_) => Ok(Universe::default()),
         // **An unknown name refuses the start; an expired one does not.** The
         // venue acknowledges a subscription to either with `ok` and then says
         // nothing (measured 2026-11-24), so this is the only place a mistyped
@@ -596,7 +614,38 @@ pub async fn check_universe(
             }
             derive_xyz::judge_set(&standings)
                 .map_err(|detail| ResolveError::Universe { detail })?;
-            Ok(pages)
+
+            // **The perpetual of each underlying, after the options.** One
+            // the venue does not list is no reason to refuse options the
+            // operator declared: it is handed back as absent, and the boot
+            // retires it before the first subscribe.
+            let mut absent = Vec::new();
+            for name in adapter.perpetuals() {
+                tokio::time::sleep(pace).await;
+                let page = client.instrument(&name, now_micros).await.map_err(|e| {
+                    ResolveError::Universe {
+                        detail: format!(
+                            "{}: the venue's instruments could not be read, so nothing can be \
+                             checked: {e}",
+                            derive_xyz::VENUE
+                        ),
+                    }
+                })?;
+                match derive_xyz::perpetual_standing(&name, &page.payload)
+                    .map_err(|detail| ResolveError::Universe { detail })?
+                {
+                    derive_xyz::PerpetualStanding::Absent => {
+                        let ticker = galata_wire::Ticker::new(name)
+                            .map_err(|e| ResolveError::Construct(e.into()))?;
+                        absent.push((ticker, "not listed".to_string()));
+                    }
+                    // Live, or inactive: the answer says which, and the loop
+                    // acts on it when it takes the answer.
+                    derive_xyz::PerpetualStanding::Live
+                    | derive_xyz::PerpetualStanding::Inactive => pages.push(page),
+                }
+            }
+            Ok(Universe { pages, absent })
         }
     }
 }
@@ -1216,8 +1265,9 @@ mod derive_xyz_tests {
         let adapter = build(config).unwrap();
         assert_eq!(adapter.venue().as_str(), "derive-xyz");
         assert!(adapter.transport().is_stream());
-        // Two options on two underlyings: two indexes beside them.
-        assert_eq!(adapter.implied_subscriptions().len(), 2);
+        // Two options on two underlyings: two indexes and two perpetuals
+        // beside them.
+        assert_eq!(adapter.implied_subscriptions().len(), 4);
         assert!(adapter.declaration().historical.is_empty());
         assert_eq!(adapter.live_interval_micros(), None);
     }

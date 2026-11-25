@@ -194,8 +194,7 @@ pub fn boot(
         // The reference answers the check read, where checking the venue meant
         // reading its reference data. Taken through the one path below, so
         // the record holds what this boot was decided on.
-        let reference_pages =
-            adapters::check_universe(&adapter_config, SystemClock.now_micros()).await?;
+        let universe = adapters::check_universe(&adapter_config, SystemClock.now_micros()).await?;
 
         // **The boot asymmetry.** A broker that is ABSENT is an outage the
         // record survives, so capture runs on a NullSink and says so. A broker
@@ -279,8 +278,13 @@ pub fn boot(
         // **Before the subscription**, as the walk is: an instrument the
         // venue's reference data says has expired leaves the set here, so the
         // first subscribe never names it.
-        for page in reference_pages {
+        for page in universe.pages {
             capture.take(page)?;
+        }
+        // And what follows from the set that the venue does not have: never
+        // subscribed, and listed on the status surface with why.
+        for (ticker, reason) in &universe.absent {
+            capture.retire(ticker, reason, capture.now());
         }
 
         // **One arm per transport, matched.** This used to be "not a stream,

@@ -40,6 +40,11 @@ struct literal written against 0.1.0, and `VenueConfig::candle` changes type.
   a `quotes` row, a `marks` row and an `option_pricing` row; the index of each
   underlying in the set is captured beside its options. No credential, no
   order method, and no public trades.
+- The **perpetual of each underlying** in a `derive-xyz` option set, captured
+  beside its options and declared by nobody: its top of book in `quotes`, its
+  mark in `marks` and its funding rate in `funding`. Not counted toward the
+  cap. One the venue does not list is retired before the first subscribe and
+  the options start without it. No book depth.
 - An instrument can **leave a running set**. When a venue's reference data
   says an instrument is inactive, or the loop's clock passes its stated
   expiry, its subscriptions stop being declared, a reconnect does not ask for

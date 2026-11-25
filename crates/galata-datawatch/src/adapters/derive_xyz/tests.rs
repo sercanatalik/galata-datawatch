@@ -170,8 +170,9 @@ fn the_venue_supplies_quotes_and_not_trades() {
 // ---- the set, and what follows from it ------------------------------------
 
 #[test]
-fn one_index_is_added_per_underlying_and_none_is_counted() {
-    // Four BTC options and one ETH option: two indexes.
+fn an_index_and_a_perpetual_follow_from_each_underlying_and_none_is_counted() {
+    // Four BTC options and one ETH option: two indexes and two perpetuals,
+    // and no perpetual of an underlying with no option in the set.
     let adapter = adapter(&[
         "BTC-20261225-60000-P",
         "BTC-20261225-60000-C",
@@ -181,7 +182,8 @@ fn one_index_is_added_per_underlying_and_none_is_counted() {
     ]);
     let implied = adapter.implied_subscriptions();
     let tickers: Vec<&str> = implied.iter().map(|s| s.ticker.as_str()).collect();
-    assert_eq!(tickers, ["BTC-USD", "ETH-USD"]);
+    assert_eq!(tickers, ["BTC-USD", "ETH-USD", "BTC-PERP", "ETH-PERP"]);
+    assert_eq!(adapter.perpetuals(), ["BTC-PERP", "ETH-PERP"]);
     assert!(implied.iter().all(|s| s.series == Series::Quotes));
     // The cap counts what was declared.
     assert_eq!(adapter.options().len(), 5);
@@ -214,7 +216,9 @@ fn fifty_options_and_their_indexes_are_one_frame() {
     let frames = adapter.subscribe_frames(&subscriptions);
     assert_eq!(frames.len(), 1);
     let json: serde_json::Value = serde_json::from_str(&frames[0]).unwrap();
-    assert_eq!(json["params"]["channels"].as_array().unwrap().len(), 53);
+    // Fifty options, and an index and a perpetual for each of three
+    // underlyings: far inside the venue's limit of 10,000 a frame.
+    assert_eq!(json["params"]["channels"].as_array().unwrap().len(), 56);
 }
 
 #[test]
@@ -240,7 +244,9 @@ fn the_subscribe_frame_is_the_set_sorted_and_names_no_trades_channel() {
                     "spot_feed.BTC",
                     "spot_feed.ETH",
                     "ticker_slim.BTC-20261225-60000-P.1000",
+                    "ticker_slim.BTC-PERP.1000",
                     "ticker_slim.ETH-20261225-2000-C.1000",
+                    "ticker_slim.ETH-PERP.1000",
                 ]},
                 "id": 1,
             })
@@ -564,11 +570,13 @@ fn a_name_the_venue_does_not_know_is_refused_with_the_venues_words() {
 }
 
 #[test]
-fn the_reference_asks_about_every_declared_option_and_no_index() {
+fn the_reference_asks_about_every_option_then_each_perpetual_and_no_index() {
     let adapter = shipped();
     let reference = adapter.reference().unwrap();
     assert_eq!(reference.interval_micros, REFERENCE_INTERVAL_MICROS);
-    assert_eq!(reference.symbols, adapter.options());
+    let mut expected = adapter.options().to_vec();
+    expected.extend(["BTC-PERP".to_string(), "ETH-PERP".to_string()]);
+    assert_eq!(reference.symbols, expected);
     assert!(reference.symbols.iter().all(|s| !s.ends_with("-USD")));
     // And each is resolvable from the channel a reference answer is filed
     // under, which is how the loop learns whose answer it holds.
@@ -829,7 +837,10 @@ mod leaving {
         assert_eq!(status.left[0].ticker.as_str(), EXPIRED);
         assert_eq!(status.left[0].reason, "expired");
         assert_eq!(status.left[0].at_micros, BETWEEN);
-        assert_eq!(status.subs_declared, 4, "two options and two indexes");
+        assert_eq!(
+            status.subs_declared, 6,
+            "two options, two indexes and two perpetuals"
+        );
         assert!(status.pairs.iter().all(|p| p.ticker.as_str() != EXPIRED));
 
         // Its reference data is in the record, stating it inactive.
@@ -963,6 +974,74 @@ mod leaving {
         assert_eq!(status.left[0].reason, "no longer listed");
     }
 
+    #[test]
+    fn a_perpetual_the_venue_does_not_list_is_retired_before_anything_is_asked() {
+        // What the boot does with a ticker the check handed back as absent.
+        let mut f = fixture();
+        let perpetual = Ticker::new("ETH-PERP").unwrap();
+        let now = f.clock.now_micros();
+        assert!(f.capture.retire(&perpetual, "not listed", now));
+
+        let asked: Vec<String> = f
+            .capture
+            .held_mut()
+            .converge()
+            .to_subscribe
+            .iter()
+            .map(|s| s.ticker.to_string())
+            .collect();
+        assert!(!asked.contains(&"ETH-PERP".to_string()), "{asked:?}");
+        // The options, the indexes and the other perpetual are all asked for.
+        for kept in [LIVE, ETH_CALL, "ETH-USD", "BTC-USD", "BTC-PERP"] {
+            assert!(asked.contains(&kept.to_string()), "{kept} in {asked:?}");
+        }
+        let status = f.capture.status(now);
+        assert_eq!(status.left.len(), 1);
+        assert_eq!(status.left[0].ticker.as_str(), "ETH-PERP");
+        assert_eq!(status.left[0].reason, "not listed");
+    }
+
+    #[test]
+    fn a_perpetual_that_goes_inactive_while_running_leaves_and_the_options_carry_on() {
+        let mut f = fixture();
+        f.capture
+            .take_frame(&fixture_bytes("ticker_perp.json"))
+            .unwrap();
+        f.capture
+            .take_frame(&fixture_bytes("ticker_two_sides.json"))
+            .unwrap();
+
+        let inactive = String::from_utf8(fixture_bytes("get_instrument_perp.json"))
+            .unwrap()
+            .replace("\"is_active\":true", "\"is_active\":false")
+            .into_bytes();
+        let now = f.clock.now_micros();
+        f.capture
+            .take(reference_page("BTC-PERP", inactive, now))
+            .unwrap();
+
+        let status = f.capture.status(now);
+        let left: Vec<(&str, &str)> = status
+            .left
+            .iter()
+            .map(|l| (l.ticker.as_str(), l.reason.as_str()))
+            .collect();
+        // It has no expiry to have passed, so it is not `expired`.
+        assert_eq!(left, [("BTC-PERP", "no longer listed")]);
+
+        f.capture
+            .take_frame(&fixture_bytes("ticker_two_sides.json"))
+            .unwrap();
+        let status = f.capture.status(f.clock.now_micros());
+        let eth = status
+            .pairs
+            .iter()
+            .find(|p| p.ticker.as_str() == ETH_CALL)
+            .unwrap();
+        assert_eq!(eth.count, 2);
+        assert!(gaps(&f).is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_reference_refresh_retires_what_the_venue_now_says_has_gone() {
         let mut f = fixture();
@@ -1002,18 +1081,137 @@ mod leaving {
         }
         assert_eq!(
             asked.lock().unwrap().as_slice(),
-            [vec![LIVE.to_string(), ETH_CALL.to_string()]]
+            [vec![
+                LIVE.to_string(),
+                ETH_CALL.to_string(),
+                "BTC-PERP".to_string(),
+                "ETH-PERP".to_string()
+            ]]
         );
 
         // Taken through the one path on the next step.
         f.capture.reference_step(f.clock.now_micros()).unwrap();
         let status = f.capture.status(f.clock.now_micros());
         let left: Vec<&str> = status.left.iter().map(|l| l.ticker.as_str()).collect();
-        assert_eq!(left.len(), 3, "{left:?}");
+        // The option that had expired, the two the venue now says are gone,
+        // and the two perpetuals it said the same of.
+        assert_eq!(left.len(), 5, "{left:?}");
         assert!(left.contains(&LIVE) && left.contains(&ETH_CALL));
-        // The indexes stay: they are not instruments that expire.
+        assert!(left.contains(&"BTC-PERP") && left.contains(&"ETH-PERP"));
+        // The indexes stay: an index is not an instrument that can leave.
         assert_eq!(status.subs_declared, 2);
     }
+}
+
+// ---- the underlying's perpetual --------------------------------------------
+
+#[test]
+fn a_perpetuals_ticker_is_a_quote_a_mark_and_a_funding_rate() {
+    let adapter = shipped();
+    let payload = adapter.classify(&fixture("ticker_perp.json"), 3);
+    assert_eq!(payload.symbol.as_deref(), Some("BTC-PERP"));
+    let events = events(&adapter, &payload);
+    let kinds: Vec<Kind> = events.iter().map(|e| e.2.kind()).collect();
+    // No option pricing: the venue states `null` for a perpetual.
+    assert_eq!(kinds, [Kind::Quotes, Kind::Marks, Kind::Funding]);
+    for (ticker, at, _) in &events {
+        assert_eq!(ticker.as_str(), "BTC-PERP");
+        assert_eq!(*at, Some(1_795_564_705_600_000));
+    }
+    assert_eq!(
+        events[0].2,
+        Event::Quote(Quote {
+            bid_px: num("59734.2"),
+            bid_sz: num("1.0835"),
+            ask_px: num("59734.3"),
+            ask_sz: num("0.0169"),
+            bid_spread: None,
+            ask_spread: None,
+        })
+    );
+    assert_eq!(
+        events[1].2,
+        Event::Mark(Mark {
+            mark: num("59725.9"),
+            index: num("59735.9"),
+            open_interest: num("580.248"),
+            ..Mark::default()
+        })
+    );
+    // The rate as the venue printed it. The ticker states no next funding
+    // time and no premium, and neither is invented.
+    assert_eq!(
+        events[2].2,
+        Event::Funding(galata_wire::Funding {
+            rate: Num::from_str("0.000012500").unwrap(),
+            next_micros: None,
+            premium: None,
+        })
+    );
+}
+
+#[test]
+fn an_options_ticker_states_no_funding_rate_and_writes_none() {
+    let adapter = shipped();
+    for name in ["ticker_two_sides.json", "ticker_empty_side.json"] {
+        let events = events(&adapter, &adapter.classify(&fixture(name), 0));
+        assert!(events.iter().all(|e| e.2.kind() != Kind::Funding), "{name}");
+    }
+}
+
+#[test]
+fn a_perpetuals_reference_data_states_a_perpetual_and_no_option_terms() {
+    let adapter = shipped();
+    let perpetual = instrument(&adapter, "BTC-PERP", "get_instrument_perp.json");
+    assert_eq!(perpetual.contract_type, "perp");
+    assert_eq!(perpetual.base, "BTC");
+    assert_eq!(perpetual.quote, "USDC");
+    assert!(perpetual.active);
+    assert_eq!(perpetual.tick_size, Num::from_str("0.1").unwrap());
+    assert_eq!(perpetual.min_size, Num::from_str("0.01").unwrap());
+    assert_eq!(perpetual.strike, None);
+    assert_eq!(perpetual.expiry_micros, None);
+    assert_eq!(perpetual.right, None);
+}
+
+#[test]
+fn a_perpetual_is_not_a_name_an_operator_may_declare() {
+    // It follows from the set. Declared, it is refused as any name that is
+    // not an option is, at load and at construction.
+    assert!(OptionName::parse("BTC-PERP").is_err());
+    assert!(
+        DeriveXyz::new(
+            Config {
+                market: Market::Mainnet,
+                instruments: vec!["BTC-PERP".into()],
+            },
+            None,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_perpetual_at_boot_is_live_inactive_or_absent_and_only_silence_refuses() {
+    assert_eq!(
+        perpetual_standing("BTC-PERP", &fixture("get_instrument_perp.json")),
+        Ok(PerpetualStanding::Live)
+    );
+    let inactive = String::from_utf8(fixture("get_instrument_perp.json"))
+        .unwrap()
+        .replace("\"is_active\":true", "\"is_active\":false");
+    assert_eq!(
+        perpetual_standing("BTC-PERP", inactive.as_bytes()),
+        Ok(PerpetualStanding::Inactive)
+    );
+    // The venue has no perpetual of this name: the options start without it.
+    assert_eq!(
+        perpetual_standing("XYZ-PERP", &fixture("get_instrument_unknown.json")),
+        Ok(PerpetualStanding::Absent)
+    );
+    // The venue did not answer at all: that is not an answer of no.
+    let refusal = perpetual_standing("BTC-PERP", b"<html>502</html>").unwrap_err();
+    assert!(refusal.contains("BTC-PERP"), "{refusal}");
 }
 
 // ---- the one path, and the tape -------------------------------------------

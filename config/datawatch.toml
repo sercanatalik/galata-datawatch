@@ -172,7 +172,12 @@ instruments = [
 #   # of another shape, or a fifty-first is refused at load.
 #   #
 #   # The index of each underlying named here is captured beside its options
-#   # (as BTC-USD, ETH-USD) without being declared, and is not counted.
+#   # (as BTC-USD, ETH-USD) without being declared, and is not counted. So is
+#   # its perpetual (BTC-PERP, ETH-PERP): quote, mark and funding rate, once
+#   # a second. A perpetual is NOT a name to declare here -- it follows from
+#   # the options, and declaring one is refused as any name that is not an
+#   # option is. If the venue lists none for an underlying, the options are
+#   # captured without it and the status file says so.
 #   instruments = [
 #     { ticker = "BTC-20261225-60000-P" },
 #     { ticker = "ETH-20261225-2000-C" },

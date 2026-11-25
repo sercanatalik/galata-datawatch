@@ -86,11 +86,25 @@ Taken in the design and not confirmed:
 Five live options and one that had expired that morning, no broker. See the
 verification in the change's tasks, group 8.
 
+## Added after: the underlying's perpetual
+
+`add-derive-perp-capture`, built 2026-11-25 on the same branch. The margin
+optimiser the programme plans compares hedging an option with Derive's own
+perpetual against hedging it elsewhere, so the perpetual of each underlying
+in the set is captured beside its options, as the index is: implied by the
+set, declared by nobody, outside the cap. Its ticker is the option's with a
+funding rate in place of the pricing, so the adapter gained one event and no
+new dataset.
+
+Its order book was measured and left out: ten levels are five times the
+ticker, and the reader wants the book at one moment.
+
 ## Not built
 
 - The client's door for adding and removing options, and a cap on
   Hyperliquid's set. Both belong to the programme's "Fetcher's ticker set".
 - A slot defined by a rule that rolls.
-- Derive perpetuals, book depth, public trades, and any history walk.
+- Book depth, public trades, a perpetual as a declared instrument, and any
+  history walk.
 - The container, launchd agent, broker password and vault token for the
   capture service.

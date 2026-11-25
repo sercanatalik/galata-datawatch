@@ -10,7 +10,7 @@
 //! margin engine uses the same ones.
 
 use galata_wire::{
-    Envelope, Event, Instrument, Mark, Num, OptionPricing, Quote, Ticker, Token, Venue,
+    Envelope, Event, Funding, Instrument, Mark, Num, OptionPricing, Quote, Ticker, Token, Venue,
     millis_to_micros, secs_to_micros,
 };
 
@@ -166,6 +166,18 @@ fn ticker(
             premium: None,
         })),
     ];
+
+    // **A perpetual's ticker states its funding rate; an option's states
+    // `null`.** The rate as the venue printed it, at the venue's time. The
+    // ticker states no next funding time and no premium, so neither is
+    // invented.
+    if let Some(rate) = num(top.f.as_ref(), "funding rate")? {
+        events.push(envelope(Event::Funding(Funding {
+            rate,
+            next_micros: None,
+            premium: None,
+        })));
+    }
 
     // `null` for anything that is not an option. The ticker of one is still a
     // quote and a mark, so those two stand without it.
