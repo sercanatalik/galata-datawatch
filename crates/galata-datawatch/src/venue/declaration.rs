@@ -206,11 +206,17 @@ pub enum ConnectionPolicy {
         rotate_after_secs: u64,
         /// The keepalive, kept anyway.
         keepalive_secs: u64,
+        /// How soon the venue answers a keepalive. See
+        /// [`ConnectionPolicy::reply_secs`].
+        reply_secs: Option<u64>,
     },
     /// The venue states no lifetime. No rotation timer is applied.
     KeepAliveOnly {
         /// How often the venue wants to hear from us.
         keepalive_secs: u64,
+        /// How soon the venue answers a keepalive. See
+        /// [`ConnectionPolicy::reply_secs`].
+        reply_secs: Option<u64>,
     },
 }
 
@@ -219,7 +225,25 @@ impl ConnectionPolicy {
     pub fn keepalive_secs(&self) -> u64 {
         match self {
             ConnectionPolicy::RotateAhead { keepalive_secs, .. }
-            | ConnectionPolicy::KeepAliveOnly { keepalive_secs } => *keepalive_secs,
+            | ConnectionPolicy::KeepAliveOnly { keepalive_secs, .. } => *keepalive_secs,
+        }
+    }
+
+    /// How soon the venue answers a keepalive, where it declares that it does.
+    ///
+    /// **What tells a dead connection from a quiet market.** A connection can
+    /// die without closing — measured on 2026-11-25, a change in the host's
+    /// network killed a container's connections and nothing said so — and a
+    /// quiet market and a dead connection deliver the same nothing. A venue
+    /// that answers every keepalive does not: once a keepalive has gone
+    /// unanswered for this long, the connection is dead, whatever the market
+    /// is doing (`capture::session`). `None` keeps the older rule for a venue
+    /// that does not answer, or has not been measured: nothing is inferred
+    /// from its silence.
+    pub fn reply_secs(&self) -> Option<u64> {
+        match self {
+            ConnectionPolicy::RotateAhead { reply_secs, .. }
+            | ConnectionPolicy::KeepAliveOnly { reply_secs, .. } => *reply_secs,
         }
     }
 
@@ -336,7 +360,10 @@ mod tests {
                 weight_per_minute: 60.0,
                 min_historical_interval_ms: 1_000,
             },
-            connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 60 },
+            connection: ConnectionPolicy::KeepAliveOnly {
+                keepalive_secs: 60,
+                reply_secs: None,
+            },
             ws_url: "wss://example.invalid",
             rest_url: "https://example.invalid",
         }

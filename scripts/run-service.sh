@@ -8,12 +8,17 @@
 #   run-service.sh ledger <venue>
 #   run-service.sh tower
 #   run-service.sh flows
-#   run-service.sh vault
 #   run-service.sh --check <service> [<venue>]   every precondition, then `ready`;
 #                                                starts nothing
 #
+# **Every service but the tower runs in a container of its own** (Apple's
+# `container`), at the CPUs and memory its line in var/containers.conf states.
+# A service with no line does not start, and the refusal names the service and
+# the missing limit: there is no native start to fall back to. The tower runs
+# natively until it is retired.
+#
 # **Each service gets only its own secrets**, read from the deployment's vault
-# (com.galata.vault) through a token minted for that service alone
+# through a token minted for that service alone
 # (var/tokens/<service>.gvt, 0600; scripts/mint-service-tokens.sh): NATS all
 # three broker passwords, capture its own venue's, the tower the reader's, the
 # ledger its own venue's account addresses and the fingerprint key, and
@@ -33,6 +38,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/vault-tools.sh
 source "$ROOT/scripts/lib/vault-tools.sh"
+# shellcheck source=scripts/lib/container-tools.sh
+source "$ROOT/scripts/lib/container-tools.sh"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin"
 export NO_COLOR=1
 cd "$ROOT"
@@ -132,9 +139,19 @@ from_vault() {
     export GV_SERVER="${GV_SERVER:-http://127.0.0.1:8750}"
     export GV_TOKEN_FILE="$token"
     # "<unix> <YYYY-MM-DD> <days> <ok|WARN|EXPIRED>"
+    # Two facts that must not read alike. A vault that did not answer is an
+    # outage: start it and the next attempt works, with this same token. A
+    # token the vault refuses will never work again, and the remedy is a
+    # re-mint. launchd retries either way; the operator reads which.
     local expiry
-    expiry="$("$judge" 2>&1 </dev/null)" \
-        || refuse "$token does not open: ${expiry#galata-token-expiry: }"
+    if ! expiry="$("$judge" 2>&1 </dev/null)"; then
+        case "$expiry" in
+            *"could not reach"*)
+                refuse "the vault did not answer at $GV_SERVER, so $service's secrets cannot be read — start the vault; $service's token is not the problem (${expiry#galata-token-expiry: })" ;;
+            *)
+                refuse "$token does not open: ${expiry#galata-token-expiry: }" ;;
+        esac
+    fi
     local date days state
     read -r _ date days state <<< "$expiry"
     case "$state" in
@@ -161,34 +178,165 @@ use_config() {
     fi
 }
 
+# **A service in a container of its own** (Apple `container`). Its line in
+# var/containers.conf states its CPU and memory, because a container given
+# neither gets 4 CPUs and 1 GiB whatever the service is; a service with no
+# line is refused here, by name.
+#
+#   in_container <spec> <image> [container-run option ...]
+#
+# checks every precondition and sets CONTAINER_RUN to the words that start
+# the container: `<tool> run --rm --name <name> --cpus N --memory M <options>
+# <image>`. The caller appends the program and hands the line to `start` or
+# to `from_vault`, so it is `exec`ed like any other service: `container run`
+# stays in the foreground, launchd's SIGTERM reaches it, and it passes the
+# stop to the container's process.
+DATAWATCH_IMAGE="$(service_image capture)"
+NATS_IMAGE="$(service_image nats)"
+FLOWS_IMAGE="$(service_image flows)"
+CONTAINER_RUN=()
+in_container() {
+    local spec="$1" image="$2"; shift 2
+    local tool said limits cpus memory name
+    tool="$(container_tool 2>&1)" || refuse "$tool"
+    said="$(container_running "$tool" 2>&1)" || refuse "$said"
+    said="$(container_image "$tool" "$image" 2>&1)" || refuse "$said"
+    limits="$(container_limits "$spec" 2>&1)" || refuse "$limits"
+    read -r cpus memory <<< "$limits"
+    name="$(container_name "$spec")"
+    # A container left by a crash, or by a client that lost its connection,
+    # still holds the name. Not under --check, which starts and stops nothing.
+    if (( ! CHECK )); then "$tool" rm -f "$name" >/dev/null 2>&1 || true; fi
+    CONTAINER_RUN=("$tool" run --rm --name "$name" --cpus "$cpus" --memory "$memory" "$@" "$image")
+}
+
+# The `-v` words for a service's own roots, each read from the configuration
+# (scripts/lib/config_roots.py) and seen to exist. A root that is missing is
+# refused, never created here: an empty archive made by a typo in a path
+# looks exactly like a capture that has just started.
+#
+#   root_mounts <key> [<key> ...]     sets ROOT_MOUNTS
+ROOT_MOUNTS=()
+root_mounts() {
+    local lines host inside
+    ROOT_MOUNTS=()
+    lines="$(python3 "$ROOT/scripts/lib/config_roots.py" "$GALATA_CONFIG" "$ROOT" "$@" 2>&1)" \
+        || refuse "$GALATA_CONFIG does not say where ${*} is${lines:+: $lines}"
+    while IFS=$'\t' read -r host inside; do
+        [[ -n "$host" ]] || continue
+        [[ -d "$host" ]] || refuse "no folder at $host, which $GALATA_CONFIG names as a root — a container is given a folder that exists; mkdir -p it if the path is right"
+        ROOT_MOUNTS+=(-v "$host:$inside")
+    done <<< "$lines"
+}
+
+# The configuration a container reads: a copy, in a folder of this service's
+# own, mounted read-only.
+#
+# A copy, because Apple's `container` mounts a FOLDER read-only and a file
+# only read-write (measured 2026-11-24, 1.7.1), and the folder the
+# deployment's configuration lives in is var/, which holds every service's
+# token. Taken at each start, as a native service reads the file at each
+# start; whole, never merged.
+#
+#   config_mount <name>     sets CONFIG_MOUNT, and GALATA_CONFIG's path inside
+CONFIG_MOUNT=()
+CONFIG_INSIDE=/app/config/datawatch.toml
+config_mount() {
+    local dir="$ROOT/var/run/$1"
+    if (( ! CHECK )); then
+        mkdir -p "$dir" || refuse "could not make $dir"
+        chmod 700 "$dir"
+        cp "$GALATA_CONFIG" "$dir/datawatch.toml" || refuse "could not copy $GALATA_CONFIG into $dir"
+    fi
+    CONFIG_MOUNT=(--mount "type=bind,source=$dir,target=/app/config,readonly"
+                  -e "GALATA_CONFIG=$CONFIG_INSIDE" -e NO_COLOR=1)
+}
+
+# The lane's run store and its schedule: a volume of its own.
+#
+# The archive and the tape are folders on the host because other services and
+# native tools read them. The lane's state is read by nothing but the lane, so
+# it gets an Apple volume, which one container attaches at a time. Made at the
+# first real start and handed once to the image's user, who cannot write to a
+# new volume (measured 2026-11-24: mode 755, owned by root). Deletable, as the
+# run store always was (py/flows/__init__.py, the first invariant).
+FLOWS_STATE="${GALATA_FLOWS_STATE:-galata-flows-state}"
+flows_state() {
+    local tool
+    tool="$(container_tool 2>&1)" || refuse "$tool"
+    container_volume "$tool" "$FLOWS_STATE" && return 0
+    "$tool" volume create "$FLOWS_STATE" >/dev/null \
+        || refuse "could not create the volume $FLOWS_STATE"
+    "$tool" run --rm --name galata-flows-state-init --cpus 1 --memory 256M -u 0 \
+            -v "$FLOWS_STATE:/data" "$FLOWS_IMAGE" chown galata /data >/dev/null \
+        || refuse "could not hand the volume $FLOWS_STATE to the lane's user — container volume rm $FLOWS_STATE, then start again"
+}
+
 service="${1:-}"
 case "$service" in
     nats)
         only=()
+        secrets=()
         for id in datawatch-hyperliquid datawatch-rh-chain reader; do
             only+=(--only "$(password_var "$id")")
+            secrets+=("$(password_var "$id")")
         done
+        # Reached by the host's tailnet name, so published on the host's
+        # tailnet address and on no other. A tailnet that is down is a reason
+        # not to start: the only other addresses are loopback, which no
+        # container reaches, and the LAN.
+        tailnet="$(tailnet_address 2>&1)" || refuse "$tailnet"
+        # config/ read-only: the generated authorization file, which names
+        # each password as a variable and holds none.
+        in_container nats "$NATS_IMAGE" -i \
+            --mount "type=bind,source=$ROOT/config,target=/etc/galata,readonly" \
+            --publish "$tailnet:4222:4222"
+        # -a 0.0.0.0, inside the container: the published port arrives on the
+        # container's own address, not its loopback.
         from_vault nats "${only[@]}" -- \
-            "$(command -v nats-server)" -c "$ROOT/config/nats-authorization.conf" -a 127.0.0.1 -p 4222
+            /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
+            "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- \
+            nats-server -c /etc/galata/nats-authorization.conf -a 0.0.0.0 -p 4222
         ;;
     capture)
         venue="${2:-}"
         [[ -n "$venue" ]] || refuse "usage: run-service.sh capture <venue> [--import <dir>]"
         use_config
-        from_vault "capture-$venue" --only "$(password_var "datawatch-$venue")" -- \
-            "$ROOT/target/release/galata-datawatch" "$venue" "${@:3}"
+        # An import reads a folder of rescued pages, which no container is
+        # given: it is a one-off, run by hand, beside a stopped service.
+        [[ $# -le 2 ]] || refuse "capture:$venue runs in a container, and '${*:3}' needs a folder it is not given — stop the service and run that by hand: target/release/galata-datawatch $venue ${*:3}"
+        secret="$(password_var "datawatch-$venue")"
+        root_mounts paths.archive paths.status
+        config_mount "$(container_name "capture:$venue")"
+        # -i: the secret arrives on standard input (lib/hand-secrets.sh), never
+        # with -e, which Apple's container writes to its own state.
+        in_container "capture:$venue" "$DATAWATCH_IMAGE" -i "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}"
+        from_vault "capture-$venue" --only "$secret" -- \
+            /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "$secret" -- \
+            "${CONTAINER_RUN[@]}" with-secrets "$secret" -- galata-datawatch "$venue"
         ;;
     ledger)
         venue="${2:-}"
         [[ -n "$venue" ]] || refuse "usage: run-service.sh ledger <venue>"
         use_config
-        [[ -x "$ROOT/target/release/galata-ledger" ]] \
-            || refuse "no galata-ledger — cargo build --release first"
         names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$GALATA_CONFIG" "$venue")" \
             || refuse "$GALATA_CONFIG declares no ledger account on $venue"
         only=()
-        while IFS= read -r name; do only+=(--only "$name"); done <<< "$names"
-        from_vault "ledger-$venue" "${only[@]}" -- "$ROOT/target/release/galata-ledger" "$venue"
+        secrets=()
+        while IFS= read -r name; do only+=(--only "$name"); secrets+=("$name"); done <<< "$names"
+        # Its record, its projection when one is declared, and the status
+        # folder; never the archive or the tape, which are not its own.
+        root_mounts ledger.root paths.status
+        mounts=("${ROOT_MOUNTS[@]}")
+        if python3 "$ROOT/scripts/lib/config_roots.py" "$GALATA_CONFIG" "$ROOT" ledger.tape >/dev/null 2>&1; then
+            root_mounts ledger.tape
+            mounts+=("${ROOT_MOUNTS[@]}")
+        fi
+        config_mount "$(container_name "ledger:$venue")"
+        in_container "ledger:$venue" "$DATAWATCH_IMAGE" -i "${mounts[@]}" "${CONFIG_MOUNT[@]}"
+        from_vault "ledger-$venue" "${only[@]}" -- \
+            /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
+            "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- galata-ledger "$venue"
         ;;
     tower)
         # The copy install-services.sh put in var/bin, never the tower
@@ -205,36 +353,46 @@ case "$service" in
         export GALATA_STATUS="$ROOT/var/status"
         use_config
         export GALATA_TOWER_LISTEN="${GALATA_TOWER_LISTEN:-127.0.0.1:8777}"
-        export GALATA_BROKER="${GALATA_BROKER:-127.0.0.1:4222}"
+        # The broker capture publishes to, read from the same [broker] url
+        # (scripts/lib/broker_addr.py). Loopback only when the configuration
+        # declares no broker at all, which is what it was before.
+        if [[ -z "${GALATA_BROKER:-}" ]]; then
+            GALATA_BROKER="$(python3 "$ROOT/scripts/lib/broker_addr.py" "$GALATA_CONFIG" 2>/dev/null)" \
+                || GALATA_BROKER="127.0.0.1:4222"
+        fi
+        export GALATA_BROKER
+        # Said under --check, on stderr: the address is in the environment,
+        # not the command line, so `ready:` alone would not show it.
+        if (( CHECK )); then echo "run-service: the tower connects to the broker at $GALATA_BROKER" >&2; fi
         from_vault tower --only "$(password_var reader)" -- "$bin"
         ;;
     vault)
-        # The deployment's secret store: loopback only, data in
-        # ~/.local/share/galata-vault, no configuration. It stores ciphertext
-        # and cannot read any of it — the binary links no decryption code.
-        server="$(vault_tool gv-server 2>&1)" || refuse "$server"
-        start "$server" local
+        # Once a service here: `gv-server local`, on loopback, with its data
+        # in ~/.local/share/galata-vault. The deployment's vault is now the
+        # hosted one, which galata-vault runs in a container of its own and
+        # publishes on this machine's loopback at the same port, so GV_SERVER
+        # above still finds it. Said by name, because an old agent's plist
+        # still asks for this.
+        refuse "the vault is no longer a service of this deployment: start the hosted vault (galata-vault: deploy/apple-container/gv-container up), and remove the old agent with scripts/install-services.sh --uninstall vault"
         ;;
     flows)
-        # No secret at all: the lane holds no credential, by design and by
-        # check-python-flows.sh. Its own home, because a shared ~/.cereyan
-        # imports and schedules other projects' flows too.
-        export CEREYAN_HOME="$HOME/.cereyan-galata"
-        export CEREYAN_NO_BROWSER=1
-        # FROM py/, which cereyan's service guide asks for: a run executes in
-        # an engine process that imports `flows.<module>` from its working
-        # directory. Served from the repo root, the flows registered and every
-        # run failed "No module named 'flows'" — found by the first run.
-        cd "$ROOT/py"
-        # The signal calculator's own environment (py/signals: numpy, arch,
-        # galata-research), which the lane runs as a tool and never imports.
-        # Synced from its lock before the lane serves, so the first :15 finds
-        # it; --frozen, so a start never moves a pin.
-        "$(command -v uv || echo uv)" sync --project signals --frozen --quiet \
-            || refuse "could not sync py/signals from its lock — uv sync --project py/signals"
-        start "$(command -v uv || echo uv)" run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
+        # The archive and the tape, which its tools maintain; its own state;
+        # the configuration. No secret, by design and by check-python-flows.sh;
+        # no status folder, no ledger, and no port: its interface can start any
+        # registered flow, so it answers inside the container only
+        # (`container exec galata-flows cereyan runs ls`).
+        #
+        # Five flows, not seven: the image leaves out the two that need
+        # galata-research (deploy/container/Containerfile.flows), so they do
+        # not run while it is set aside.
+        use_config
+        root_mounts paths.archive paths.tape
+        config_mount "$(container_name flows)"
+        in_container flows "$FLOWS_IMAGE" "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}" -v "$FLOWS_STATE:/data"
+        if (( ! CHECK )); then flows_state; fi
+        start "${CONTAINER_RUN[@]}"
         ;;
     *)
-        refuse "usage: run-service.sh [--check] vault | nats | capture <venue> | ledger <venue> | tower | flows"
+        refuse "usage: run-service.sh [--check] nats | capture <venue> | ledger <venue> | tower | flows"
         ;;
 esac

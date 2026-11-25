@@ -82,7 +82,10 @@ impl RhCrypto {
                     weight_per_minute: 60.0 / f64::from(config.poll_secs.max(1)),
                     min_historical_interval_ms: u64::from(config.poll_secs) * 1_000,
                 },
-                connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 0 },
+                connection: ConnectionPolicy::KeepAliveOnly {
+                    keepalive_secs: 0,
+                    reply_secs: None,
+                },
                 ws_url: "",
                 rest_url: REST_URL,
             },

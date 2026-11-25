@@ -184,12 +184,20 @@ pub fn boot(
 
         adapters::check_universe(&adapter_config).await?;
 
+        // **One stop for the whole run**, made before the sink: a broker that
+        // answers late and refuses the identity stops capture through it, as
+        // SIGTERM does. The signal is attached just before each loop runs, as
+        // it always was.
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let refused: Refused = Arc::default();
+
         // **The boot asymmetry.** A broker that is ABSENT is an outage the
-        // record survives, so capture runs on a NullSink and says so. A broker
-        // that REJECTS THE IDENTITY is a misconfiguration that will never fix
-        // itself — and the status surface that would report it is a publish
-        // too, so running on would mean archiving everything, publishing
-        // nothing, and being unable to say so.
+        // record survives, so capture runs, says so, and keeps asking for it
+        // in the background (`reach_broker`). A broker that REJECTS THE
+        // IDENTITY is a misconfiguration that will never fix itself — and the
+        // status surface that would report it is a publish too, so running on
+        // would mean archiving everything, publishing nothing, and being
+        // unable to say so.
         let sink: Arc<dyn Sink> = match &config.broker {
             None => {
                 tracing::info!(
@@ -225,12 +233,34 @@ pub fn boot(
                     }
                     // Fatal: it will never fix itself.
                     Err(refusal) if refusal.is_fatal() => return Err(Box::from(refusal)),
+                    // **Asked again, not given up on.** Until 2026-11-25 this
+                    // was a sink that published nothing until a restart.
                     Err(refusal) => {
                         tracing::warn!(
-                            "{refusal}\n  Capture continues and the record is unaffected; \
-                             events are not published until this is fixed"
+                            "{refusal}\n  Capture continues and the record is unaffected; events \
+                             are not published until the broker answers, and it is asked again \
+                             in the background"
                         );
-                        Arc::new(NullSink)
+                        let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(broker.queue);
+                        let url = broker.url.clone();
+                        let user = broker.user.clone();
+                        let connect_url = url.clone();
+                        tokio::spawn(reach_broker(
+                            move || {
+                                let url = connect_url.clone();
+                                let identity = identity.clone();
+                                async move { NatsPublisher::connect(&url, &identity).await }
+                            },
+                            move |publisher, rx| async move {
+                                tracing::info!(url, user, "publishing: the broker answered");
+                                publish_loop(publisher, rx).await;
+                            },
+                            rx,
+                            broker_backoff(),
+                            shutdown.clone(),
+                            refused.clone(),
+                        ));
+                        Arc::new(NatsSink::new(tx))
                     }
                 }
             }
@@ -282,19 +312,20 @@ pub fn boot(
                 // target it never compiled.
                 #[cfg(feature = "rh-chain")]
                 {
-                    let shutdown = tokio_util::sync::CancellationToken::new();
                     let signal = shutdown.clone();
                     tokio::spawn(async move {
                         shutdown_signal().await;
                         signal.cancel();
                     });
-                    return capture
+                    let ran = capture
                         .run_cursor(
                             shutdown,
                             config.capture.cold_start_days as u64 * BLOCKS_PER_DAY,
                         )
                         .await
                         .map_err(Box::<dyn std::error::Error>::from);
+                    broker_verdict(&refused)?;
+                    return ran;
                 }
                 // Refused by name rather than by a link error or, worse, by
                 // falling through into the stream path and capturing a chain as
@@ -312,14 +343,14 @@ pub fn boot(
             // walk: the restart gap above is the whole of what it can say about
             // the time this process was not running.
             crate::venue::Transport::Poll { .. } => {
-                let shutdown = tokio_util::sync::CancellationToken::new();
                 let signal = shutdown.clone();
                 tokio::spawn(async move {
                     shutdown_signal().await;
                     signal.cancel();
                 });
-                let polls = capture.run_polled(shutdown, &about).await?;
-                tracing::info!("{}", polls.report());
+                let polls = capture.run_polled(shutdown, &about).await;
+                broker_verdict(&refused)?;
+                tracing::info!("{}", polls?.report());
                 return Ok(());
             }
         }
@@ -422,17 +453,20 @@ pub fn boot(
             tracing::info!(settle_secs = secs, "settling the bars closed while running");
         }
 
-        let shutdown = tokio_util::sync::CancellationToken::new();
         let signal = shutdown.clone();
         tokio::spawn(async move {
             shutdown_signal().await;
             signal.cancel();
         });
 
-        capture
+        let ran = capture
             .run(shutdown)
             .await
-            .map_err(Box::<dyn std::error::Error>::from)
+            .map_err(Box::<dyn std::error::Error>::from);
+        // A broker that answered late and refused the identity stopped capture
+        // through `shutdown`; its words are why the process exits non-zero.
+        broker_verdict(&refused)?;
+        ran
     })?;
 
     Ok(())
@@ -598,6 +632,90 @@ async fn shutdown_signal() {
     }
 }
 
+/// The broker retry's waits: a second, doubling, and never more than a minute.
+///
+/// **No jitter**, unlike a venue's reconnect: jitter spreads a host's
+/// processes across a venue's per-IP connection budget, and the broker is this
+/// deployment's own, asked by one capture per venue. A jittered wait could also
+/// pass the minute a broker that comes back may be left unasked.
+fn broker_backoff() -> crate::source::Backoff {
+    crate::source::Backoff::new(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(60),
+        0.0,
+    )
+}
+
+/// A broker refusal found after capture started, for boot to return once
+/// capture has stopped.
+type Refused = Arc<std::sync::Mutex<Option<galata_broker::ConnectRefusal>>>;
+
+/// **Keep asking for a broker that did not answer at the start**, then publish.
+///
+/// Until 2026-11-25 a broker that did not answer at the start meant a sink
+/// that published nothing for the rest of the process's life. Since the broker
+/// is addressed by the host's tailnet name, that is every capture started while
+/// the tailnet is down, and it stayed so after the tailnet came back.
+///
+/// Archiving never waits for this: the events capture produces meanwhile wait
+/// in the bounded channel `rx` drains, and are dropped and counted when it is
+/// full (`NatsSink`). Each attempt is classified as the start's was:
+///
+/// - **unreachable**: wait on `backoff` and ask again, silently — the start
+///   said it once;
+/// - **connected**: hand the publisher and the channel to `publish`;
+/// - **refused the identity**: a misconfiguration that will never fix itself,
+///   exactly as at the start. The refusal goes in `refused` and capture is
+///   stopped through `stop`, so the process exits non-zero with the start's
+///   words whether or not the tailnet was up when it began.
+///
+/// The connect and publish steps are arguments so that a test can be the
+/// broker.
+async fn reach_broker<P, C, CF, R, RF>(
+    mut connect: C,
+    publish: R,
+    rx: tokio::sync::mpsc::Receiver<Outbound>,
+    mut backoff: crate::source::Backoff,
+    stop: tokio_util::sync::CancellationToken,
+    refused: Refused,
+) where
+    C: FnMut() -> CF,
+    CF: std::future::Future<Output = Result<P, galata_broker::ConnectRefusal>>,
+    R: FnOnce(P, tokio::sync::mpsc::Receiver<Outbound>) -> RF,
+    RF: std::future::Future<Output = ()>,
+{
+    loop {
+        tokio::select! {
+            // Capture is stopping for its own reasons: nothing left to publish.
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(backoff.next_wait()) => {}
+        }
+        match connect().await {
+            Ok(publisher) => {
+                publish(publisher, rx).await;
+                return;
+            }
+            Err(refusal) if refusal.is_fatal() => {
+                tracing::error!("{refusal}\n  Capture stops: it will not fix itself");
+                if let Ok(mut slot) = refused.lock() {
+                    *slot = Some(refusal);
+                }
+                stop.cancel();
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// The refusal that stopped capture, if a broker answered late and refused.
+fn broker_verdict(refused: &Refused) -> Result<(), Box<dyn std::error::Error>> {
+    match refused.lock().ok().and_then(|mut slot| slot.take()) {
+        Some(refusal) => Err(Box::from(refusal)),
+        None => Ok(()),
+    }
+}
+
 /// Drain the queue onto the bus.
 ///
 /// **The only place that awaits a publish.** `NatsSink::emit` is synchronous
@@ -661,3 +779,166 @@ async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Recei
 /// between the two units, and it says so.
 #[cfg(feature = "rh-chain")]
 const BLOCKS_PER_DAY: u64 = 9 * 60 * 60 * 24;
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use galata_broker::ConnectRefusal;
+
+    use super::*;
+
+    fn unreachable() -> ConnectRefusal {
+        ConnectRefusal::Unreachable {
+            addr: "nats://mac.example.ts.net:4222".into(),
+            reason: "DNS error: failed to lookup address information".into(),
+        }
+    }
+
+    fn rejected() -> ConnectRefusal {
+        ConnectRefusal::Rejected {
+            addr: "nats://mac.example.ts.net:4222".into(),
+            identity: "datawatch-hyperliquid".into(),
+            var: "GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID".into(),
+            reason: "Authorization Violation".into(),
+        }
+    }
+
+    /// Milliseconds rather than the deployment's seconds: the same doubling.
+    fn quick() -> crate::source::Backoff {
+        crate::source::Backoff::new(Duration::from_millis(1), Duration::from_millis(4), 0.0)
+    }
+
+    #[tokio::test]
+    async fn a_broker_that_answers_late_is_handed_what_was_queued_meanwhile() {
+        // Capture archived and emitted while the broker was away; the bounded
+        // queue held it, and the broker gets it once it answers.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(8);
+        let venue = galata_wire::Venue::new("hyperliquid").unwrap();
+        for n in 0..3u8 {
+            tx.try_send(Outbound::Status {
+                venue: venue.clone(),
+                json: vec![n],
+            })
+            .unwrap();
+        }
+        drop(tx);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let published = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let refused: Refused = Arc::default();
+        let (counted, into) = (attempts.clone(), published.clone());
+        reach_broker(
+            move || {
+                let attempt = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if attempt < 3 {
+                        Err(unreachable())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            move |(), mut rx: tokio::sync::mpsc::Receiver<Outbound>| async move {
+                while let Some(outbound) = rx.recv().await {
+                    into.lock().unwrap().push(outbound);
+                }
+            },
+            rx,
+            quick(),
+            stop.clone(),
+            refused.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "twice unreachable, then connected"
+        );
+        assert_eq!(
+            published.lock().unwrap().len(),
+            3,
+            "everything queued while it was away"
+        );
+        assert!(
+            !stop.is_cancelled(),
+            "a broker that was only away does not stop capture"
+        );
+        assert!(broker_verdict(&refused).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_broker_that_answers_late_and_refuses_stops_capture_with_the_starts_words() {
+        // The same refusal at the start would have stopped capture starting;
+        // whether the tailnet was up at that moment no longer decides it.
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Outbound>(8);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let refused: Refused = Arc::default();
+        let counted = attempts.clone();
+        reach_broker(
+            move || {
+                let attempt = counted.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if attempt < 2 {
+                        Err::<(), _>(unreachable())
+                    } else {
+                        Err(rejected())
+                    }
+                }
+            },
+            |(), _rx| async move { panic!("a broker that refused is never published to") },
+            rx,
+            quick(),
+            stop.clone(),
+            refused.clone(),
+        )
+        .await;
+
+        assert!(stop.is_cancelled(), "capture is stopped");
+        let said = broker_verdict(&refused).unwrap_err().to_string();
+        assert_eq!(
+            said,
+            rejected().to_string(),
+            "the words a refusal at the start uses"
+        );
+        assert!(said.contains("datawatch-hyperliquid"));
+        assert!(said.contains("GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID"));
+    }
+
+    #[tokio::test]
+    async fn a_capture_that_stops_stops_asking() {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Outbound>(8);
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        reach_broker(
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(unreachable()) }
+            },
+            |(), _rx| async {},
+            rx,
+            crate::source::Backoff::new(
+                Duration::from_secs(3_600),
+                Duration::from_secs(3_600),
+                0.0,
+            ),
+            stop,
+            Arc::default(),
+        )
+        .await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn the_broker_is_asked_again_within_a_minute_at_most() {
+        let mut backoff = broker_backoff();
+        let waits: Vec<u64> = (0..12).map(|_| backoff.next_wait().as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60, 60, 60, 60]);
+    }
+}

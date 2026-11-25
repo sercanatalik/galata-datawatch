@@ -61,6 +61,17 @@ pub const ROTATE_AFTER_SECS: u64 = 8 * 60;
 /// lifetime with it as without.
 pub const PING_INTERVAL_SECS: u64 = 20;
 
+/// How soon the venue answers a ping: with a `{"channel":"pong"}` frame.
+///
+/// **Ten times what was seen.** Measured on 2026-11-25 over nine instruments
+/// (`design/measured.md`): pongs every 20.05 s at the median, and no healthy
+/// socket silent between any two frames for longer than 1.51 s. A ping
+/// unanswered for this long is a dead connection. Set too short, a slow answer
+/// costs a reconnect and a gap over time that may have been covered, which is
+/// the safe direction; a true death goes unnoticed for at most
+/// `PING_INTERVAL_SECS + PONG_WITHIN_SECS`.
+pub const PONG_WITHIN_SECS: u64 = 10;
+
 // Relationships between the constants, checked at COMPILE time. A test
 // comparing them asserts nothing at runtime and would pass whatever the values
 // became.
@@ -71,6 +82,18 @@ const _: () = assert!(
 const _: () = assert!(
     OBSERVED_LIFETIME_SECS - ROTATE_AFTER_SECS >= 60,
     "less than a minute of margin inside the venue's observed lifetime"
+);
+const _: () = assert!(
+    PONG_WITHIN_SECS < PING_INTERVAL_SECS,
+    "a pong may arrive after the next ping is due, so one answer cannot be told from the next"
+);
+const _: () = assert!(
+    PING_INTERVAL_SECS + PONG_WITHIN_SECS < ROTATE_AFTER_SECS,
+    "a dead connection would not be found before the handover it should not be part of"
+);
+const _: () = assert!(
+    ROTATE_AFTER_SECS + PONG_WITHIN_SECS < OBSERVED_LIFETIME_SECS,
+    "a handover waiting for the old connection's answer would outlive the venue's lifetime"
 );
 
 /// The venue's label as a bar width. The inverse of
@@ -284,6 +307,7 @@ impl Construct for Hyperliquid {
                 observed_lifetime_secs: OBSERVED_LIFETIME_SECS,
                 rotate_after_secs: ROTATE_AFTER_SECS,
                 keepalive_secs: PING_INTERVAL_SECS,
+                reply_secs: Some(PONG_WITHIN_SECS),
             },
             ws_url: config.market.ws_url(),
             rest_url: config.market.rest_url(),
@@ -496,6 +520,17 @@ mod tests {
             None,
         )
         .expect("the shipped configuration must construct")
+    }
+
+    #[test]
+    fn the_venue_declares_how_soon_it_answers_a_ping() {
+        // What lets capture tell a dead connection from a quiet market. The
+        // relationships between these are compile-time assertions above; this
+        // is that the declaration a capture reads carries them.
+        let connection = shipped().declaration().connection;
+        assert_eq!(connection.keepalive_secs(), PING_INTERVAL_SECS);
+        assert_eq!(connection.reply_secs(), Some(PONG_WITHIN_SECS));
+        assert_eq!(connection.rotate_after_secs(), Some(ROTATE_AFTER_SECS));
     }
 
     #[test]

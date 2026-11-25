@@ -137,7 +137,10 @@ impl RhChain {
                     min_historical_interval_ms: 250,
                 },
                 // No socket, so no lifetime and no rotation.
-                connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 0 },
+                connection: ConnectionPolicy::KeepAliveOnly {
+                    keepalive_secs: 0,
+                    reply_secs: None,
+                },
                 ws_url: "",
                 // **The declaration's own field stays the public default.**
                 // It is a compiled-in identity used for reporting; the

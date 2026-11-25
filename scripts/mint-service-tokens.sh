@@ -23,7 +23,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/vault-tools.sh
 source "$ROOT/scripts/lib/vault-tools.sh"
-ENV="galata-datawatch/prod"
+ENV="$(vault_env)"
 TOKENS="$ROOT/var/tokens"
 TTL="365d"
 

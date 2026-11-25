@@ -160,6 +160,24 @@ path through it:
   `Cursor::{Time, Block, Seq}`, which makes a blockchain venue a first-class
   source rather than a special case.
 
+**A silence is not a gap; a dead connection's is.** A connection can die
+without closing — a change in the host's network did exactly that to a
+container's on 2026-11-25 — and a quiet market and a dead connection deliver
+the same nothing. What tells them apart is the venue's keepalive:
+
+- **A quiet market on a live connection is never a gap**, however long.
+- **A venue that declares how soon it answers its keepalive**
+  (`ConnectionPolicy::reply_secs`; Hyperliquid answers its 20-second ping
+  within 10 seconds) is dead once one goes unanswered for that long, with no
+  frame of any kind since. Capture records a `session_lost` gap for every pair,
+  each from its own last receipt, and connects again at once. A death is found
+  within the keepalive interval plus the reply time.
+- **A handover claims continuity only across a live connection.** The one being
+  replaced is asked to show it is alive after its replacement is subscribed;
+  if it shows nothing within the reply time, its silence is a `session_lost` gap
+  up to the replacement's subscription, not coverage.
+- **A venue that declares no reply time** has nothing inferred from its silence.
+
 Normalised events are published on NATS as `markets.<venue>.<ticker>.<kind>`,
 and each capture reports its own health on `status.<venue>`. The two roots are
 granted separately, so a dashboard can read status without the market-data
@@ -224,7 +242,9 @@ worked example that compiles.
 checks that claim: cargo builds the file as a separate crate, so it sees only
 what an outside user sees. If a venue needs something private, the compiler
 names it. docs.rs builds with `all-features = true`, so every venue is
-documented and each gated item shows the feature it needs.
+documented and each gated item shows the feature it needs. A streaming venue
+of your own states whether it answers its keepalive, and how soon
+(`ConnectionPolicy`'s `reply_secs`); `None` keeps its silence uninterpreted.
 
 ---
 
@@ -325,17 +345,16 @@ configuration names a broker password, it fetches that secret once too. The
 capture loop never holds the vault or the credential.
 
 ```sh
-# Install the published galata-vault tools, 0.5.0 or later, into ~/.cargo/bin.
+# Install the published galata-vault client, 0.5.0 or later, into ~/.cargo/bin.
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-installer.sh | sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/sercanatalik/galata-vault/releases/latest/download/gv-server-installer.sh | sh
 
 # Provision a project and environment. Keep the recovery kit gv init writes.
-gv-server local
+# For a trial, against a vault of your own (`gv-server local`, from its own
+# installer). The deployment's is the hosted vault: see "Running as services".
 gv init galata-datawatch --server http://127.0.0.1:8750
-gv env add galata-datawatch/prod
-gv config set datawatch --format toml --env galata-datawatch/prod < config/datawatch.toml
+gv env add galata-datawatch/mainnet
+gv config set datawatch --format toml --env galata-datawatch/mainnet < config/datawatch.toml
 ```
 
 The binary opens the vault through the SDK's environment contract: set
@@ -344,13 +363,13 @@ must be mode `0600` or `0400`. Mint the smallest token the document needs:
 
 ```sh
 # No [broker] block: configuration documents only.
-gv token mint --scope config --env galata-datawatch/prod
+gv token mint --scope config --env galata-datawatch/mainnet
 
 # With [broker]: the document, plus only the named broker secret.
 printf %s "$BROKER_PASSWORD" | \
-  gv set GALATA_DATAWATCH_PASSWORD --env galata-datawatch/prod
+  gv set GALATA_DATAWATCH_PASSWORD --env galata-datawatch/mainnet
 gv token mint --scope read --only GALATA_DATAWATCH_PASSWORD \
-  --env galata-datawatch/prod
+  --env galata-datawatch/mainnet
 ```
 
 `password_var` names an environment variable for the file binary, and a vault
@@ -361,6 +380,23 @@ server policy, not a second encryption boundary.
 The broker secret is kept out of the capture process's environment. The
 generated NATS authorization file still reads it from the NATS server's
 environment.
+
+**Archiving never waits for the broker.** Capture archives from its start
+whether the broker answers or not, and what it does about the broker
+depends on how the broker answers:
+
+- **No answer at the start** (down, or a tailnet name that does not resolve
+  while the tailnet is down): capture says so once and keeps asking in the
+  background, after 1, 2, 4 … seconds and never more than a minute apart. It
+  publishes once the broker answers, with no restart. Events produced
+  meanwhile wait in the `queue`-sized channel and are dropped and counted in
+  the status's `sink_dropped` once it is full.
+- **An answer that refuses the identity**: a misconfiguration that will not fix
+  itself. Capture does not start, or, if the refusal comes on a later attempt,
+  flushes and stops, exiting non-zero with the identity and the password's
+  variable named.
+- **A connection that drops after it was made** is reconnected by the client,
+  with capture archiving throughout.
 
 ### Scheduled maintenance
 
@@ -377,6 +413,9 @@ whose flows only call the release binaries as subprocesses.
 | `judge-the-record` | `galata-watch` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
 | `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity`, `backtest` and `realvol`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
+
+As a service, the lane runs in its container (Services in containers, below).
+By hand, for development:
 
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
@@ -486,7 +525,6 @@ rendered from one tracked template and restarted whenever they exit.
 
 | Service | Listens on | Reads |
 |---|---|---|
-| `vault` (`gv-server local`) | `127.0.0.1:8750` | its data directory, `~/.local/share/galata-vault` |
 | `nats` | `127.0.0.1:4222` | all three broker passwords |
 | `capture:<venue>` | outbound only | its venue's configuration and credentials |
 | `tower` | `127.0.0.1:8777` | the `reader` broker password |
@@ -495,7 +533,7 @@ rendered from one tracked template and restarted whenever they exit.
 ```sh
 cargo build --release --workspace --bins           # every binary, never one: the lane runs them in place
 (cd ../galata-tower && cargo build --release)
-scripts/install-services.sh                        # vault, nats, capture:hyperliquid, tower, flows
+scripts/install-services.sh                        # nats, capture:hyperliquid, tower, flows
 scripts/install-services.sh capture:rh-chain       # add a venue
 scripts/install-services.sh --uninstall tower      # remove one
 scripts/install-services.sh --status               # every com.galata.* agent, whether it would restart, twins, token expiry, stale builds
@@ -503,11 +541,20 @@ scripts/run-service.sh --check tower               # a start's preconditions, to
 scripts/vet-config.sh new.toml                   # would every deployed binary accept this document? ask first
 ```
 
-First-time setup on a new machine, after `scripts/install-services.sh vault`:
+The vault is not one of these services. Secrets come from the hosted vault,
+which [galata-vault](https://github.com/sercanatalik/galata-vault) runs in a
+container of its own (`deploy/apple-container`), on this Mac's loopback at
+`127.0.0.1:8750` and on the tailnet. `--uninstall vault` removes the agent
+of the vault this deployment once ran itself.
+
+First-time setup on a new machine, once the hosted vault answers:
 
 ```sh
-scripts/provision-vault.sh        # project galata-datawatch, env .../prod, secrets imported
-scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 365 days
+cp config/secrets.env.example var/broker.env && chmod 600 var/broker.env   # then give each name a value
+scripts/provision-vault.sh <vault address>   # project galata-datawatch, env .../prod, every secret var/broker.env gives a value
+scripts/required-secrets.sh --missing        # the names the project still lacks; none, before a service is installed
+scripts/mint-service-tokens.sh               # var/tokens/<service>.gvt, mode 0600, valid 365 days
+scripts/carry-secrets.sh --from … --to … NAME …   # what lives nowhere but another vault: a ledger's addresses and fingerprint key
 ```
 
 - **Each service reads only its own secrets**, through a token minted for it
@@ -519,10 +566,13 @@ scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 3
   which this machine holds, so `gv run` gave any service every secret. From
   0.5.0 it uses the token or refuses, and refuses a name outside the token's
   allow-list rather than starting the command without it.
-- **The vault's tools are the installed release.** The scripts run `gv` and
-  `gv-server` from `~/.cargo/bin`, where the installers put them; set
-  `GALATA_VAULT_BIN` to use another directory. No galata-vault checkout is
-  needed.
+- **The vault's client is the installed release.** The scripts run `gv` from
+  `~/.cargo/bin`, where its installer puts it; set `GALATA_VAULT_BIN` to use
+  another directory. No galata-vault checkout is needed, and these scripts
+  start no vault server.
+- **A vault that does not answer is not a refused token.** A service does
+  not start without its secrets, and its log says which of the two it was:
+  start the vault, or re-mint the token.
 - **The recovery kit** is written to `var/galata-datawatch-recovery.gvkit`.
   It is the only way to recover the project, so move it to offline storage
   and delete that copy.
@@ -545,6 +595,60 @@ scripts/mint-service-tokens.sh    # var/tokens/<service>.gvt, mode 0600, valid 3
   archive.
 
 Logs are written to `var/logs/<service>.log`.
+
+### Services in containers
+
+Every service but the tower runs in a container of its own, under Apple's
+[`container`](https://github.com/apple/container) (1.7 or later, started
+once by hand so it can install its kernel). Its line in
+`var/containers.conf` states its CPUs and memory. A service with no line does
+not start, and the refusal names the service and the missing limit: there is
+no native start to fall back to. The tower runs natively until it is
+retired.
+
+```sh
+scripts/build-images.sh                                  # galata-datawatch, galata-nats, galata-flows
+cp config/containers.conf.example var/containers.conf    # then check each service's CPUs and memory
+scripts/run-service.sh --check capture hyperliquid       # the whole line it would start; starts nothing
+scripts/install-services.sh capture:hyperliquid          # restart it, now in its container
+scripts/install-services.sh --status                     # CONTAINER: state, image, the tree it was built from, limits
+```
+
+| Service | Image | Is given | Reached at |
+|---|---|---|---|
+| `capture:<venue>` | `galata-datawatch` | the archive and the status folder | nowhere |
+| `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
+| `nats` | `galata-nats` | the generated authorization file | this Mac's tailnet name, port 4222 |
+| `flows` | `galata-flows` | the archive, the tape and a volume of its own | nowhere |
+
+- **The limits are stated, never defaulted.** A container given none gets
+  4 CPUs and 1 GiB whatever it runs. A service's line states both, and a
+  line that states one is refused by name.
+- **Secrets arrive on standard input.** `run-service.sh` reads a service's
+  secrets on the Mac with that service's token, and writes them to the
+  container, where `with-secrets` receives them. No token
+  enters a container. Not `container run -e`: Apple's container writes what
+  it is passed that way into its own state, where `container inspect` shows
+  it.
+- **The broker answers at this Mac's tailnet name and nowhere else.** Its
+  port is published on the tailnet address, which a container and another
+  machine both reach; `tailscale serve` does not answer a container. While
+  the tailnet is down the broker is refused, not published elsewhere. Set
+  `[broker] url` to `nats://<this Mac's tailnet name>:4222` when it moves;
+  the tower reads the same line.
+- **A container is given its own roots**, where `[paths]` and `[ledger]` put
+  them, and a copy of the configuration taken at each start. A root that
+  does not exist is refused, never created.
+- **The lane runs five flows in a container, not seven.** Deriving the
+  signals and refreshing the reference data need galata-research, and are
+  left out of the image. They stop running when the lane moves.
+  `container exec galata-flows cereyan runs ls` looks at the lane.
+- **Images are built from a tree someone can name.** `build-images.sh`
+  refuses uncommitted work, labels each image with `git describe`, and
+  gives the builder 8 CPUs and 12 GB: at its default 2 GB the linker is
+  killed.
+- **A check starts nothing.** `scripts/check-container-launch.sh` holds the
+  rules above against the launcher's own text and the lines it would start.
 
 ---
 

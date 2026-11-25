@@ -180,8 +180,9 @@ impl NatsSink {
     /// Wrap a sender, and say how many events may be outstanding.
     ///
     /// The capacity is **exactly the number of events a broker stall can
-    /// swallow before they start being dropped**, so it is declared by an
-    /// operator rather than defaulted by us.
+    /// swallow before they start being dropped** — a broker that is slow, or
+    /// one not yet reached since the start (`boot::reach_broker`) — so it is
+    /// declared by an operator rather than defaulted by us.
     pub fn new(tx: tokio::sync::mpsc::Sender<Outbound>) -> NatsSink {
         NatsSink {
             tx,
@@ -189,7 +190,8 @@ impl NatsSink {
         }
     }
 
-    /// How many events have been dropped because the broker was behind.
+    /// How many events have been dropped because the broker was behind, or
+    /// had not yet answered.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -207,7 +209,7 @@ impl NatsSink {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1;
                 Err(SinkError::Refused(format!(
-                    "the broker is behind capture; {n} events dropped so far"
+                    "the broker is behind capture, or has not answered yet; {n} events dropped so far"
                 )))
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(SinkError::Refused(

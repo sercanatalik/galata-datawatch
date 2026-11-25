@@ -3,7 +3,7 @@
 # A SERVICE IS HANDED ITS SECRETS BY A `gv` THAT HONOURS ITS TOKEN, UNDER NAMES
 # A PROCESS CAN HOLD.
 #
-# Three things, each of which fails silently if it fails at all:
+# Four things, each of which fails silently if it fails at all:
 #
 #   1. **The version floor refuses an older gv.** Before galata-vault 0.5.0,
 #      `gv run` ignored a token file and read through the owner key, so every
@@ -20,6 +20,13 @@
 #   3. **No script reaches for a galata-vault checkout.** The scripts run the
 #      installed release (GALATA_VAULT_BIN). A path into a sibling source tree
 #      is a deployment that runs whatever was last built there.
+#
+#   4. **The template names every secret, and holds none.** A fresh vault
+#      project is filled from config/secrets.env.example. A name missing
+#      from it is a service started without that secret; a value left in it
+#      is a secret in version control. So the committed copy must be exactly
+#      what scripts/required-secrets.sh --template prints for the committed
+#      configuration, and no line of it may carry a value.
 #
 # What it cannot check: that the installed gv really is what its version says,
 # and that the vault enforces a token's allow-list. Those are measured against
@@ -102,5 +109,19 @@ done < <(grep -nE 'GALATA_VAULT_ROOT|galata-vault[^ ]*/target/|galata-vault-exec
             "$ROOT"/scripts/*.sh "$ROOT"/deploy/launchd/* 2>/dev/null \
          | grep -Ev "^$ROOT/scripts/($me|test-guards\.sh):" || true)
 
+# --- 4. the template ------------------------------------------------------
+TEMPLATE="$ROOT/config/secrets.env.example"
+if [[ ! -f "$TEMPLATE" ]]; then
+    say "no $TEMPLATE: a fresh vault project has nothing to be filled from"
+else
+    want="$("$ROOT/scripts/required-secrets.sh" --config "$ROOT/config/datawatch.toml" --template 2>&1)" \
+        || say "required-secrets.sh --template failed: $want"
+    [[ "$want" == "$(cat "$TEMPLATE")" ]] \
+        || say "config/secrets.env.example is not what required-secrets.sh --template prints for the committed configuration: a name a service reads is missing from it, or one nobody reads is in it — scripts/required-secrets.sh --config config/datawatch.toml --template > config/secrets.env.example"
+    while IFS= read -r line; do
+        say "config/secrets.env.example gives ${line%%=*} a value: the template holds names, and a value there is a secret in version control"
+    done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=.+' "$TEMPLATE" || true)
+fi
+
 if (( fails > 0 )); then exit 1; fi
-echo "$me: ok — an older gv is refused, every secret name can be a variable, and no script reaches for a checkout"
+echo "$me: ok — an older gv is refused, every secret name can be a variable, no script reaches for a checkout, and the template names every secret and holds none"

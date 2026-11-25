@@ -4520,3 +4520,638 @@ install-services.sh --status                every service ready to start again;
 The first `flows` start refused four times, by name: `py/signals` is locked
 to a `galata-research` checkout beside this one, and a new machine has none.
 Cloning it there was the whole fix.
+
+## Services in containers — before any service moved, 2026-11-24
+
+`containerise-host-services`. Each service is to run in a container of its
+own, under Apple's `container`, reached by the host's tailnet name. Every
+figure below was taken before anything moved, so that the design rests on
+what the tools do and not on what their documentation suggests.
+
+**The service machine, and nothing of the deployment was touched.** The
+Mac mini that hosts the deployment, 64 GiB and 18 cores (said here as an
+earlier version of this section had it wrong); Apple container 1.7.1; the Tailscale app 1.104.7;
+nats-server 2.15.3. Throwaway containers, scratch archives, stand-in values
+for secrets. No agent was loaded or unloaded, and the vault was stopped
+throughout. What follows is true of the tools on that machine. A second
+tailnet device, tailnet ACLs and the clock after a sleep are not measured.
+
+**Reaching a service from a container.** The reason a reached service
+publishes on the tailnet address, and the reason `tailscale serve` is not
+the path between containers.
+
+```text
+a container resolves the Mac's tailnet name            yes, to its tailnet address
+a container -> an ordinary listener on that address    connected, 1 ms
+the Mac itself -> tailscale serve, HTTP and raw TCP    answered, with the owner's identity headers
+a container -> tailscale serve, by name and address    timed out, HTTP and raw TCP
+a container -> a port published on the tailnet address
+    by name                                            9.4 ms first, then 0.19 ms median, 0.58 ms p99 (300 requests)
+    by address                                         0.18 ms median, 0.22 ms p99
+the Mac itself -> that port on loopback                no answer
+what the service sees as its caller                    the container gateway, whoever calls
+```
+
+**A secret handed to a container.** `container run` has no secrets option.
+
+```text
+-e NAME, inherited from the launcher's environment
+    in a host argument list                            no
+    in the container tool's state                      two files, mode 0644, while the container exists
+    in `container inspect`                             printed
+standard input, to an entrypoint that exports and execs (with-secrets)
+    the service receives the value                     yes
+    in the container tool's state                      no
+    in `container inspect`                             no
+    in a host process's arguments or environment       no
+    SIGTERM at the `container run` process             reaches the service
+    left beneath the service                           one defunct process: the writer, once done
+```
+
+**What a container can be given.**
+
+```text
+a file, read-write (-v file:path)                      works
+a file, read-only                                      refused ("is not a directory"), or silently not mounted (:ro)
+a folder, read-only (--mount ...,readonly)             works, and a write is refused
+a folder's mode, seen inside                           kept (0700 stays 0700)
+a folder's owner, seen inside                          root, whatever the image's user
+writing to a 0700 folder as another user               allowed: the host user's rights are what apply
+a new volume                                           mode 755, owned by root; the image's user cannot write
+    after one `chown` as root                          writable, and it keeps what was written
+no limit stated                                        4 CPUs and 1,024 MB
+--memory below 200M                                    refused: "minimum memory amount allowed is 200 MiB"
+.dockerignore                                          honoured: var/, target/ and .git are not sent to a build
+```
+
+**Building the image.** The release profile keeps debug information, and the
+link is where the memory goes.
+
+```text
+builder at its default, 2 CPUs and 2 GB                the linker is killed (signal 9) linking galata-datawatch
+builder at 8 CPUs and 12 GB                            51 s
+a build that names no size                             the builder returns to its default, and its cache with it
+```
+
+**Capture, natively and in a container, side by side.** One instrument (BTC),
+no broker, ten minutes, each into a scratch archive; the container at 2 CPUs
+and 1 GiB. Trades are compared because each carries an id.
+
+```text
+                                        native         in a container
+files written                           1,096          1,103
+quotes segments (flush_secs = 2)        278            278
+trades in the run                       1,548          1,548
+distinct trade ids                      1,518          1,518      all in both, none in only one
+receipt lag, quotes, p50 / p99          332 / 604 ms   318 / 533 ms
+receipt lag, trades, p50                360 ms         339 ms
+container receipt minus native, the same trade         median -17 ms, p10 -80 ms, p90 +7 ms
+SIGTERM to exit                         0.13 s         0.15 s
+"asked to terminate; stopping cleanly"  logged         logged
+.clean-shutdown written                 yes            yes
+last row before the stop                1.46 s         1.44 s     the same rows
+the container's clock against the Mac's                inside the 76 ms it took to ask
+```
+
+The container did not receive later. The 17 ms in its favour is what two
+connections to one venue differ by, not a property of containers.
+
+**A tape rebuild of one day, natively and in a container.** 2026-11-18, nine
+instruments, 151 MB of compacted archive, copied into a fresh root per run;
+the container at 4 CPUs. `galata-tape-rebuild --replace hyperliquid
+2026-11-18`.
+
+```text
+native, three runs                      30.5 s, 30.8 s, 30.6 s     peak 8.6 GiB
+in a container given 4 GB               killed after 179 s          nothing written
+in a container given 12 GB, two runs    18.5 s, 18.6 s             peak 6.5 GiB
+the tapes                               2,291 files, 129 MB, byte for byte the same in all five
+
+three days in one run, 2026-11-17 to 2026-11-20 (519 MB of archive), which is the shape of the hourly projection
+native                                  58.9 s                     peak 10.2 GiB
+in a container given 24 GB              60.6 s                     peak 8.2 GiB
+the tapes                               2,306 files, byte for byte the same
+```
+
+The mounted folder is not what a rebuild waits on. Its memory is: a lane
+given less than a rebuild holds does not run slowly, it is killed. Three
+days hold little more than one (8.2 GiB against 6.5), so the limit follows
+the largest day in the window, not the window's length.
+That day held trades, a fifth of its rows, which are not captured from
+2026-11-24; the figure for a day captured since is somewhat lower and not
+yet measured.
+
+**What was captured, and what it would be at fifty instruments.** One full
+day, 2026-11-18, nine instruments; scaled linearly, which overstates it,
+since the nine include the busiest markets.
+
+```text
+                rows       tape       at fifty: rows    tape
+quotes          3.26M      71 MiB     18.1M             396 MiB
+trades          1.09M      23 MiB     6.1M              125 MiB
+marks           0.54M      10 MiB     3.0M              55 MiB
+funding         0.54M      7 MiB      3.0M              39 MiB
+candles         0.33M      7 MiB      1.9M              38 MiB     96% are updates to the forming bar
+all             5.77M      118 MiB    32M               650 MiB
+without trades                        26M               530 MiB    about 300 events a second on the bus
+```
+
+`trades` left the `series` line on 2026-11-24: nothing that runs reads
+them. `quotes` stays: the top of book as it moved can be fetched from
+nowhere afterwards.
+
+## The scheduling lane in its container — its first runs, 2026-11-24
+
+`containerise-host-services`. The first service moved: `flows` listed in
+var/containers.conf at 4 CPUs and 12 GB, installed as `com.galata.flows`,
+from the images built at `65aa324`. The same Mac as the section above, where
+capture has not run since 2026-11-19, so nothing new was arriving to project.
+
+```text
+the launchd job's process                    container
+the container                                running, 4 CPUs, 12,288 MB, no twin
+flows registered                             5 (derive-the-signals and update-the-reference are not in the image)
+published ports                              none
+its environment                              no password, no token, nothing of the vault's
+first start                                  made the volume galata-flows-state and a 0700 copy of the configuration
+
+compact-the-archive                          completed, 6.7 s
+project-the-recent-days                      completed, 1.4 s        nothing in its window to project
+rebuild-one-day, 2026-11-19                  FAILED after its three retries, 13 min 54 s
+    the day's five market datasets           rewritten on the first attempt, peak 8.1 GiB, no memory kill
+    against a clean native rebuild           byte for byte the same, all five
+judge-the-record                             FAILED, 9 findings
+the 23:20 compaction, queued behind the rebuild   ran when it ended: one writer at a time, as declared
+```
+
+**Neither failure is the container's.** Both name the same nine pairs of
+segments in `var/tape/kind=signals/date=2026-11-18`, which claim overlapping
+sequences. They were written natively on 2026-11-18, and the judge run
+natively against the same record reports the same nine. The rebuild writes
+its day, then checks the tape, finds them, and exits 1; so on this record
+every rebuild fails after doing its work, in a container or out of one.
+
+**With the signals partition out of the tape, both pass.** `kind=signals`
+was moved whole to `var/tape.set-aside/`, with nothing deleted and a note
+beside it; signals are set aside for now.
+
+```text
+judge-the-record                             completed, 1.6 s        nothing to report
+rebuild-one-day, 2026-11-19                  completed, 20.7 s       peak 8.1 GiB, no memory kill
+    the day's tape, before and after         byte for byte the same
+project-the-recent-days, on its schedule     completed at 23:40, 1.1 s
+```
+
+Not shown here: the tape's frontier advancing under the lane, which needs
+capture to be running.
+
+## Carrying secrets between two vaults — against throwaway vaults, 2026-11-25
+
+`containerise-host-services`. `carry-secrets.sh` is for the secrets that live
+nowhere but a vault: a ledger's account addresses and its fingerprint key,
+which the ledger's record is keyed by. The broker's passwords are in
+var/broker.env and are imported, not carried.
+
+**Not the deployment's vault.** Two `gv-server local` (0.5.1) on scratch data
+directories at loopback ports 18751 and 18752; one project named
+`galata-datawatch` in each, under a scratch home apiece, with
+`GV_CREDENTIAL_STORE=file`, so the owner keys were files there and the
+Keychain was never touched. Five secrets in the source: three shaped like the
+deployment's (a password, an address, a 64-hex key), one ending in a newline,
+and one that is not text (0xff 0xfe 0x00 'A' and two newlines).
+
+```text
+what gv does with a value's end                  `set` stores its input as given; `get` prints it with nothing added
+a second project of the same name, one home      refused: "a project named … is already configured here"
+a vault's data directory at mode 0755            refused by gv-server: it must be 0700
+
+carry, with GV_TOKEN_FILE and GV_SERVER set in the caller's environment
+    all five                                     carried, and the same in both vaults, byte for byte
+    a value in what it printed                   none
+a name the source does not hold, among others    refused; nothing set in the destination
+"no" at the pause                                refused; nothing set in the destination
+an environment carried onto itself               refused
+
+--pause, with the source vault stopped while the values waited
+    the source answers                           no
+    all five                                     arrived, the same as the copy checked against the source
+    a value in what it printed                   none
+```
+
+Not measured: that no value is in a host process's arguments while it waits.
+The check counted its own search, and the search of the test's folders was
+stopped when it read the test's own named pipe. By construction a value goes
+from `gv get` to `gv set` on pipes, and neither is given one as an argument.
+
+## The hosted vault, provisioned fresh — 2026-11-25
+
+`containerise-host-services`, design D12. The vault this deployment ran
+itself is retired and its keys deleted: the owner key in the Keychain, the
+recovery kit, the three service tokens and `gv`'s local state. Nothing was
+carried out of it. The hosted vault (galata-vault's `deploy/apple-container`)
+was initialised and started by the maintainer; this Mac publishes it on
+loopback 8750 and behind `tailscale serve` on the tailnet name.
+
+```text
+var/broker.env                         filled from config/secrets.env.example, three new random passwords, 0600
+provision-vault.sh <https tailnet name>
+    the project                        created, pinned to the vault's https:// tailnet name
+    galata-datawatch/prod              created; all three broker passwords set
+required-secrets.sh --missing          ok: the project holds every secret a service reads
+mint-service-tokens.sh                 nats, capture-hyperliquid, tower; expire 2027-11-25
+
+each token, its own secret             over loopback 8750     at the https:// tailnet name
+    nats, all three                    the same as var/broker.env, byte for byte, both ways
+    capture-hyperliquid, its own       the same, both ways
+    tower, the reader's                the same, both ways
+tower's token, asking for capture's    refused: not in this token's allow-list
+capture's token, asking for reader's   refused: not in this token's allow-list
+run-service.sh --check                 nats, capture hyperliquid and tower: ready
+```
+
+A token minted under the `https://` name reads over loopback, so the
+launchers need no tailnet to start a service here. Not measured: a read
+with Tailscale stopped, which would interrupt this Mac's tailnet.
+
+## The broker and capture in containers — their first starts, 2026-11-25
+
+`containerise-host-services`, tasks 6 and 7. `nats` listed at 1 CPU and
+256 MB and `capture:hyperliquid` at 2 CPUs and 2 GB; both installed as their
+launchd agents from the images built at `65aa324`. `[broker] url` in the
+deployment's configuration names this Mac's tailnet name. Neither had run
+since 2026-11-19, and nothing natively was replaced.
+
+```text
+the broker
+    the launchd job's process                    container
+    published                                    on the tailnet address only, port 4222
+    from this Mac, at the tailnet name/address   NATS 2.15.3 answers, auth required
+    from this Mac, on loopback                   refused
+    from this Mac, at its local network address  refused
+    from another container, name and address     answers
+    reader, its own password                     +OK, PONG
+    reader, a wrong password (Mac, container)    -ERR 'Authorization Violation'
+    capture's user, the reader's password        -ERR 'Authorization Violation'
+    reader subscribing to markets.>              -ERR 'Permissions Violation'
+    reader subscribing to status.>               8 messages in 8 s, status.hyperliquid
+    its three passwords: container tool's state, `container inspect`, host processes    none, none, none
+
+capture
+    connected                                    to the broker at the tailnet name, publishing
+    its password, inside the container           held by galata-datawatch alone; no other vault name
+    its password: container tool's state, `container inspect`, host processes           none, none, none
+    archive files                                +29 in 20 s
+
+the broker stopped with one SIGTERM, capture running
+    the broker                                   "Initiating Shutdown", exited; launchd restarted it at once
+    capture                                      the same process throughout; archive +11 files in 6 s
+    capture's connection                         disconnected, then connected again within 1.1 s
+    publishing afterwards                        4 status messages in 4 s
+
+capture stopped with one SIGTERM
+    "asked to terminate; stopping cleanly"       logged
+    .clean-shutdown                              written in the same second
+    the container gone                           0.2 s after the signal (launchd allows 20 s)
+    launchd                                      started it again, last exit 0, publishing within 1 s
+```
+
+**Three signals are a kill, not three stops.** On the first restart three
+SIGTERMs reached capture's `container run` inside a second (an operator
+error, not launchd's). Apple's `container run` answered "Received 3
+SIGINT/SIGTERM's, forcefully exiting", and capture logged no clean stop for
+that run: at most its last two seconds of unflushed rows were lost, and its
+next start covered the window as a gap. launchd sends one signal, which
+stops it cleanly as above. Anyone stopping a containerised service by hand
+sends one, and waits.
+
+Not measured here: the broker refused while the tailnet is down, and capture
+starting with the tailnet down. Each would take this Mac off the tailnet.
+
+## The final shape — 2026-11-25
+
+`containerise-host-services`, tasks 3.4, 3.6, 4.2, 8.1 and 8.4. The same Mac,
+with the broker, capture and the lane in their containers since the morning,
+and the hosted vault restarted once at midday.
+
+**The clock.** Each container's clock against the Mac's, the best of five
+asks; the error is half the round trip. The broker's image has BusyBox's
+`date`, which prints whole seconds, so its figure is taken at the tick of a
+second instead.
+
+```text
+the Mac's own setting                        never sleeps on power (sleep 0); no sleep logged since 2026-11-22
+                                             autorestart 0: after a power cut it stays off until switched on
+gw-api, up 3 days                            +15.7 ms   (+/- 20.5 ms)
+galata-capture-hyperliquid, up 5 hours       +19.7 ms   (+/- 24.1 ms)
+galata-nats, at a second's tick              +15.1 ms   (+/- 22 ms, four the same)
+galata-flows, up 17 hours                    +23.1 ms   (+/- 29.1 ms)
+galata-vault, up 3 hours                     +19.9 ms   (+/- 25.5 ms)
+```
+
+Every container agrees with the Mac to within the asking, and the one up
+three days agrees as closely as the one up three hours. After a sleep and
+wake is not measured: this Mac has not slept, and is set not to.
+
+**The lane on a running capture.** Its own run list (`container exec
+galata-flows cereyan runs ls`), and the tape it wrote.
+
+```text
+every hourly run from 12:20 to 15:40          completed
+    project-the-recent-days                   9.3 s to 12.7 s
+    compact-the-archive                       5.3 s
+    judge-the-record                          2.1 s to 2.2 s
+today's quotes in the tape, after 14:40       945,788 rows, up to 14:40:00
+                     after 15:40              1,260,866 rows, up to 15:39:59
+```
+
+The quotes start at 10:54:16, when capture first ran in its container:
+there was none on this Mac from 2026-11-19 until then, and quotes cannot be
+fetched afterwards. Funding's time is the settlement it belongs to and marks
+carry none, so both read as stopped by their times and are not: their rows
+were received up to 15:39:59, as on 2026-11-18. The tape's file names name
+the capture run that wrote them, not the span they hold.
+
+**The final limits.** What each service was seen to use, against what it is
+given.
+
+```text
+                          in use                        given        from
+flows                     0.55 GiB between runs;        4, 12G       a day's rebuild: 6.5 and 8.1 GiB; the
+                          1.82 GiB at the 16:40                      three-day projection: 8.2 GiB (above)
+                          projection, whose window
+                          held quotes for today only
+nats                      27 MiB                        1, 256M
+capture:hyperliquid       210 MiB, nine instruments     2, 2G        room for fifty, if it grows with them
+ledger                    none declared                 not set
+galata-vault              35 MiB                        4, 1G        galata-vault's own
+gw-api, gw-lane           17 MiB, 410 MiB               4, 1G each   galata-watcher's own
+the image builder         9.8 GiB while idle            8, 12G       up since the last build
+together                                                17.25G, and 29.25G with the builder, of 64 GiB
+```
+
+Compaction and the judge stayed under 0.6 GiB through the hour sampled.
+The builder holds its memory until it is stopped (`container builder
+stop`); nothing else is near its limit.
+
+**No line, no start.** With the native starts removed, a service is refused
+by name when its line is missing, before anything is started or written.
+
+```text
+--check, with var/containers.conf as it is    nats, capture hyperliquid and flows: ready; the tower (native): ready
+--check, with every line gone
+    nats                                      REFUSED — … states no CPU or memory limit for nats, so it does not start
+    capture hyperliquid                       REFUSED — … for capture:hyperliquid, so it does not start
+    flows                                     REFUSED — … for flows, so it does not start
+--check, with no file                         REFUSED — no var/containers.conf, so no CPU or memory limit is stated for flows
+--status, with every line gone                RESTART: NO for each; CONTAINER: "NO — no CPU or memory limit for …"
+the containers running, before and after      the same seven
+```
+
+**The three specs, scenario by scenario, against the running deployment.**
+*Met* is seen on this Mac's deployment; *by stub* is held by a guard against
+stand-ins, because the real case would stop more than it tests; *not seen*
+is open, with the task that would see it.
+
+```text
+host-service-containers
+  A service is started                    met       one container, galata-capture-hyperliquid; inside it pid 1
+                                                    is `galata-datawatch hyperliquid` and nothing else
+  A container exits                       met       the broker and capture, each stopped once: launchd started them again
+  A leftover container holds the name     not seen  removed by the launcher before each start, and by the installer;
+                                                    no real leftover has been met since
+  Capture cannot see the ledger's record  met       capture mounts /app/var/archive, /app/var/status, /app/config only
+  The broker cannot see the record        met       the broker mounts /etc/galata only
+  A native reader sees what a container
+    wrote                                 met       the archive's newest files, listed natively, seconds old
+  The ledger's record is not owner-only   not seen  no ledger is declared here (task 7.5)
+  Capture is stopped                      met       one SIGTERM: a clean stop, .clean-shutdown in the same second
+  The container is gone after a stop      met       0.2 s after the signal
+  A stated limit is applied               met       for the three running services, as stated; the ledger has no line
+  No limit is stated                      met       refused by name, each service (above)
+  The image is missing                    met       "no image galata-absent:latest — scripts/build-images.sh"
+  Checking a service                      met       ready, and the same containers before and after
+  The container tool is stopped           by stub   check-container-launch.sh; stopping it here stops every container
+  The status report                       met       state, image, tree and limits for each
+  A service is not running                met       a stated ledger line with no container: "not running"
+
+host-service-addressing
+  A container on the host connects        met       capture to the broker at the tailnet name
+  A native process on the host connects   met       the reader, +OK and PONG
+  Loopback                                met       refused
+  The local network                       met       refused at the Mac's local address, asked from the Mac itself
+  Capture publishes nothing               met       no published port
+  The jobs lane's own interface stays
+    inside                                met       no published port; it answers inside the container
+  The tailnet is down                     met       refused at each attempt, "the tailnet is down"; nothing on 4222
+  The tailnet comes up                    met       started on launchd's next attempt, 5 s after (Tailscale stopped, below)
+  The broker moves                        met       the first start was at loopback; the configured url changed and,
+                                                    restarted, capture connected at the tailnet name, same image
+  A wrong credential from the host itself met       -ERR 'Authorization Violation', from the Mac and from a container
+  A right credential from another
+    machine                               not seen  needs a second tailnet device (task 3.5)
+  The tailnet goes down while capture
+    runs                                  met       since `capture-recovers-dead-connections`: the stream still dies
+                                                    at the change, and capture finds it and archives again within
+                                                    17 s, the silence a gap (Tailscale stopped and started again,
+                                                    below); before it, UNMET
+  Capture starts while the tailnet is
+    down                                  met       restarted with Tailscale stopped, it archived 47 s later and
+                                                    published once Tailscale was back, with no second restart
+
+service-secret-delivery
+  The tower's token cannot start capture  met       "this token's allow-list does not include
+                                                    GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID", exit 1
+  A service starts with its secret        met       capture holds its password and no other vault name
+  The service manager's signal reaches
+    the service                           met       one SIGTERM at the job's process: capture's clean stop
+  A value is in no argument list          met       none, for the broker's three and capture's
+  No host process holds the values        met       none
+  The container tool stores no value      met       none in its state, none in `container inspect`
+  A value with a line break               by stub   refused by the secret's name, under --check (task 2.3)
+  No galata-vault checkout                met       no script reaches for one (check-service-secrets.sh); provisioned,
+                                                    minted and installed with the installed gv 0.5.1
+  An older gv is installed                by stub   check-service-secrets.sh
+  gv is not installed                     by stub   check-service-secrets.sh
+  The deployment runs no vault of its own met       nothing installs one; --status lists none
+  Minting the service tokens              met       three tokens, 0600, each reading its own names and refused others
+  The mint result cannot be read          not seen  unchanged by this change: mint-service-tokens.sh refuses each
+                                                    case before it writes; not run again here
+  A token never enters a container        met       no token in any container's mounts or environment
+  The vault is stopped when a service
+    starts                                met       "the vault did not answer at http://127.0.0.1:8750" (task 2.6)
+  The vault answers again                 not seen  launchd retries every 10 s; no service restarted while the
+                                                    vault was down
+  The vault stops while services run      met       the vault was down from 12:41 to 12:51 for its UI's reset; the
+                                                    broker, capture and the lane ran on, untouched
+  Capture starts with the tailnet down    met       its secret read over loopback, its container started (below)
+```
+
+Unmet: none when this was read. Since read again after Tailscale was
+stopped (below): one unmet, the tailnet going down while capture runs. Not
+yet seen: the leftover container, the ledger's mode, capture archiving after
+a start with the tailnet down, the second device, the mint result, and the
+vault answering again.
+
+## Tailscale stopped — 2026-11-25
+
+`containerise-host-services`, tasks 5.5, 6.3 and 7.4, with the maintainer's
+go-ahead. Tailscale was stopped from its command line at 16:08:07 and
+started again at 16:09:08; each service was sent one SIGTERM through
+launchd. The broker, capture and the lane were running in their containers.
+
+```text
+16:08:07  Tailscale stopped
+          capture, running            its venue stream went silent that second: the last quotes file
+                                      before the restart was written at 16:08:08, and none in the 39 s after
+16:08:22  the broker, one SIGTERM     exited; then, at each of launchd's attempts:
+                                      "REFUSED — the tailnet is down (Tailscale reports 'Stopped') — start
+                                      Tailscale; nothing is published on another address in its place"
+          port 4222                   nothing listening, anywhere on this Mac
+16:08:47  capture, one SIGTERM        a clean stop; a new container at 16:08:48, Tailscale still stopped:
+                                      its secret read over the vault's loopback port
+          the broker                  "did not answer: DNS error" — the tailnet name does not resolve
+16:09:08  Tailscale started           (20 s after capture's start, inside its start-up fetches)
+16:09:13  the broker                  started on launchd's next attempt, 5 s after; ready
+16:09:41  capture                     one start-up history request failed: "error sending request"
+16:10:02  capture                     subscribed; quotes archived again
+16:11:30  capture, one SIGTERM        to publish again (below); subscribed at 16:12:14, 43 s after its start
+```
+
+**A network change stalls the container's open connections.** Capture's
+live stream went silent the second Tailscale stopped and had not noticed
+39 s later; a start-up request in flight across Tailscale's return failed
+after half a minute. Quotes for the nine instruments are missing from
+16:08:08 to 16:10:02, and capture recorded the windows as gaps, not as a
+silent hole. Not established: whether a native capture loses its stream the
+same way, and whether a running capture would have found its venue again
+with the tailnet still down. Neither was waited for.
+
+**A capture started while the broker cannot be reached never publishes.**
+At its start capture connects to the broker once; if that fails it archives
+and publishes nothing for the rest of its life ("events are not published
+until this is fixed", `boot.rs`). Since the broker moved to the tailnet name,
+a capture started while the tailnet is down is such a capture, and it stays
+one after the tailnet returns, until it is restarted. It was restarted here.
+
+**Every capture start spends about 40 s before its live stream.** It fetches
+the minutes it was not covering, paced by the venue's weight (nine requests
+a series), before it subscribes: 43 s at 16:11:31 with nothing wrong, 73 s at
+16:08:48 with one request stalled. A restart's cost in quotes is that, not
+the second its container takes.
+
+## Tailscale stopped for three minutes, beside a native capture — 2026-11-25
+
+`containerise-host-services`, task 7.4 again, with the maintainer's go-ahead
+to find out whether the stall above is the container's. A native capture
+(the same binary, BTC quotes only, no broker, a scratch archive) ran beside
+the deployment's. Tailscale was stopped at 16:41:58 and started at 16:45:01.
+Nothing of the deployment was restarted until the end. Sampled every 5 s.
+
+```text
+                                  the container's capture           the native capture
+before                            2 to 3 quote files every 5 s      2 to 3 every 5 s
+16:41:58  Tailscale stopped       silent from that second           unchanged throughout
+                                  status still "connected"
+16:44:16  its 8-minute handover   a new socket, Tailscale still
+                                  stopped: quotes again
+16:44:34                          the broker's connection dropped
+16:45:01  Tailscale started       silent again from 16:45:03        unchanged throughout
+16:45:02                          the broker's connection back
+                                  by itself; the broker, never
+                                  restarted, answering again
+16:47:03  end of watching         silent 120 s, "connected"         stopped with one SIGTERM, cleanly
+16:47:24  one SIGTERM             restarted; quotes at 16:48:09
+```
+
+**It is the container's.** The native capture on the same Mac, on the same
+venue, in the same seconds, lost nothing when Tailscale stopped or started.
+The container's lost its stream at each change, and a socket it opened while
+Tailscale was stopped worked. So a change in the Mac's network kills the
+connections a container already holds and spares new ones. The likely
+mechanism, not verified: the NAT between the container's virtual machine
+and the Mac drops its established flows when the Mac's network configuration
+changes.
+
+**Capture does not notice a dead stream.** Its status said "connected" for
+the whole of each stall. It recovered once at its 8-minute handover and once
+when restarted; nothing in between asked whether the stream still spoke.
+
+**The record claims a window it does not hold.** Quote gaps recorded after
+16:00, nine instruments each:
+
+```text
+16:08:06 -> 16:08:49   downtime    the first test: the stall, closed by a restart
+16:08:49 -> 16:10:02   downtime    that start's fetches
+16:11:30 -> 16:12:14   downtime    the restart to publish again
+16:45:01 -> 16:47:26   downtime    the second stall, closed by a restart
+16:47:26 -> 16:48:09   downtime    that start's fetches
+```
+
+16:41:58 to 16:44:16 is not among them. The handover replaced a silent socket
+and claimed coverage across it, so for 2 min 18 s the archive says the nine
+instruments were watched and nothing happened. A stall that ends in a
+restart is recorded; one that ends in a handover is a silent hole.
+
+**The broker rides it out.** Never restarted, it answered at the tailnet name
+once the address was back, and capture's connection to it, made at its
+start, came back by itself within a second of Tailscale.
+
+## A broker that answers after capture has started — 2026-11-25
+
+`capture-recovers-dead-connections`, task 4.3. A native capture (this
+branch's debug build, BTC quotes only, a scratch archive) was started with a
+`[broker]` at `nats://127.0.0.1:14222`, where nothing listened; 20 s later a
+`nats-server` 2.15.3 was started there with the deployment's authorization
+file and stand-in passwords made for the run and printed nowhere.
+
+```text
+17:30:36  capture started            "did not answer: Connection refused … asked again in the background"
+17:30:56  after 20 s                 9 quote files archived; the line above once; the same process
+17:30:56  nats-server started
+17:31:07  capture                    "publishing: the broker answered", 11.7 s later, no restart
+                                     (attempts at about 1, 3, 7, 15 and 31 s after its start)
+17:31:12  as the reader, status.>    5 messages in 5 s, status.hyperliquid
+          quote files                17, archiving throughout
+          "did not answer" lines     1 in all: none per attempt
+17:31:13  one SIGTERM each           both stopped cleanly, exit 0
+```
+
+Before this change the same start published nothing until a restart.
+
+## Tailscale stopped and started again, on a capture that finds dead connections — 2026-11-25
+
+`capture-recovers-dead-connections`, task 5.3, which is `containerise-host-services`
+task 7.4 run again, with the maintainer's go-ahead. Capture in its container on
+the image built from `3eb898f`; a native capture (BTC quotes, no broker, a
+scratch archive) beside it throughout; sampled every 5 s.
+
+```text
+17:40:03  Tailscale stopped           the container's stream went silent that second, as before;
+                                      the native one did not
+17:40:18.9                            "the connection answered no keepalive within the venue's
+                                      reply time: dead though it never closed" — connected again
+17:40:19                              quotes again, 16.8 s after the last; no restart, Tailscale stopped
+17:41:19  one SIGTERM, still stopped  a clean stop; the new start read its secret over the vault's
+                                      loopback port, said once that the broker did not answer and
+                                      would be asked again, and archived 47 s later, after its
+                                      start-up fetches
+17:42:07  Tailscale started           the stream went silent again, at the change
+17:42:24                              "publishing: the broker answered" — no second restart
+17:42:33.9                            dead though it never closed — connected again
+17:42:34                              quotes again, 27.1 s after the last
+```
+
+Every silence over 5 s in BTC's and ETH's quotes in that window, against the
+gaps the archive recorded:
+
+```text
+silence 17:40:02.88 -> 17:40:19.68   16.8 s   in a session_lost gap 17:40:02.88 -> 17:40:19.36
+silence 17:41:19.32 -> 17:42:04.15   44.8 s   in a downtime gap     17:41:19.32 -> 17:42:03.77
+silence 17:42:07.75 -> 17:42:34.84   27.1 s   in a session_lost gap 17:42:07.75 -> 17:42:34.42
+silent holes                          0        (ETH's the same)
+```
+
+The same check over the first test's window finds the hole that test left:
+16:41:58 to 16:44:16, in no gap. Each change of Tailscale's state still costs
+the container's open connection; it now costs at most the keepalive interval
+plus the reply time and a connection's start, and the record says so.

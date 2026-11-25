@@ -66,10 +66,16 @@ pub enum Frame {
     Closed,
     /// Nothing arrived inside the poll window.
     ///
-    /// **This is not a gap.** A quiet market and a silently dead connection are
-    /// the same shape from here, so nothing is inferred from it. It exists so
-    /// the loop can service its timers rather than block forever on a socket.
+    /// **Not a gap by itself.** A quiet market and a silently dead connection
+    /// are the same shape for one window, so nothing is inferred from one. It
+    /// exists so the loop can service its timers rather than block forever on a
+    /// socket. Whether a connection is dead is the session's question, and it
+    /// is answered by the venue's keepalive, not by quiet (`capture::session`).
     Idle,
+    /// A frame that carries no data and shows the connection alive: a
+    /// protocol-level ping or pong. Nothing to archive; it answers the question
+    /// a keepalive asks.
+    Control,
 }
 
 /// Why a source could not deliver.

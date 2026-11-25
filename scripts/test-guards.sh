@@ -409,6 +409,71 @@ prove "check-service-secrets (a script runs gv from a checkout)" \
       scripts/provision-vault.sh append \
       $'\n# GV="$GALATA_VAULT_ROOT/target/release/gv"\n'
 
+# A value left in the template a fresh vault project is filled from.
+prove "check-service-secrets (the template holds a value)" \
+      ./scripts/check-service-secrets.sh \
+      config/secrets.env.example replace \
+      'GALATA_BROKER_PASSWORD_READER=' \
+      'GALATA_BROKER_PASSWORD_READER=hunter2'
+
+# A secret a service reads, missing from the template.
+prove "check-service-secrets (the template lacks a name)" \
+      ./scripts/check-service-secrets.sh \
+      config/secrets.env.example replace \
+      $'\n# read by: nats, tower\nGALATA_BROKER_PASSWORD_READER=\n' \
+      $'\n'
+
+# A secret handed to a container with -e, which Apple's container writes into
+# its own state, where `container inspect` prints it.
+prove "check-container-launch (a secret passed with -e)" \
+      ./scripts/check-container-launch.sh \
+      scripts/run-service.sh replace \
+      'in_container "capture:$venue" "$DATAWATCH_IMAGE" -i "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}"' \
+      'in_container "capture:$venue" "$DATAWATCH_IMAGE" -i -e "$secret" "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}"'
+
+# The folder that holds every service's token, mounted into one container.
+prove "check-container-launch (the token folder is mounted)" \
+      ./scripts/check-container-launch.sh \
+      scripts/run-service.sh replace \
+      'CONFIG_MOUNT=(--mount "type=bind,source=$dir,target=/app/config,readonly"' \
+      'CONFIG_MOUNT=(-v "$ROOT/var/tokens:/app/tokens" --mount "type=bind,source=$dir,target=/app/config,readonly"'
+
+# A port published with no address, which binds every interface of the Mac.
+# After the `esac`, where nothing runs it: the guard reads the launcher's text.
+prove "check-container-launch (a port published off the tailnet)" \
+      ./scripts/check-container-launch.sh \
+      scripts/run-service.sh append \
+      $'\nin_container nats "$DATAWATCH_IMAGE" --publish 4222:4222\n'
+
+# A limit left to the default: a line with CPUs and no memory, accepted.
+prove "check-container-launch (half a limit is accepted)" \
+      ./scripts/check-container-launch.sh \
+      scripts/lib/container-tools.sh replace \
+      'if [[ -z "$memory" ]]; then' \
+      'if false; then'
+
+# A service with no line started anyway, at the default the limits exist to
+# avoid.
+prove "check-container-launch (a service with no line starts at the default)" \
+      ./scripts/check-container-launch.sh \
+      scripts/lib/container-tools.sh replace \
+      $'\n        echo "$conf states no CPU or memory limit for $spec, so it does not start' \
+      $'\n        printf \'4 1G\'; return 0\n        echo "$conf states no CPU or memory limit for $spec, so it does not start'
+
+# A stopped tailnet giving its last address, to publish on.
+prove "check-container-launch (a stopped tailnet gives an address)" \
+      ./scripts/check-container-launch.sh \
+      scripts/lib/container-tools.sh replace \
+      'if [[ "$state" != Running ]]; then' \
+      'if false; then'
+
+# var/ sent to an image build, with every service's token in it.
+prove "check-container-launch (var/ in the build context)" \
+      ./scripts/check-container-launch.sh \
+      .dockerignore replace \
+      $'\nvar/\n' \
+      $'\n'
+
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)
 present=$(find scripts -maxdepth 1 -name 'check-*.sh' ! -name 'check-all.sh' | wc -l | tr -d ' ')

@@ -1,0 +1,10 @@
+# The build context for deploy/container/. An image holds programs, never
+# this machine's record or its secrets: var/ has the archive, the service
+# tokens, broker.env and the recovery kit. scripts/check-container-launch.sh
+# fails if this line goes.
+var/
+target/
+.git/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/

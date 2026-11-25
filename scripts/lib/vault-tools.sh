@@ -3,7 +3,6 @@
 # nothing.
 #
 #   gv="$(gv_tool 2>&1)" || refuse "$gv"
-#   server="$(vault_tool gv-server 2>&1)" || refuse "$server"
 #
 # Each function prints the answer on stdout, or the reason on stderr and
 # returns 1 — so the caller's own `refuse` says it, under the caller's name.
@@ -11,7 +10,11 @@
 # **The installed release, never a checkout.** These scripts used to run
 # `$GALATA_VAULT_ROOT/target/release/gv`, which made a deployment depend on a
 # sibling source tree and on whatever was last built in it. galata-vault ships
-# installers; they put `gv` and `gv-server` in `$CARGO_HOME/bin`.
+# installers; `gv`'s puts it in `$CARGO_HOME/bin`.
+#
+# **Only `gv`.** These scripts once ran the vault's server too. The
+# deployment's vault is now the hosted one, which galata-vault runs itself,
+# so the only vault program a service's start needs is the client.
 #
 # **One directory, not PATH.** launchd's PATH has no `~/.cargo/bin`, and a
 # name resolved through PATH at install time and again at start time can be
@@ -34,10 +37,10 @@ vault_bin_dir() {
 
 # How to get them, said wherever one is missing or too old.
 vault_install_hint() {
-    printf '%s' "install the galata-vault $GV_FLOOR tools (README, Configuration and secrets): the gv-installer.sh and gv-server-installer.sh of its latest release — or set GALATA_VAULT_BIN to the directory that holds them"
+    printf '%s' "install the galata-vault $GV_FLOOR tools (README, Configuration and secrets): the gv-installer.sh of its latest release — or set GALATA_VAULT_BIN to the directory that holds it"
 }
 
-# vault_tool <gv|gv-server>: its path.
+# vault_tool <name>: the path of a vault program, which today is only `gv`.
 vault_tool() {
     local path
     path="$(vault_bin_dir)/$1"
@@ -75,6 +78,16 @@ gv_tool() {
         return 1
     fi
     printf '%s' "$path"
+}
+
+# The vault environment this deployment's services read: one section of the
+# project per network. `mainnet` unless GALATA_VAULT_ENV names another, such
+# as galata-datawatch/testnet for a deployment that captures the testnet.
+# Provisioning makes both sections; a deployment reads one.
+VAULT_PROJECT="galata-datawatch"
+VAULT_SECTIONS="mainnet testnet"
+vault_env() {
+    printf '%s' "${GALATA_VAULT_ENV:-$VAULT_PROJECT/mainnet}"
 }
 
 # The broker's own naming: GALATA_BROKER_PASSWORD_<IDENTITY>, dashes to
