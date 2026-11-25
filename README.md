@@ -184,6 +184,29 @@ and each capture reports its own health on `status.<venue>`. The two roots are
 granted separately, so a dashboard can read status without the market-data
 firehose.
 
+**The broker keeps a window of the bus.** JetStream holds two hours of market
+data, so a consumer replays from where the hourly tape ends and then follows
+live; each venue's latest status; and, for the ledger's change, a complete
+seven-day stream of account data under `accounts.<venue>.<alias>.<kind>`. The
+streams are declared beside the grants and applied by the broker's own start
+(`galata-bus`); see [`galata-broker`](crates/galata-broker).
+
+**The market window is lossy, and every hole in it is declared.** Capture
+drops an event from the bus, never from the record, when its queue to the
+broker is full or a publish is refused. It keeps the earliest and latest
+receipt time dropped, and once a publish succeeds again it sends, for every
+pair it covers, a gap with the cause `unpublished` over that span:
+
+- **`unpublished` means the record holds what the bus did not carry.** A
+  consumer that meets one fetches the span from history. Every other gap cause
+  says the data exists nowhere.
+- **Sent on the bus and never archived**, so the tape never holds one.
+- **Every pair, over the whole span.** A consumer of one instrument meets the
+  hole on that instrument's own subject; where only some pairs dropped, the
+  declaration overstates the loss, which is the safe direction.
+- **Never dropped to make room for data.** A declaration that cannot be sent
+  stays pending and is merged with the next span.
+
 ---
 
 ## The crates
@@ -218,6 +241,7 @@ published crates link none of it.
 | `galata-watch` | judge the record's freshness and completeness, per venue |
 | `galata-retain` | report, and optionally delete, what a retention horizon would expire |
 | `galata-signals-commit` | check one run of computed signals against the dataset's schema and write it to the tape |
+| `galata-bus` | the broker's process: applies the stream table once the server answers, and is `nats-server` meanwhile |
 
 ---
 
@@ -635,7 +659,7 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
 |---|---|---|---|
 | `capture:<venue>` | `galata-datawatch` | the archive and the status folder | nowhere |
 | `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
-| `nats` | `galata-nats` | the generated authorization file | this Mac's tailnet name, port 4222 |
+| `nats` | `galata-nats` | its server configuration, the generated authorization file and a volume of its own | this Mac's tailnet name, port 4222 |
 | `flows` | `galata-flows` | the archive, the tape and a volume of its own | nowhere |
 
 - **The limits are stated, never defaulted.** A container given none gets
@@ -653,6 +677,18 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
   the tailnet is down the broker is refused, not published elsewhere. Set
   `[broker] url` to `nats://<this Mac's tailnet name>:4222` when it moves;
   the tower reads the same line.
+- **The broker keeps its streams on a volume of its own**, `galata-nats-store`
+  at `/data`, made at its first start and handed once to the image's user.
+  Nothing else reads it: it is a cache of what the archive and the ledger
+  hold, so removing it (`container volume rm galata-nats-store`, with the
+  broker stopped) costs the window and nothing else. `config/nats-server.conf`
+  caps it, and the cap must exceed the streams' byte caps together. The
+  container runs `galata-bus`, which applies the stream table once the server
+  answers and is the server meanwhile.
+- **The broker's memory limit follows what it keeps.** 256M was measured
+  serving capture and the status subjects, before it kept a window. It runs
+  at a provisional 1G while the window's figure is measured on the
+  deployment and recorded in `design/measured.md`, which then sets the line.
 - **A container is given its own roots**, where `[paths]` and `[ledger]` put
   them, and a copy of the configuration taken at each start. A root that
   does not exist is refused, never created.

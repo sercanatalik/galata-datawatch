@@ -56,6 +56,7 @@ allowed() {
         galata-datawatch/src/source/poll.rs)                  ;; # the poll endpoint, to the client
         galata-datawatch/src/venue/transport.rs)              ;; # a held endpoint, to the transport
         galata-datawatch/src/boot.rs)                         ;; # the broker password, to the connection
+        galata-datawatch/src/bin/galata-bus.rs)               ;; # bus-admin's password, to the connection
         galata-datawatch-vault/src/lib.rs)                    ;; # the vault's answer, into the loader
         *) return 1 ;;
     esac

@@ -1,7 +1,8 @@
-# The broker: the published NATS server, plus the one door by which its
-# passwords enter. Built from the repository root:
+# The broker: the published NATS server, `galata-bus` to apply the streams it
+# keeps, and the one door by which its passwords enter. Built from the
+# repository root:
 #
-#   scripts/build-images.sh
+#   scripts/build-images.sh nats
 #   container build -t galata-nats -f deploy/container/Containerfile.nats .
 #
 # **The version this deployment ran natively.** 2.15.3 is what Homebrew's
@@ -9,19 +10,48 @@
 # where the server runs and not which server it is. Moving the pin is a
 # change of its own.
 #
+# **Debian, as the datawatch image, not the published image.** `galata-bus`
+# is built with glibc like every other binary of ours, and the server is the
+# published image's own static binary, copied: the same server, beside a
+# program of ours (add-bus-replay-window, design D5).
+#
+# **`galata-bus`, then the server.** It starts a helper that applies the
+# stream table once the server answers, and then becomes `nats-server`
+# (`exec`), so the stop launchd sends reaches the server with nothing between.
+#
 # **`with-secrets`, because the passwords arrive on standard input.** The
 # authorization file names each identity's password as a variable, and the
-# launcher hands the three of them over as it hands capture its one
-# (scripts/run-service.sh). The alpine image, because that script needs a
-# shell and the default image has none.
+# launcher hands them over as it hands capture its one
+# (scripts/run-service.sh).
 #
-# **No entrypoint.** The published image starts through its own script; here
-# the launcher states the whole command, so what runs is what
-# `run-service.sh --check nats` prints.
+# **The store is a volume, at /data**, made at the broker's first start and
+# handed once to the image's user (scripts/run-service.sh). Nothing in the
+# image is the store.
+#
+# **No entrypoint.** The launcher states the whole command, so what runs is
+# what `run-service.sh --check nats` prints.
 
 ARG NATS_VERSION=2.15.3
-FROM nats:${NATS_VERSION}-alpine
+FROM nats:${NATS_VERSION} AS nats
+
+FROM rust:1.98.1-bookworm AS build
+WORKDIR /src
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release --locked -p galata-datawatch --bin galata-bus \
+ && mkdir /out \
+ && cp target/release/galata-bus /out/
+
+FROM debian:bookworm-slim
+RUN useradd --uid 10001 --create-home galata \
+ && mkdir -p /data && chown galata /data
+COPY --from=nats /nats-server /usr/local/bin/nats-server
+COPY --from=build /out/galata-bus /usr/local/bin/galata-bus
+# How a secret enters: over standard input, never `-e` (see the script).
 COPY --chmod=755 deploy/container/with-secrets /usr/local/bin/with-secrets
+# The tree this image was built from. `install-services.sh --status` reports
+# it beside a running container, so a deployed image is never anonymous.
 ARG SOURCE_TREE=unknown
 LABEL org.galata.source-tree=$SOURCE_TREE
+USER galata
 ENTRYPOINT []

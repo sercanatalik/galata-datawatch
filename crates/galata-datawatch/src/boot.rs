@@ -239,9 +239,12 @@ pub fn boot(
                 match NatsPublisher::connect(&broker.url, &identity).await {
                     Ok(publisher) => {
                         let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(broker.queue);
-                        tokio::spawn(publish_loop(publisher, rx));
+                        let sink = NatsSink::new(tx);
+                        let declarer =
+                            Declarer::for_capture(adapter.venue(), &declared, sink.unpublished());
+                        tokio::spawn(publish_loop(publisher, rx, declarer));
                         tracing::info!(url = broker.url, user = broker.user, "publishing");
-                        Arc::new(NatsSink::new(tx))
+                        Arc::new(sink)
                     }
                     // Fatal: it will never fix itself.
                     Err(refusal) if refusal.is_fatal() => return Err(Box::from(refusal)),
@@ -254,6 +257,9 @@ pub fn boot(
                              in the background"
                         );
                         let (tx, rx) = tokio::sync::mpsc::channel::<Outbound>(broker.queue);
+                        let sink = NatsSink::new(tx);
+                        let declarer =
+                            Declarer::for_capture(adapter.venue(), &declared, sink.unpublished());
                         let url = broker.url.clone();
                         let user = broker.user.clone();
                         let connect_url = url.clone();
@@ -265,14 +271,14 @@ pub fn boot(
                             },
                             move |publisher, rx| async move {
                                 tracing::info!(url, user, "publishing: the broker answered");
-                                publish_loop(publisher, rx).await;
+                                publish_loop(publisher, rx, declarer).await;
                             },
                             rx,
                             broker_backoff(),
                             shutdown.clone(),
                             refused.clone(),
                         ));
-                        Arc::new(NatsSink::new(tx))
+                        Arc::new(sink)
                     }
                 }
             }
@@ -782,12 +788,86 @@ fn broker_verdict(refused: &Refused) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Drain the queue onto the bus.
+/// Who capture declares its unpublished spans for, and where they wait.
+///
+/// One declaration per pair it covers, over the whole span: a consumer of one
+/// instrument meets the hole on that instrument's own subject.
+struct Declarer {
+    venue: galata_wire::Venue,
+    pairs: Vec<(Ticker, Series)>,
+    clipped: Clipped,
+    unpublished: crate::sink::Unpublished,
+}
+
+impl Declarer {
+    fn for_capture(
+        venue: &galata_wire::Venue,
+        declared: &[Subscription],
+        unpublished: crate::sink::Unpublished,
+    ) -> Declarer {
+        Declarer {
+            venue: venue.clone(),
+            pairs: declared
+                .iter()
+                .map(|s| (s.ticker.clone(), s.series))
+                .collect(),
+            clipped: Clipped::Continuous,
+            unpublished,
+        }
+    }
+}
+
+/// **Declare what the bus missed**, if anything: for every pair, a gap with
+/// the cause `unpublished` over the pending span, straight to the bus and
+/// never through the archive — the record holds the data; only the bus missed
+/// it. A declaration that does not go out leaves the span pending, merged with
+/// the next, so none is ever lost to make room for data.
+async fn declare<P: Publisher + ?Sized>(publisher: &P, declarer: &Declarer) {
+    let Some((from, to)) = declarer.unpublished.take() else {
+        return;
+    };
+    for (ticker, series) in &declarer.pairs {
+        let envelope = galata_wire::Envelope::new(
+            declarer.venue.clone(),
+            ticker.clone(),
+            Some(from),
+            to,
+            galata_wire::Event::Gap(galata_wire::Gap {
+                series: *series,
+                from_micros: from,
+                to_micros: to,
+                cause: galata_wire::GapCause::Unpublished,
+                clipped: declarer.clipped,
+                dex: None,
+            }),
+        );
+        let Some(subject) = Subject::of(&envelope) else {
+            continue;
+        };
+        if publisher.publish(&subject, &envelope).await.is_err() {
+            declarer.unpublished.merge((from, to));
+            return;
+        }
+    }
+    tracing::info!(
+        from_micros = from,
+        to_micros = to,
+        pairs = declarer.pairs.len(),
+        "declared on the bus what it did not carry; the record holds it"
+    );
+}
+
+/// Drain the queue onto the bus, declaring what could not be published.
 ///
 /// **The only place that awaits a publish.** `NatsSink::emit` is synchronous
 /// and hands over through a bounded channel, so a broker that is slow costs
-/// dropped events and a counter — never a stalled capture loop.
-async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Receiver<Outbound>) {
+/// dropped events and a counter — never a stalled capture loop. What it drops,
+/// and what a publish refuses, is declared once a publish succeeds again.
+async fn drain<P: Publisher + ?Sized>(
+    publisher: &P,
+    rx: &mut tokio::sync::mpsc::Receiver<Outbound>,
+    declarer: &Declarer,
+) {
     let mut reachable = true;
     while let Some(outbound) = rx.recv().await {
         let sent = match &outbound {
@@ -819,8 +899,12 @@ async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Recei
                     tracing::info!("the broker is taking events again");
                     reachable = true;
                 }
+                declare(publisher, declarer).await;
             }
             Err(error) => {
+                if let Outbound::Event(envelope) = &outbound {
+                    declarer.unpublished.note(envelope.recv_micros);
+                }
                 // **On the edge, not per message.** A warning per event is what
                 // buries a log, and the count is on the status surface.
                 if reachable {
@@ -830,6 +914,15 @@ async fn publish_loop(publisher: NatsPublisher, mut rx: tokio::sync::mpsc::Recei
             }
         }
     }
+}
+
+/// [`drain`] onto the real broker, then push what the client still holds.
+async fn publish_loop(
+    publisher: NatsPublisher,
+    mut rx: tokio::sync::mpsc::Receiver<Outbound>,
+    declarer: Declarer,
+) {
+    drain(&publisher, &mut rx, &declarer).await;
     // The channel closed, which means capture is shutting down. Push what the
     // client still holds: `publish` buffers, so a publish that returned is not
     // yet a publish that arrived.
@@ -1006,5 +1099,288 @@ mod tests {
         let mut backoff = broker_backoff();
         let waits: Vec<u64> = (0..12).map(|_| backoff.next_wait().as_secs()).collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60, 60, 60, 60]);
+    }
+
+    // ---- capture declares what it did not publish ------------------------------
+
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    use galata_broker::PublishError;
+    use galata_wire::{Envelope, Event, GapCause, Quote};
+
+    use crate::sink::{NatsSink, Sink};
+
+    /// A broker that records what it is sent, and refuses on request.
+    #[derive(Default)]
+    struct Recording {
+        sent: Mutex<Vec<(String, Envelope)>>,
+        refuse_events: Mutex<bool>,
+        refuse_gaps: Mutex<bool>,
+    }
+
+    impl Recording {
+        fn gaps(&self) -> Vec<(String, galata_wire::Gap)> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(subject, e)| match &e.event {
+                    Event::Gap(g) => Some((subject.clone(), g.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+        fn events(&self) -> usize {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, e)| !matches!(e.event, Event::Gap(_)))
+                .count()
+        }
+    }
+
+    impl Publisher for Recording {
+        fn publish<'a>(
+            &'a self,
+            subject: &'a Subject,
+            envelope: &'a Envelope,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), PublishError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let is_gap = matches!(envelope.event, Event::Gap(_));
+                let refused = if is_gap {
+                    *self.refuse_gaps.lock().unwrap()
+                } else {
+                    *self.refuse_events.lock().unwrap()
+                };
+                if refused {
+                    return Err(PublishError::Failed {
+                        subject: subject.as_str().to_string(),
+                        reason: "refused by the test".into(),
+                    });
+                }
+                self.sent
+                    .lock()
+                    .unwrap()
+                    .push((subject.as_str().to_string(), envelope.clone()));
+                Ok(())
+            })
+        }
+        fn publish_status<'a>(
+            &'a self,
+            _subject: &'a Subject,
+            _body: &'a [u8],
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), PublishError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn venue() -> galata_wire::Venue {
+        galata_wire::Venue::new("hyperliquid").unwrap()
+    }
+
+    fn quote(recv_micros: i64) -> Envelope {
+        Envelope::new(
+            venue(),
+            galata_wire::Ticker::new("BTC").unwrap(),
+            Some(recv_micros),
+            recv_micros,
+            Event::Quote(Quote {
+                bid_px: None,
+                ask_px: None,
+                bid_sz: None,
+                ask_sz: None,
+                bid_spread: None,
+                ask_spread: None,
+            }),
+        )
+    }
+
+    fn declared() -> Vec<Subscription> {
+        ["BTC", "ETH"]
+            .into_iter()
+            .map(|t| Subscription {
+                ticker: galata_wire::Ticker::new(t).unwrap(),
+                series: Series::Quotes,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_overflow_is_declared_for_every_pair_over_exactly_the_dropped_span() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(2);
+        let sink = NatsSink::new(tx);
+        let declarer = Declarer::for_capture(&venue(), &declared(), sink.unpublished());
+        // The broker is away: the queue holds two, and 3, 4 and 5 are dropped.
+        for recv in 1..=5 {
+            let _ = sink.emit(&quote(recv));
+        }
+        drop(sink);
+        let broker = Recording::default();
+        drain(&broker, &mut rx, &declarer).await;
+
+        assert_eq!(broker.events(), 2, "the two the queue held");
+        let gaps = broker.gaps();
+        assert_eq!(gaps.len(), 2, "one declaration per pair: {gaps:?}");
+        for (subject, gap) in &gaps {
+            assert!(
+                subject.ends_with(".quotes") || subject.ends_with(".gaps"),
+                "{subject}"
+            );
+            assert_eq!(gap.cause, GapCause::Unpublished);
+            assert_eq!(
+                (gap.from_micros, gap.to_micros),
+                (3, 5),
+                "exactly the dropped receipt times"
+            );
+        }
+        let subjects: Vec<&str> = gaps.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            subjects,
+            [
+                "markets.hyperliquid.BTC.gaps",
+                "markets.hyperliquid.ETH.gaps"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_record_holds_every_event_and_no_declaration() {
+        // Capture's own path: durable in the archive, then offered to a queue
+        // of one while the broker is away. The declaration goes to the bus
+        // past the full queue, and never into the record.
+        let root = tempfile::tempdir().unwrap();
+        let mut archive = crate::record::Archive::open(root.path());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(1);
+        let sink = NatsSink::new(tx);
+        let declarer = Declarer::for_capture(&venue(), &declared(), sink.unpublished());
+        for recv in 1..=4 {
+            crate::ingest::record_generated(&mut archive, &sink, "hyperliquid", quote(recv))
+                .unwrap();
+        }
+        archive.flush().unwrap();
+        drop(sink);
+        let broker = Recording::default();
+        drain(&broker, &mut rx, &declarer).await;
+
+        let spans: Vec<(i64, i64)> = broker
+            .gaps()
+            .iter()
+            .map(|(_, g)| (g.from_micros, g.to_micros))
+            .collect();
+        assert_eq!(
+            spans,
+            [(2, 4), (2, 4)],
+            "declared, though the queue was full"
+        );
+        let record = crate::replay::read_all(root.path()).unwrap();
+        assert_eq!(record.len(), 4, "every event is in the record");
+        for replayed in &record {
+            let body = String::from_utf8_lossy(&replayed.payload().payload);
+            assert!(
+                !body.contains("unpublished"),
+                "a declaration in the record: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_dropped_is_nothing_declared() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(16);
+        let sink = NatsSink::new(tx);
+        let declarer = Declarer::for_capture(&venue(), &declared(), sink.unpublished());
+        for recv in 1..=10 {
+            sink.emit(&quote(recv)).unwrap();
+        }
+        drop(sink);
+        let broker = Recording::default();
+        drain(&broker, &mut rx, &declarer).await;
+        assert_eq!(broker.events(), 10);
+        assert!(broker.gaps().is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_outages_are_two_spans_each_its_own() {
+        let unpublished = crate::sink::Unpublished::default();
+        let declarer = Declarer::for_capture(&venue(), &declared(), unpublished.clone());
+        let broker = Recording::default();
+        unpublished.note(3);
+        unpublished.note(5);
+        declare(&broker, &declarer).await;
+        unpublished.note(10);
+        unpublished.note(12);
+        declare(&broker, &declarer).await;
+        let spans: Vec<(i64, i64)> = broker
+            .gaps()
+            .iter()
+            .map(|(_, g)| (g.from_micros, g.to_micros))
+            .collect();
+        assert_eq!(
+            spans,
+            [(3, 5), (3, 5), (10, 12), (10, 12)],
+            "per pair, per outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_publish_is_declared_once_one_succeeds() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(16);
+        let sink = NatsSink::new(tx);
+        let declarer = Declarer::for_capture(&venue(), &declared(), sink.unpublished());
+        let broker = Recording::default();
+        *broker.refuse_events.lock().unwrap() = true;
+        for recv in [7, 8] {
+            sink.emit(&quote(recv)).unwrap();
+        }
+        // Refused while the broker says no; then it takes events again.
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel::<Outbound>(16);
+        tx2.send(first).await.unwrap();
+        tx2.send(second).await.unwrap();
+        drop(tx2);
+        drain(&broker, &mut rx2, &declarer).await;
+        assert!(
+            broker.gaps().is_empty(),
+            "nothing succeeded, so nothing is declared yet"
+        );
+        *broker.refuse_events.lock().unwrap() = false;
+        sink.emit(&quote(9)).unwrap();
+        drop(sink);
+        drain(&broker, &mut rx, &declarer).await;
+        let spans: Vec<(i64, i64)> = broker
+            .gaps()
+            .iter()
+            .map(|(_, g)| (g.from_micros, g.to_micros))
+            .collect();
+        assert_eq!(spans, [(7, 8), (7, 8)]);
+    }
+
+    #[tokio::test]
+    async fn a_declaration_that_does_not_go_out_is_kept_and_merged() {
+        let unpublished = crate::sink::Unpublished::default();
+        let declarer = Declarer::for_capture(&venue(), &declared(), unpublished.clone());
+        let broker = Recording::default();
+        unpublished.note(3);
+        unpublished.note(5);
+        *broker.refuse_gaps.lock().unwrap() = true;
+        declare(&broker, &declarer).await;
+        assert!(broker.gaps().is_empty());
+        unpublished.note(8);
+        *broker.refuse_gaps.lock().unwrap() = false;
+        declare(&broker, &declarer).await;
+        let spans: Vec<(i64, i64)> = broker
+            .gaps()
+            .iter()
+            .map(|(_, g)| (g.from_micros, g.to_micros))
+            .collect();
+        assert_eq!(
+            spans,
+            [(3, 8), (3, 8)],
+            "never dropped: merged with what came after"
+        );
     }
 }

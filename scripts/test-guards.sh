@@ -469,6 +469,14 @@ prove "check-container-launch (the broker is handed fewer identities than its fi
       $'done < <(awk \'$1 == "user:" { print $2 }\' "$ROOT/config/nats-authorization.conf")' \
       $'done < <(printf \'%s\\n\' datawatch-hyperliquid datawatch-rh-chain reader)'
 
+# The broker's store put in var/, beside the record and the tokens, instead of
+# on a volume of its own.
+prove "check-container-launch (the broker's store is a folder of var/)" \
+      ./scripts/check-container-launch.sh \
+      scripts/run-service.sh replace \
+      '-v "$NATS_STORE:/data"' \
+      '-v "$ROOT/var/nats-store:/data"'
+
 # A stopped tailnet giving its last address, to publish on.
 prove "check-container-launch (a stopped tailnet gives an address)" \
       ./scripts/check-container-launch.sh \

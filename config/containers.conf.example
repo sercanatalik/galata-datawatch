@@ -20,19 +20,21 @@
 #           container, the hourly projection's three-day shape at 8.2 GiB, and
 #           a lane given 4G was killed, not slowed. The limit follows the largest day
 #           in the window, not the window's length.
-#   nats    27 MiB in use, serving capture and the status subjects. A replay
-#           window on the bus will need its own figure.
+#   nats    27 MiB in use, serving capture and the status subjects, before
+#           it kept a window of the bus. 1G is provisional, four times that
+#           line, while the window's figure is measured on the deployment
+#           (add-bus-replay-window, task 6.4); the measurement replaces it.
 #   capture 210 MiB in use for nine instruments; 2G leaves room for the cap of
 #           fifty, if what it holds grows with the instruments.
 #   ledger  not measured: no ledger is declared here. Measure it before it is
 #           relied on, and before this line is copied.
 #
 # With galata-vault's container (1G) and galata-watcher's two (1G each), the
-# deployment's containers may hold 17.25G together, and 29.25G while
+# deployment's containers may hold 18G together, and 30G while
 # scripts/build-images.sh's builder (12G) is up.
 #
 # service              cpus  memory
 flows                  4     12G
-nats                   1     256M
+nats                   1     1G
 capture:hyperliquid    2     2G
 # ledger:hyperliquid   2     2G

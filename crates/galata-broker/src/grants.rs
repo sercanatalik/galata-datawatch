@@ -28,6 +28,10 @@ use std::fmt::Write as _;
 /// The roots this system addresses. **Every one must be granted to somebody**,
 /// which `scripts/check-grant-coverage.sh` holds — so adding a third forces a
 /// decision about who may read it, at the moment it is added.
+///
+/// `accounts.` is not here yet. `Subject::account` builds its subjects and the
+/// broker keeps an ACCOUNTS stream for them, but no login publishes or reads
+/// account data until the ledger's change, which adds the root with them.
 pub const ROOTS: [&str; 2] = ["markets.", "status."];
 
 /// One identity's authority.
@@ -96,8 +100,32 @@ pub fn table(venues: &[&str]) -> Grants {
         publish: Vec::new(),
         subscribe: vec!["status.>".into()],
     });
+    // **The one identity that administers streams**, used only by the broker's
+    // own start (`galata-bus`) to apply `streams::table`. It may create, update
+    // and read the declared streams by name — not delete one, not publish or
+    // read data — and it hears replies only on an inbox prefix of its own, so
+    // it cannot read another client's.
+    let mut admin = Vec::new();
+    for stream in crate::streams::table() {
+        for verb in ["CREATE", "UPDATE", "INFO"] {
+            admin.push(format!("$JS.API.STREAM.{verb}.{}", stream.name));
+        }
+    }
+    grants.push(Grant {
+        identity: BUS_ADMIN.into(),
+        publish: admin,
+        subscribe: vec![format!("{BUS_ADMIN_INBOX}.>")],
+    });
     Grants(grants)
 }
+
+/// The identity the broker's start administers its streams as.
+pub const BUS_ADMIN: &str = "bus-admin";
+
+/// The inbox prefix [`BUS_ADMIN`] connects with, and the only one it may hear
+/// replies on: requests are answered on the asker's inbox, and the default
+/// `_INBOX.>` would let it read every client's replies.
+pub const BUS_ADMIN_INBOX: &str = "_INBOX_BUS_ADMIN";
 
 /// The environment variable holding one identity's password.
 ///
@@ -294,5 +322,51 @@ mod tests {
     #[test]
     fn a_root_nobody_is_granted_is_visible_as_such() {
         assert!(!table(&["hyperliquid"]).covers("views."));
+    }
+
+    #[test]
+    fn the_bus_admin_may_administer_the_streams_and_nothing_else() {
+        let grants = table(&["hyperliquid"]);
+        let admin = grants.iter().find(|g| g.identity == BUS_ADMIN).unwrap();
+        for stream in ["MARKETS", "ACCOUNTS", "STATUS"] {
+            for verb in ["CREATE", "UPDATE", "INFO"] {
+                let subject = format!("$JS.API.STREAM.{verb}.{stream}");
+                assert!(admin.publish.contains(&subject), "missing {subject}");
+            }
+        }
+        assert!(
+            admin
+                .publish
+                .iter()
+                .all(|s| s.starts_with("$JS.API.STREAM.")),
+            "it publishes no data: {:?}",
+            admin.publish
+        );
+        assert!(
+            !admin
+                .publish
+                .iter()
+                .any(|s| s.contains("DELETE") || s.contains("PURGE")),
+            "it may not delete or purge a stream"
+        );
+        assert_eq!(admin.subscribe, vec![format!("{BUS_ADMIN_INBOX}.>")]);
+    }
+
+    #[test]
+    fn no_other_identity_touches_the_stream_api() {
+        for grant in table(&["hyperliquid", "rh-chain"]).iter() {
+            if grant.identity == BUS_ADMIN {
+                continue;
+            }
+            assert!(
+                !grant
+                    .publish
+                    .iter()
+                    .chain(&grant.subscribe)
+                    .any(|s| s.starts_with("$JS")),
+                "{} is granted the stream API",
+                grant.identity
+            );
+        }
     }
 }

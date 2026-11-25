@@ -94,7 +94,7 @@ wait_unloaded() {  # wait_unloaded <label>: until launchd no longer has it, or r
 twins_of() {
     local spec="$1" bins="" want=""
     case "$spec" in
-        nats) bins="nats-server"; want="$ROOT/config/nats-authorization.conf config/nats-authorization.conf" ;;
+        nats) bins="nats-server galata-bus"; want="$ROOT/config/nats-server.conf config/nats-server.conf $ROOT/config/nats-authorization.conf config/nats-authorization.conf" ;;
         capture:*) bins="galata-datawatch galata-datawatch-vault"; want="${spec#capture:}" ;;
         ledger:*) bins="galata-ledger galata-ledger-vault"; want="${spec#ledger:}" ;;
         tower) bins="galata-tower" ;;

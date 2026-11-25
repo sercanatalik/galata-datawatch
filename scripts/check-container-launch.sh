@@ -348,12 +348,19 @@ else
     has() { [[ "$line" == *"$1"* ]] || say "the broker's container line lacks '$1': $2"; }
     has " --publish 100.64.0.7:4222:4222 " "its port is published on the tailnet address"
     has " run --rm --name galata-nats --cpus 1 --memory 256M " "it runs under its own name with the limits its line states"
-    has "source=$scratch/config,target=/etc/galata,readonly" "it is given the generated authorization file, read-only"
+    has "source=$scratch/config,target=/etc/galata,readonly" "it is given its configuration and the generated authorization file, read-only"
+    has " -v galata-nats-store:/data " "its streams are stored on a volume of its own"
     has "hand-secrets.sh $passwords -- " "every identity's password is handed over standard input, by name"
-    has " with-secrets $passwords -- nats-server -c /etc/galata/nats-authorization.conf -a 0.0.0.0 -p 4222" \
-        "the entrypoint receives every identity's name, then becomes the server, listening where the published port arrives"
+    has " with-secrets $passwords -- galata-bus -- nats-server -c /etc/galata/nats-server.conf -a 0.0.0.0 -p 4222" \
+        "the entrypoint receives every identity's name, then galata-bus applies the streams and becomes the server, listening where the published port arrives"
     [[ "$line" == *"127.0.0.1"* ]] && say "the broker's container line names loopback, which no container reaches"
-    [[ "$line" == *"/var/"*":/"* ]] && say "the broker's container is given a root of the record"
+    # Its store is the volume and nothing of var/: the container's own part of
+    # the line, from `run`, names no path under the root's var/ — no root of
+    # the record, no token, no store. The root's, not any `/var/`: on macOS the
+    # scratch root itself is under /var/folders.
+    container_part="${line#*" run --rm "}"
+    [[ "$container_part" == *"$scratch/var"* ]] \
+        && say "the broker's container is given something of var/: $container_part"
     [[ "$line" =~ -e\ +\"?GALATA_BROKER_PASSWORD ]] && say "one of the broker's passwords is passed with -e"
 fi
 line="$(broker_would_start "$stubs/ts-stopped/tailscale" || true)"

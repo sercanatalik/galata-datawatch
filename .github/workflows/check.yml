@@ -60,6 +60,19 @@ jobs:
       - name: Fetch the scheduling lane's dependencies
         run: uv sync --locked --project py
 
+      # **A real broker for the tests that need one** (crates/galata-broker/
+      # tests/support): the version the broker's image runs, pinned by the
+      # checksum its release publishes, so a changed download fails here rather
+      # than testing against something else. Fetched with the other
+      # dependencies, before every step that runs offline.
+      - name: Install nats-server 2.15.3, the broker image's version
+        run: |
+          archive=nats-server-v2.15.3-linux-amd64.tar.gz
+          curl -fsSLO "https://github.com/nats-io/nats-server/releases/download/v2.15.3/$archive"
+          echo "32e18c1e78d7ef4f86e483070eef3abb2647c3d4d67e29668077c7ad81da0797  $archive" | sha256sum -c -
+          tar -xzf "$archive"
+          sudo install -m 755 nats-server-v2.15.3-linux-amd64/nats-server /usr/local/bin/nats-server
+          nats-server --version
       - name: check-all
         run: ./scripts/check-all.sh
 

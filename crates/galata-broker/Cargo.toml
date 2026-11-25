@@ -47,3 +47,7 @@ thiserror.workspace = true
 # The example subscriber needs a runtime; the library itself does not spawn
 # anything and takes no runtime dependency of its own.
 tokio = { workspace = true }
+# Scratch stores for the tests that run a real broker (tests/support).
+tempfile = "3"
+# A replay's start time, as the JetStream API takes it.
+time = "0.3"

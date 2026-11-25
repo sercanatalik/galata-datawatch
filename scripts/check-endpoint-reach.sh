@@ -100,6 +100,10 @@ EXPOSE_ALLOWED = {
     # The wiring, which hands the broker its password. It was the binary until
     # the same 253 lines became the library entry both binaries call.
     "crates/galata-datawatch/src/boot.rs",
+    # The broker's own start, which hands the broker `bus-admin`'s password to
+    # apply the stream table (`Secret::expose`). Added 2026-11-25 with
+    # `add-bus-replay-window`.
+    "crates/galata-datawatch/src/bin/galata-bus.rs",
     # Where a vault's bytes become a `Secret`, which is the same job
     # `config/source.rs` does for the environment. Added 2026-09-23 with
     # `VaultSecrets`.

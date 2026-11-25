@@ -173,6 +173,45 @@ pub enum Outbound {
 pub struct NatsSink {
     tx: tokio::sync::mpsc::Sender<Outbound>,
     dropped: std::sync::atomic::AtomicU64,
+    unpublished: Unpublished,
+}
+
+/// **What capture archived and could not hand to the broker**, until it is
+/// declared: the earliest and latest receipt time of the events dropped since
+/// the last declaration.
+///
+/// One span, not a list: a declaration covers every pair for the whole span,
+/// which overstates the loss where only some pairs dropped — the safe
+/// direction. Shared between the sink, which drops when its queue is full, and
+/// the publish task, which notes a refused publish and declares once one
+/// succeeds (`boot`). A span that could not be declared is put back and merged
+/// with the next, so a declaration is never lost to make room for data.
+#[cfg(feature = "capture")]
+#[derive(Debug, Clone, Default)]
+pub struct Unpublished(std::sync::Arc<std::sync::Mutex<Option<(i64, i64)>>>);
+
+#[cfg(feature = "capture")]
+impl Unpublished {
+    /// An event received at this moment was not published.
+    pub fn note(&self, recv_micros: i64) {
+        self.merge((recv_micros, recv_micros));
+    }
+
+    /// The span to declare, leaving nothing pending.
+    pub fn take(&self) -> Option<(i64, i64)> {
+        self.0.lock().ok().and_then(|mut span| span.take())
+    }
+
+    /// A span whose declaration did not go out: pending again, merged with
+    /// whatever was noted meanwhile.
+    pub fn merge(&self, (from, to): (i64, i64)) {
+        if let Ok(mut span) = self.0.lock() {
+            *span = Some(match *span {
+                Some((a, b)) => (a.min(from), b.max(to)),
+                None => (from, to),
+            });
+        }
+    }
 }
 
 #[cfg(feature = "capture")]
@@ -187,7 +226,14 @@ impl NatsSink {
         NatsSink {
             tx,
             dropped: std::sync::atomic::AtomicU64::new(0),
+            unpublished: Unpublished::default(),
         }
+    }
+
+    /// What this sink could not hand over, shared with the task that declares
+    /// it once publishing succeeds again.
+    pub fn unpublished(&self) -> Unpublished {
+        self.unpublished.clone()
     }
 
     /// How many events have been dropped because the broker was behind, or
@@ -203,7 +249,12 @@ impl NatsSink {
     fn offer(&self, outbound: Outbound) -> Result<(), SinkError> {
         match self.tx.try_send(outbound) {
             Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(outbound)) => {
+                // A dropped event is a span the bus will not hold; a dropped
+                // snapshot is not, because the next one replaces it.
+                if let Outbound::Event(envelope) = &outbound {
+                    self.unpublished.note(envelope.recv_micros);
+                }
                 let n = self
                     .dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -212,9 +263,14 @@ impl NatsSink {
                     "the broker is behind capture, or has not answered yet; {n} events dropped so far"
                 )))
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(SinkError::Refused(
-                "the broker task has stopped; events are recorded but not published".into(),
-            )),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(outbound)) => {
+                if let Outbound::Event(envelope) = &outbound {
+                    self.unpublished.note(envelope.recv_micros);
+                }
+                Err(SinkError::Refused(
+                    "the broker task has stopped; events are recorded but not published".into(),
+                ))
+            }
         }
     }
 }

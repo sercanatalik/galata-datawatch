@@ -18,6 +18,7 @@ galata-broker = "0.1"
 ```text
   markets.<venue>.<ticker>.<kind>     one instrument, one dataset
   status.<venue>                      what one capture process says about itself
+  accounts.<venue>.<alias>.<kind>     what a venue said about one account
 ```
 
 - **Subjects are built from validated types, never from strings.** A `.`
@@ -27,16 +28,47 @@ galata-broker = "0.1"
 - **Two roots, granted separately.** A dashboard subscribes to `status.>`
   and holds no market grant at all. Credentials that can read every venue's
   firehose are not what an operator's laptop should carry.
+- **An account is named by its alias, never its address.** The alias token
+  cannot refuse an address (`0x…` is alphanumeric), so `Subject::account`
+  does: an alias shaped like an EVM address forms no subject. No login is
+  granted `accounts.>` yet; the ledger's change adds the first.
+
+## What the broker keeps
+
+```text
+  MARKETS   markets.>    two hours, within a byte cap    lossy; every hole declared
+  ACCOUNTS  accounts.>   seven days                      complete; acknowledged
+  STATUS    status.>     the last message per subject    each venue's latest
+```
+
+- **The market window bridges the tape and now.** The tape is projected
+  hourly, so it trails by up to about 65 minutes; a consumer replays the
+  window from where the tape ends, then follows live. It drops what it
+  already has by `seq`, address and kind together.
+- **Its holes are declared, not prevented.** Capture sends a gap with the
+  cause `unpublished` for every span it archived and could not hand to the
+  broker. The record holds that span: a consumer fetches it from history.
+  Every other gap cause says the data exists nowhere.
+- **Account data is complete.** The broker acknowledges each message only once
+  stored, and its publisher republishes what was not acknowledged.
+- **The streams are a table** (`streams::table`), beside the grants, and
+  `streams::apply` creates or updates them. The broker's own start applies
+  it (`galata-bus`), as the one login that may create, update and read
+  streams, `bus-admin`: it may not delete one or touch data. Every other login
+  is refused the stream API.
+- **The server's file-store cap must exceed the streams' byte caps
+  together**: JetStream reserves a capped stream's bytes up front.
 
 ## What is in the crate
 
 | Item | Purpose |
 |---|---|
-| `Subject` | `Subject::market(venue, ticker, kind)` and `Subject::status(venue)` |
+| `Subject` | `Subject::market(venue, ticker, kind)`, `Subject::status(venue)` and `Subject::account(venue, alias, kind)` |
 | `Publisher`, `NatsPublisher`, `NullPublisher` | publishing, with a no-op implementation for runs without a bus |
 | `NatsSubscriber` | consuming, over a separate connection from publishing |
 | `BrokerIdentity`, `Grant`, `Grants` | who may publish or subscribe to which root |
 | `to_nats_config` | renders the grant table as a NATS authorization file, so the server's policy is generated rather than hand-written |
+| `streams::table`, `streams::apply`, `streams::connect_admin`, `streams::held` | what the broker keeps, applying it as `bus-admin`, and what a stream holds |
 | `encode`, `decode` | the wire encoding of an `Envelope` |
 
 **Publishing and consuming are separate authorities.** Datawatch publishes

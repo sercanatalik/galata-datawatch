@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use galata_wire::{Kind, Ticker, Venue};
+use galata_wire::{Account, Kind, Ticker, Venue};
 
 /// A subject a message is published on.
 ///
@@ -51,17 +51,39 @@ impl Subject {
         Subject(format!("status.{}", venue.as_str()).into())
     }
 
-    /// The subject an envelope belongs on, where it names an instrument.
+    /// What a venue said about one account: `accounts.<venue>.<alias>.<kind>`.
+    ///
+    /// **Its own root**, kept apart from market data by the broker's streams:
+    /// account data is complete and kept for days, market data a lossy window
+    /// of hours. **By alias, never by address**: `None` for an alias shaped
+    /// like an EVM address (`0x` and forty hex digits), because the token
+    /// itself cannot refuse one — `0x…` is alphanumeric — and a subject is
+    /// read by everything that can subscribe.
+    pub fn account(venue: &Venue, account: &Account, kind: Kind) -> Option<Subject> {
+        let alias = account.as_str();
+        let address_shaped = alias.len() == 42
+            && (alias.starts_with("0x") || alias.starts_with("0X"))
+            && alias[2..].chars().all(|c| c.is_ascii_hexdigit());
+        if address_shaped {
+            return None;
+        }
+        Some(Subject(
+            format!("accounts.{}.{}.{}", venue.as_str(), alias, kind.as_str()).into(),
+        ))
+    }
+
+    /// The subject an envelope belongs on: an instrument's, or an account's.
     ///
     /// `None` for an envelope addressed to a market rather than a venue — it
     /// has no venue and no ticker, and inventing either would publish it
-    /// somewhere nothing is listening.
+    /// somewhere nothing is listening — and for an account whose alias is
+    /// shaped like an address ([`Subject::account`]).
     pub fn of(envelope: &galata_wire::Envelope) -> Option<Subject> {
-        Some(Subject::market(
-            envelope.venue()?,
-            envelope.ticker()?,
-            envelope.kind(),
-        ))
+        let venue = envelope.venue()?;
+        if let Some(account) = envelope.account() {
+            return Subject::account(venue, account, envelope.kind());
+        }
+        Some(Subject::market(venue, envelope.ticker()?, envelope.kind()))
     }
 
     /// As the wire wants it.
@@ -84,7 +106,7 @@ impl fmt::Display for Subject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use galata_wire::{Clipped, Envelope, Event, Gap, GapCause, Series};
+    use galata_wire::{AccountMode, Clipped, Envelope, Event, Gap, GapCause, Margin, Series};
 
     fn venue() -> Venue {
         Venue::new("hyperliquid").unwrap()
@@ -138,6 +160,47 @@ mod tests {
         assert_eq!(
             Subject::of(&envelope).unwrap().as_str(),
             "markets.hyperliquid.ETH.gaps"
+        );
+    }
+
+    fn margin() -> Event {
+        Event::Margin(Margin {
+            dex: None,
+            mode: AccountMode::Disabled,
+            equity_not_held: None,
+            account_value: None,
+            total_notional: None,
+            total_raw_usd: None,
+            margin_used: None,
+            maintenance_margin_used: None,
+            withdrawable: None,
+        })
+    }
+
+    #[test]
+    fn an_account_is_addressed_by_its_alias_under_its_own_root() {
+        let envelope =
+            Envelope::for_account(venue(), Account::new("main").unwrap(), None, 1, margin());
+        let subject = Subject::of(&envelope).unwrap();
+        assert_eq!(subject.as_str(), "accounts.hyperliquid.main.margin");
+        assert!(!subject.as_str().starts_with("markets."));
+        assert_eq!(subject.as_str().split('.').count(), 4);
+    }
+
+    #[test]
+    fn an_address_where_an_alias_belongs_forms_no_subject() {
+        // The token accepts it — `0x…` is alphanumeric — so the subject is
+        // the last place it can be stopped before every subscriber reads it.
+        let address = "0x3f9aa0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7";
+        let envelope =
+            Envelope::for_account(venue(), Account::new(address).unwrap(), None, 1, margin());
+        assert_eq!(Subject::of(&envelope), None);
+        // A discovered sub-account's alias is still an alias.
+        let sub =
+            Envelope::for_account(venue(), Account::new("main_s1").unwrap(), None, 1, margin());
+        assert_eq!(
+            Subject::of(&sub).unwrap().as_str(),
+            "accounts.hyperliquid.main_s1.margin"
         );
     }
 }

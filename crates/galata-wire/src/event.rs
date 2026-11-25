@@ -541,6 +541,13 @@ pub enum GapCause {
     /// and the earliest it now returns. Known, not inferred: a full page that
     /// starts after our newest event is the venue saying so.
     BeyondReach,
+    /// **Not a gap in the record.** The bus did not carry these events: they
+    /// were archived, and capture could not hand them to the broker — its
+    /// queue was full, or a publish was refused. The record holds them, so a
+    /// consumer fetches the span from history. Published on the bus only,
+    /// never archived, and so never in the tape. Every other cause says the
+    /// data exists nowhere; this one says where it is.
+    Unpublished,
 }
 
 impl GapCause {
@@ -556,6 +563,7 @@ impl GapCause {
             GapCause::Throttled => "throttled",
             GapCause::Reorg => "reorg",
             GapCause::BeyondReach => "beyond_reach",
+            GapCause::Unpublished => "unpublished",
         }
     }
 }
@@ -1371,6 +1379,38 @@ mod tests {
     }
 
     #[test]
+    fn unpublished_is_the_bus_missing_what_the_record_holds() {
+        // Distinct from every cause that says the data exists nowhere, so a
+        // consumer can tell "fetch it from history" from "it is gone".
+        let record = [
+            GapCause::SessionLost,
+            GapCause::CrashUnflushed,
+            GapCause::Downtime,
+            GapCause::RotationFailed,
+            GapCause::Refused,
+            GapCause::PollFailed,
+            GapCause::Throttled,
+            GapCause::Reorg,
+            GapCause::BeyondReach,
+        ];
+        assert!(record.iter().all(|c| *c != GapCause::Unpublished));
+        assert!(record.iter().all(|c| c.as_str() != "unpublished"));
+
+        let gap = Gap {
+            series: Series::Quotes,
+            from_micros: 1,
+            to_micros: 2,
+            cause: GapCause::Unpublished,
+            clipped: Clipped::Continuous,
+            dex: None,
+        };
+        let json = serde_json::to_string(&gap).unwrap();
+        assert!(json.contains(r#""cause":"unpublished""#), "{json}");
+        let back: Gap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, gap);
+    }
+
+    #[test]
     fn no_gap_cause_means_silence() {
         // Written out rather than derived, so adding a variant is a deliberate
         // act that fails this test until somebody looks at it.
@@ -1384,11 +1424,12 @@ mod tests {
             GapCause::Throttled,
             GapCause::Reorg,
             GapCause::BeyondReach,
+            GapCause::Unpublished,
         ]
         .iter()
         .map(|c| c.as_str())
         .collect();
-        assert_eq!(causes.len(), 9);
+        assert_eq!(causes.len(), 10);
         for cause in &causes {
             assert!(
                 !cause.contains("quiet") && !cause.contains("silent") && !cause.contains("idle"),

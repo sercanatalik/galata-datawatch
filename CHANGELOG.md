@@ -24,8 +24,27 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Added
 
+**`galata-broker`**
+
+- **The broker keeps a window of the bus** (`add-bus-replay-window`):
+  `streams::table` declares MARKETS (`markets.>`, two hours within a byte cap),
+  ACCOUNTS (`accounts.>`, seven days) and STATUS (`status.>`, the last message
+  per subject); `streams::apply` creates or updates them, reporting each one;
+  `streams::connect_admin` and `streams::held` connect as the new `bus-admin`
+  login and read what a stream holds. `bus-admin` may create, update and read
+  the declared streams, on an inbox prefix of its own, and nothing else; no
+  other login gains any stream right.
+- `Subject::account` and `Subject::of` for an account envelope:
+  `accounts.<venue>.<alias>.<kind>`, refusing an alias shaped like an address.
+  `accounts.` joins `ROOTS` with the first login granted it, in the ledger's
+  change.
+
 **`galata-wire`**
 
+- `GapCause::Unpublished` (`unpublished`), additive (`add-bus-replay-window`):
+  the bus did not carry a span the record holds, so a consumer fetches it from
+  history. Sent on the bus only and never archived, so the tape never holds
+  one. Every other cause says the data exists nowhere.
 - `Kind::OptionPricing` (`option_pricing`) and `Event::OptionPricing`: an
   option's implied volatility, bid and ask volatility, delta, gamma, vega,
   theta, rho, forward and discount factor, each as the venue printed it. Not
@@ -36,6 +55,19 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 **`galata-datawatch`**
 
+- **Capture declares what the bus did not carry** (`add-bus-replay-window`).
+  An event dropped from the bus — the queue to the broker full, or a publish
+  refused — is noted by its receipt time; once a publish succeeds again,
+  capture sends for every pair it covers a gap with the cause `unpublished`
+  over the dropped span, on the bus only. The record is unaffected and holds
+  no declaration. A declaration that cannot be sent stays pending, merged with
+  the next span. `NatsSink::unpublished` hands the pending span to the publish
+  task.
+- `galata-bus`, the broker's process (`add-bus-replay-window`): it starts a
+  helper of itself that waits for the server, applies the stream table as
+  `bus-admin` and logs what each stream holds, then becomes `nats-server`
+  (`exec`), so launchd's stop reaches the server directly. A table it cannot
+  apply is logged by name, and the server serves on without it.
 - The `derive-xyz` venue, behind a feature of that name and off by default:
   options on Derive (derive.xyz), from public data. One ticker payload becomes
   a `quotes` row, a `marks` row and an `option_pricing` row; the index of each

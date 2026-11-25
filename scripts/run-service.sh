@@ -256,24 +256,29 @@ config_mount() {
                   -e "GALATA_CONFIG=$CONFIG_INSIDE" -e NO_COLOR=1)
 }
 
-# The lane's run store and its schedule: a volume of its own.
+# A service's state that nothing else reads: a volume of its own, at /data.
 #
 # The archive and the tape are folders on the host because other services and
-# native tools read them. The lane's state is read by nothing but the lane, so
-# it gets an Apple volume, which one container attaches at a time. Made at the
-# first real start and handed once to the image's user, who cannot write to a
-# new volume (measured 2026-11-24: mode 755, owned by root). Deletable, as the
-# run store always was (py/flows/__init__.py, the first invariant).
+# native tools read them. The jobs lane's run store and the broker's streams
+# are read by nothing but their own service, so each gets an Apple volume,
+# which one container attaches at a time. Made at the first real start and
+# handed once to the image's user, who cannot write to a new volume (measured
+# 2026-11-24: mode 755, owned by root). Deletable: the run store always was
+# (py/flows/__init__.py, the first invariant), and the broker's streams are a
+# cache of what the archive and the ledger hold.
+#
+#   own_volume <volume> <image>
 FLOWS_STATE="${GALATA_FLOWS_STATE:-galata-flows-state}"
-flows_state() {
-    local tool
+NATS_STORE="${GALATA_NATS_STORE:-galata-nats-store}"
+own_volume() {
+    local volume="$1" image="$2" tool
     tool="$(container_tool 2>&1)" || refuse "$tool"
-    container_volume "$tool" "$FLOWS_STATE" && return 0
-    "$tool" volume create "$FLOWS_STATE" >/dev/null \
-        || refuse "could not create the volume $FLOWS_STATE"
-    "$tool" run --rm --name galata-flows-state-init --cpus 1 --memory 256M -u 0 \
-            -v "$FLOWS_STATE:/data" "$FLOWS_IMAGE" chown galata /data >/dev/null \
-        || refuse "could not hand the volume $FLOWS_STATE to the lane's user — container volume rm $FLOWS_STATE, then start again"
+    container_volume "$tool" "$volume" && return 0
+    "$tool" volume create "$volume" >/dev/null \
+        || refuse "could not create the volume $volume"
+    "$tool" run --rm --name "$volume-init" --cpus 1 --memory 256M -u 0 \
+            -v "$volume:/data" "$image" chown galata /data >/dev/null \
+        || refuse "could not hand the volume $volume to the image's user — container volume rm $volume, then start again"
 }
 
 service="${1:-}"
@@ -297,17 +302,23 @@ case "$service" in
         # not to start: the only other addresses are loopback, which no
         # container reaches, and the LAN.
         tailnet="$(tailnet_address 2>&1)" || refuse "$tailnet"
-        # config/ read-only: the generated authorization file, which names
-        # each password as a variable and holds none.
+        # config/ read-only: the server's configuration and the generated
+        # authorization file it includes, which names each password as a
+        # variable and holds none. The streams' store: a volume of the
+        # broker's own, and nothing of var/.
         in_container nats "$NATS_IMAGE" -i \
             --mount "type=bind,source=$ROOT/config,target=/etc/galata,readonly" \
+            -v "$NATS_STORE:/data" \
             --publish "$tailnet:4222:4222"
-        # -a 0.0.0.0, inside the container: the published port arrives on the
-        # container's own address, not its loopback.
+        if (( ! CHECK )); then own_volume "$NATS_STORE" "$NATS_IMAGE"; fi
+        # galata-bus applies the stream table once the server answers, and
+        # becomes the server meanwhile (exec), so launchd's stop reaches it
+        # directly. -a 0.0.0.0, inside the container: the published port
+        # arrives on the container's own address, not its loopback.
         from_vault nats "${only[@]}" -- \
             /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
             "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- \
-            nats-server -c /etc/galata/nats-authorization.conf -a 0.0.0.0 -p 4222
+            galata-bus -- nats-server -c /etc/galata/nats-server.conf -a 0.0.0.0 -p 4222
         ;;
     capture)
         venue="${2:-}"
@@ -400,7 +411,7 @@ case "$service" in
         root_mounts paths.archive paths.tape
         config_mount "$(container_name flows)"
         in_container flows "$FLOWS_IMAGE" "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}" -v "$FLOWS_STATE:/data"
-        if (( ! CHECK )); then flows_state; fi
+        if (( ! CHECK )); then own_volume "$FLOWS_STATE" "$FLOWS_IMAGE"; fi
         start "${CONTAINER_RUN[@]}"
         ;;
     *)
