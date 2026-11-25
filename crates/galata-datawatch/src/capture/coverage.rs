@@ -10,11 +10,15 @@
 //! loss was noticed. Dating it from the moment of noticing understates it by
 //! exactly the interval that matters.
 //!
-//! **Silence is never a gap.** For a push stream you cannot tell *no trades
-//! occurred* from *the connection is silently dead*, so nothing is inferred
-//! from a quiet window. A quiet market and a halted instrument produce no gap
-//! at all — they are not losses, and reporting them as such would bury the real
-//! ones.
+//! **Silence on a live connection is never a gap.** From the data alone you
+//! cannot tell *no trades occurred* from *the connection is silently dead*, so
+//! nothing is inferred from a quiet window. A quiet market and a halted
+//! instrument produce no gap at all — they are not losses, and reporting them
+//! as such would bury the real ones. **A dead connection is not silence**: for
+//! a venue that answers its keepalive, an unanswered one says the connection
+//! died, and its time is a `session_lost` gap like any lost session's
+//! (`capture::session`). Until 2026-11-25 nothing asked, and a connection that
+//! died without closing read as a quiet market until something replaced it.
 
 use std::collections::BTreeMap;
 
@@ -156,7 +160,9 @@ impl Coverage {
 
     /// A handover completed. Coverage is continuous across it, so every pair is
     /// covered to this moment and **no gap is published, because none
-    /// occurred**.
+    /// occurred**. Called only for a handover whose replaced connection showed
+    /// it was alive after its replacement was subscribed, or whose venue does
+    /// not answer keepalives; a dead one's handover publishes gaps instead.
     pub fn handover_completed(&mut self, at_micros: i64) {
         for ledger in self.pairs.values_mut() {
             if ledger.last_recv_micros.is_some() {

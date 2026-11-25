@@ -4,7 +4,10 @@
 //! service its timers — flush, status, keepalive, rotation — and a socket read
 //! that blocks forever would starve all four. So a read that finds nothing
 //! inside the window yields [`Frame::Idle`], and **`Idle` is not a gap**: a
-//! quiet market and a silently dead connection are the same shape from here.
+//! quiet market and a silently dead connection are the same shape for one
+//! window. Telling them apart is the session's, by whether the venue answers
+//! its keepalive (`capture::session`); this says only what arrived, and a
+//! protocol ping or pong, which carries no data, arrives as [`Frame::Control`].
 
 use std::time::Duration;
 
@@ -105,15 +108,15 @@ impl StreamSource {
             return Ok(Frame::Closed);
         };
         match tokio::time::timeout(POLL_WINDOW, socket.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => Ok(Frame::Bytes(text.as_bytes().to_vec())),
-            Ok(Some(Ok(Message::Binary(bytes)))) => Ok(Frame::Bytes(bytes.to_vec())),
-            Ok(Some(Ok(Message::Ping(payload)))) => {
-                // Answered here rather than in the loop: it is a fact about
-                // this transport, not about capture.
-                let _ = socket.send(Message::Pong(payload)).await;
-                Ok(Frame::Idle)
+            Ok(Some(Ok(message))) => {
+                let (frame, answer) = frame_of(message);
+                if let Some(answer) = answer {
+                    // Answered here rather than in the loop: it is a fact about
+                    // this transport, not about capture.
+                    let _ = socket.send(answer).await;
+                }
+                Ok(frame)
             }
-            Ok(Some(Ok(_))) => Ok(Frame::Idle),
             Ok(Some(Err(e))) => {
                 self.socket = None;
                 Err(SourceError::Session(e.to_string()))
@@ -135,9 +138,62 @@ impl StreamSource {
     }
 }
 
+/// What one message is to the loop, and the answer it needs, if any.
+///
+/// **A ping or a pong is [`Frame::Control`], never [`Frame::Idle`].** Both
+/// show the connection alive, which is the one thing a dead connection cannot
+/// do; reporting them as nothing would make a venue that keeps alive by
+/// protocol look dead to the session.
+fn frame_of(message: Message) -> (Frame, Option<Message>) {
+    match message {
+        Message::Text(text) => (Frame::Bytes(text.as_bytes().to_vec()), None),
+        Message::Binary(bytes) => (Frame::Bytes(bytes.to_vec()), None),
+        Message::Ping(payload) => (Frame::Control, Some(Message::Pong(payload))),
+        Message::Pong(_) => (Frame::Control, None),
+        // A close frame is followed by the end of the stream, which is what
+        // says Closed.
+        Message::Close(_) | Message::Frame(_) => (Frame::Idle, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ping_or_a_pong_shows_the_connection_alive_and_carries_nothing() {
+        let (frame, answer) = frame_of(Message::Ping(b"x".to_vec().into()));
+        assert_eq!(frame, Frame::Control);
+        assert_eq!(
+            answer,
+            Some(Message::Pong(b"x".to_vec().into())),
+            "a ping is answered"
+        );
+        assert_eq!(
+            frame_of(Message::Pong(Vec::new().into())),
+            (Frame::Control, None)
+        );
+    }
+
+    #[test]
+    fn data_is_bytes_and_a_close_is_left_to_the_end_of_the_stream() {
+        assert_eq!(
+            frame_of(Message::Text(r#"{"channel":"pong"}"#.into())),
+            (Frame::Bytes(br#"{"channel":"pong"}"#.to_vec()), None),
+            "the venue's own pong is data: it is archived, and it shows the connection alive"
+        );
+        assert_eq!(
+            frame_of(Message::Binary(vec![1, 2].into())),
+            (Frame::Bytes(vec![1, 2]), None)
+        );
+        assert_eq!(frame_of(Message::Close(None)), (Frame::Idle, None));
+    }
+
+    #[test]
+    fn nothing_control_and_closed_are_three_things() {
+        assert_ne!(Frame::Idle, Frame::Control);
+        assert_ne!(Frame::Control, Frame::Closed);
+    }
 
     #[test]
     fn an_unconnected_source_is_closed_rather_than_idle() {

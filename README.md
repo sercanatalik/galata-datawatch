@@ -160,6 +160,24 @@ path through it:
   `Cursor::{Time, Block, Seq}`, which makes a blockchain venue a first-class
   source rather than a special case.
 
+**A silence is not a gap; a dead connection's is.** A connection can die
+without closing — a change in the host's network did exactly that to a
+container's on 2026-11-25 — and a quiet market and a dead connection deliver
+the same nothing. What tells them apart is the venue's keepalive:
+
+- **A quiet market on a live connection is never a gap**, however long.
+- **A venue that declares how soon it answers its keepalive**
+  (`ConnectionPolicy::reply_secs`; Hyperliquid answers its 20-second ping
+  within 10 seconds) is dead once one goes unanswered for that long, with no
+  frame of any kind since. Capture records a `session_lost` gap for every pair,
+  each from its own last receipt, and connects again at once. A death is found
+  within the keepalive interval plus the reply time.
+- **A handover claims continuity only across a live connection.** The one being
+  replaced is asked to show it is alive after its replacement is subscribed;
+  if it shows nothing within the reply time, its silence is a `session_lost` gap
+  up to the replacement's subscription, not coverage.
+- **A venue that declares no reply time** has nothing inferred from its silence.
+
 Normalised events are published on NATS as `markets.<venue>.<ticker>.<kind>`,
 and each capture reports its own health on `status.<venue>`. The two roots are
 granted separately, so a dashboard can read status without the market-data
@@ -224,7 +242,9 @@ worked example that compiles.
 checks that claim: cargo builds the file as a separate crate, so it sees only
 what an outside user sees. If a venue needs something private, the compiler
 names it. docs.rs builds with `all-features = true`, so every venue is
-documented and each gated item shows the feature it needs.
+documented and each gated item shows the feature it needs. A streaming venue
+of your own states whether it answers its keepalive, and how soon
+(`ConnectionPolicy`'s `reply_secs`); `None` keeps its silence uninterpreted.
 
 ---
 
@@ -360,6 +380,23 @@ server policy, not a second encryption boundary.
 The broker secret is kept out of the capture process's environment. The
 generated NATS authorization file still reads it from the NATS server's
 environment.
+
+**Archiving never waits for the broker.** Capture archives from its start
+whether the broker answers or not, and what it does about the broker
+depends on how the broker answers:
+
+- **No answer at the start** (down, or a tailnet name that does not resolve
+  while the tailnet is down): capture says so once and keeps asking in the
+  background, after 1, 2, 4 … seconds and never more than a minute apart. It
+  publishes once the broker answers, with no restart. Events produced
+  meanwhile wait in the `queue`-sized channel and are dropped and counted in
+  the status's `sink_dropped` once it is full.
+- **An answer that refuses the identity**: a misconfiguration that will not fix
+  itself. Capture does not start, or, if the refusal comes on a later attempt,
+  flushes and stops, exiting non-zero with the identity and the password's
+  variable named.
+- **A connection that drops after it was made** is reconnected by the client,
+  with capture archiving throughout.
 
 ### Scheduled maintenance
 

@@ -699,6 +699,47 @@ impl Capture {
         }
     }
 
+    /// A handover from a connection that showed it was alive after its
+    /// replacement was subscribed. Coverage was continuous, so **no gap is
+    /// published, because none occurred**, and the replacement is the session.
+    fn handed_over(&mut self, now_micros: i64) {
+        self.coverage.handover_completed(now_micros);
+        self.replacement_took_over(now_micros);
+    }
+
+    /// A handover from a connection that showed **nothing** within the venue's
+    /// reply time after its replacement was subscribed: it was dead.
+    ///
+    /// Each pair's time from its own last receipt to the replacement's
+    /// subscription is a `session_lost` gap, closed there, because the
+    /// replacement covers from there. Until 2026-11-25 every handover claimed
+    /// continuity, and a dead connection handed over left a silent hole:
+    /// 16:41:58 to 16:44:16 that day, nine instruments recorded as watched.
+    fn handed_over_from_dead(&mut self, subscribed_at_micros: i64, now_micros: i64) {
+        let gaps = self
+            .coverage
+            .gaps_for_all(subscribed_at_micros, GapCause::SessionLost);
+        for (ticker, gap) in gaps {
+            self.queue_fill(&ticker, &gap, now_micros);
+            self.emit_gap(&ticker, gap);
+        }
+        // Asked again at the subscription: the gaps end there, with no tail.
+        let declared = self.wiring.declared.clone();
+        self.asked_again(&declared, subscribed_at_micros);
+        self.replacement_took_over(now_micros);
+    }
+
+    /// The replacement is the session now. Its subscriptions were sent before
+    /// it took over, so they are sent and awaiting delivery, and `subs_held`
+    /// climbs again from zero as they deliver.
+    fn replacement_took_over(&mut self, now_micros: i64) {
+        self.open_session(now_micros);
+        let declared = self.wiring.declared.clone();
+        for subscription in &declared {
+            self.held.mark_sent(subscription);
+        }
+    }
+
     /// The session stopped delivering. Each pair's gap begins at **its own**
     /// last covered moment, not at the moment the loss was observed.
     pub fn session_lost(&mut self, now_micros: i64) {
@@ -917,8 +958,31 @@ impl Capture {
                 // forbid reading the adapter for its subscribe frames, which
                 // is the one thing the handover needs.
                 match self.session.as_ref().map(|session| session.act(now)) {
+                    // **Dead though it never closed.** A keepalive went
+                    // unanswered for the venue's reply time. Measured on
+                    // 2026-11-25: a change in the host's network killed a
+                    // container's connection, and this loop said "connected"
+                    // for minutes. Its silence is a gap for every pair, from
+                    // each one's own last receipt; then connect again.
+                    Some(Act::Dead) => {
+                        let silent_secs = self
+                            .session
+                            .as_ref()
+                            .map_or(0, |session| session.silent_secs(now));
+                        tracing::warn!(
+                            endpoint = label,
+                            silent_secs,
+                            "the connection answered no keepalive within the venue's reply time: \
+                             dead though it never closed; its silence is a gap, connecting again"
+                        );
+                        self.session_lost(now);
+                        break;
+                    }
                     Some(Act::Keepalive) => {
                         if source.keepalive(&keepalive).await.is_err() {
+                            // A keepalive that cannot be sent is a connection
+                            // that has gone: its time is a gap, not a silence.
+                            self.session_lost(now);
                             break;
                         }
                         if let Some(session) = &mut self.session {
@@ -942,8 +1006,12 @@ impl Capture {
                         match Self::open_replacement(endpoint.clone(), &frames).await {
                             Ok(opened) => {
                                 replacement = Some(opened);
+                                // The moment it was subscribed, not the moment
+                                // it was asked for: opening took time, and the
+                                // replacement covers from here.
+                                let subscribed = self.wiring.clock.now_micros();
                                 if let Some(session) = &mut self.session {
-                                    session.replacement_subscribed();
+                                    session.replacement_subscribed(subscribed);
                                 }
                             }
                             Err(error) => {
@@ -963,22 +1031,37 @@ impl Capture {
                         }
                     }
                     // **Now** the handover is free: the replacement is
-                    // subscribed, so the one it replaces can go.
+                    // subscribed, and the one it replaces showed it was alive
+                    // after that — or its venue does not answer keepalives,
+                    // and nothing more can be asked.
                     Some(Act::CloseReplaced) => {
                         if let Some(opened) = replacement.take() {
                             source = opened;
-                            self.coverage.handover_completed(now);
-                            // Resets the ledger, which is right: the new
-                            // socket has delivered nothing yet, so `subs_held`
-                            // climbs again from zero as it does. They were
-                            // subscribed on the replacement before it took
-                            // over, so they are sent and awaiting delivery.
-                            self.open_session(now);
-                            let declared = self.wiring.declared.clone();
-                            for subscription in &declared {
-                                self.held.mark_sent(subscription);
-                            }
+                            self.handed_over(now);
                             tracing::info!(endpoint = label, "handed over");
+                        }
+                    }
+                    // **The one it replaces was dead.** Asked to show it was
+                    // alive, it showed nothing within the reply time, so its
+                    // silence is a gap up to the replacement's subscription —
+                    // not the coverage a handover would otherwise claim.
+                    Some(Act::CloseDead) => {
+                        let (subscribed, silent_secs) =
+                            self.session.as_ref().map_or((now, 0), |session| {
+                                (
+                                    session.replacement_subscribed_at().unwrap_or(now),
+                                    session.silent_secs(now),
+                                )
+                            });
+                        if let Some(opened) = replacement.take() {
+                            source = opened;
+                            self.handed_over_from_dead(subscribed, now);
+                            tracing::warn!(
+                                endpoint = label,
+                                silent_secs,
+                                "handed over from a connection that showed nothing after its \
+                                 replacement was subscribed: it was dead, and its silence is a gap"
+                            );
                         }
                     }
                     Some(Act::Wait) | None => {}
@@ -998,11 +1081,23 @@ impl Capture {
                             delivered = true;
                             backoff.reset();
                         }
+                        let at = self.wiring.clock.now_micros();
+                        if let Some(session) = &mut self.session {
+                            session.frame_received(at);
+                        }
                         self.take_frame(&bytes)?
                     }
-                    // **Not a gap.** A quiet market and a silently dead
-                    // connection are the same shape from here, so nothing is
-                    // inferred from it.
+                    // Nothing to archive, and the connection is alive.
+                    Ok(Frame::Control) => {
+                        let at = self.wiring.clock.now_micros();
+                        if let Some(session) = &mut self.session {
+                            session.frame_received(at);
+                        }
+                    }
+                    // **Not a gap by itself.** One quiet window says nothing:
+                    // a quiet market and a dead connection deliver the same
+                    // nothing. Whether the connection is dead is the session's
+                    // to say, by its keepalive going unanswered (`Act::Dead`).
                     Ok(Frame::Idle) => {}
                     Ok(Frame::Closed) => {
                         self.session_lost(self.wiring.clock.now_micros());
@@ -1016,6 +1111,11 @@ impl Capture {
                 }
             }
             source.close().await;
+            // A replacement held while the handover waited on the old
+            // connection goes too: the next connect opens its own.
+            if let Some(mut unused) = replacement.take() {
+                unused.close().await;
+            }
             // A session that delivered nothing waits before the next connect,
             // as a failed connect does. One that delivered reconnects at once:
             // every millisecond here is a millisecond of gap.
@@ -2210,19 +2310,53 @@ mod tests {
         assert_eq!(f.capture.now(), 5_010 * SEC);
     }
 
+    /// What the loop does with the session's acts, second by second, on a
+    /// connection that delivers no data. `answers_until`: the venue answers
+    /// each keepalive 300 ms later while the second is before this, and
+    /// nothing after it. Returns the act that stopped it, if one did.
+    fn drive(f: &mut Fixture, seconds: i64, answers_until: i64) -> Option<Act> {
+        for _ in 0..seconds {
+            f.clock.advance_secs(1);
+            let now = f.clock.now_micros();
+            let answering = now < answers_until;
+            let act = f.capture.session.as_ref().map(|s| s.act(now));
+            match act {
+                Some(Act::Keepalive) => {
+                    let session = f.capture.session.as_mut().unwrap();
+                    session.keepalive_sent(now);
+                    if answering {
+                        session.frame_received(now + 300_000);
+                    }
+                }
+                Some(Act::OpenReplacement) => {
+                    f.capture
+                        .session
+                        .as_mut()
+                        .unwrap()
+                        .replacement_subscribed(now);
+                }
+                Some(Act::CloseReplaced) => f.capture.handed_over(now),
+                Some(Act::Wait) => {}
+                other => return other,
+            }
+            f.capture.publish_status_if_due(now);
+        }
+        None
+    }
+
     #[test]
     fn an_idle_poll_window_publishes_no_gap() {
         // The one place this rule is easy to break by accident. A quiet market
-        // and a silently dead connection are the same shape from the loop.
+        // and a silently dead connection deliver the same nothing; what tells
+        // them apart is the keepalive's answer, and this one is answered.
         let mut f = fixture(1_000 * SEC);
         f.capture.report_restart_gap();
+        f.capture.open_session(f.clock.now_micros());
         f.capture.take_frame(&bbo("BTC", 1_000_000)).unwrap();
 
-        // An hour of nothing.
-        for _ in 0..3_600 {
-            f.clock.advance_secs(1);
-            f.capture.publish_status_if_due(f.clock.now_micros());
-        }
+        // An hour of no data, every keepalive answered, seven handovers.
+        let stopped = drive(&mut f, 3_600, i64::MAX);
+        assert_eq!(stopped, None, "a live connection was found dead");
 
         let gaps = f
             .sink
@@ -2328,6 +2462,142 @@ mod tests {
         // Asked again once is asked again: a second send adds nothing.
         f.capture.asked_again(&declared(), sent + SEC);
         assert_eq!(gaps_emitted(&f).len(), 4);
+    }
+
+    /// Every gap published for one ticker, in order.
+    fn gaps_of(f: &Fixture, ticker: &str) -> Vec<Gap> {
+        f.sink
+            .emitted()
+            .into_iter()
+            .filter_map(|e| match e.event {
+                Event::Gap(g) if e.ticker().is_some_and(|t| t.as_str() == ticker) => Some(g),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_dead_connection_gaps_each_pair_from_its_own_last_receipt() {
+        // Measured on 2026-11-25: a connection killed by a change in the
+        // host's network said "connected" for minutes. Now its first
+        // unanswered keepalive says otherwise.
+        let mut f = fixture(1_000 * SEC);
+        f.capture.report_restart_gap();
+        f.capture.open_session(f.clock.now_micros());
+        f.capture.take_frame(&bbo("ETH", 1_000_000)).unwrap();
+        f.clock.advance_secs(2);
+        f.capture.take_frame(&bbo("BTC", 1_002_000)).unwrap();
+        let btc_last = f.clock.now_micros();
+        f.capture.session.as_mut().unwrap().frame_received(btc_last);
+
+        // Nothing more arrives, and the keepalive due at 1,020 s goes
+        // unanswered.
+        let stopped = drive(&mut f, 60, 0);
+        assert_eq!(stopped, Some(Act::Dead));
+        let dead = f.clock.now_micros();
+        assert_eq!(
+            dead,
+            1_030 * SEC,
+            "found within the keepalive interval plus the reply time"
+        );
+        f.capture.session_lost(dead);
+        assert_eq!(
+            f.capture.status(dead).connection,
+            Connection::Down,
+            "down until it connects again"
+        );
+
+        // Connected and asked again a second later.
+        f.clock.advance_secs(1);
+        let asked = f.clock.now_micros();
+        f.capture.asked_again(&declared(), asked);
+
+        for (ticker, last) in [("BTC", btc_last), ("ETH", 1_000 * SEC)] {
+            let gaps = gaps_of(&f, ticker);
+            assert_eq!(gaps.len(), 2, "{ticker}: {gaps:?}");
+            assert_eq!(
+                gaps[0].from_micros, last,
+                "{ticker}: from its own last receipt"
+            );
+            assert_eq!(gaps[0].to_micros, dead);
+            assert_eq!(
+                gaps[1].from_micros, dead,
+                "{ticker}: the tail starts where the loss ended"
+            );
+            assert_eq!(gaps[1].to_micros, asked);
+            assert!(gaps.iter().all(|g| g.cause == GapCause::SessionLost));
+        }
+    }
+
+    #[test]
+    fn a_handover_between_live_connections_publishes_no_gap() {
+        let mut f = fixture(1_000 * SEC);
+        f.capture.report_restart_gap();
+        f.capture.open_session(f.clock.now_micros());
+        f.capture.take_frame(&bbo("BTC", 1_000_000)).unwrap();
+        f.capture.take_frame(&bbo("ETH", 1_000_000)).unwrap();
+
+        // Through the handover due at 1,480 s, every keepalive answered.
+        assert_eq!(drive(&mut f, 500, i64::MAX), None);
+        let now = f.clock.now_micros();
+        assert!(
+            f.capture.session.as_ref().unwrap().age_secs(now) < 30,
+            "the replacement took over"
+        );
+        assert!(gaps_of(&f, "BTC").is_empty() && gaps_of(&f, "ETH").is_empty());
+    }
+
+    #[test]
+    fn a_handover_from_a_dead_connection_gaps_up_to_the_replacements_subscription() {
+        // The silent hole of 2026-11-25: a dead connection handed over, and
+        // its dead minutes claimed as covered.
+        let mut f = fixture(1_000 * SEC);
+        f.capture.report_restart_gap();
+        f.capture.open_session(f.clock.now_micros());
+        f.capture.take_frame(&bbo("ETH", 1_000_000)).unwrap();
+
+        // Alive, its keepalives answered, until BTC's last quote at 1,465 s;
+        // then it dies, before the handover due at 1,480 s.
+        assert_eq!(drive(&mut f, 465, i64::MAX), None);
+        f.capture.take_frame(&bbo("BTC", 1_465_000)).unwrap();
+        let btc_last = f.clock.now_micros();
+        f.capture.session.as_mut().unwrap().frame_received(btc_last);
+
+        let stopped = drive(&mut f, 60, 0);
+        assert_eq!(stopped, Some(Act::CloseDead));
+        let now = f.clock.now_micros();
+        let subscribed = f
+            .capture
+            .session
+            .as_ref()
+            .unwrap()
+            .replacement_subscribed_at()
+            .unwrap();
+        assert_eq!(subscribed, 1_480 * SEC);
+        assert_eq!(now, 1_490 * SEC, "the reply time after the subscription");
+        f.capture.handed_over_from_dead(subscribed, now);
+
+        // The replacement is alive, and covers from its subscription.
+        assert_eq!(drive(&mut f, 60, i64::MAX), None);
+        f.capture.asked_again(&declared(), f.clock.now_micros());
+
+        for (ticker, last) in [("BTC", btc_last), ("ETH", 1_000 * SEC)] {
+            let gaps = gaps_of(&f, ticker);
+            assert_eq!(
+                gaps.len(),
+                1,
+                "{ticker}: one gap, and none after it: {gaps:?}"
+            );
+            assert_eq!(
+                gaps[0].from_micros, last,
+                "{ticker}: from its own last receipt"
+            );
+            assert_eq!(
+                gaps[0].to_micros, subscribed,
+                "{ticker}: to the replacement's subscription"
+            );
+            assert_eq!(gaps[0].cause, GapCause::SessionLost);
+        }
     }
 
     #[test]

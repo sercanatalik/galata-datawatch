@@ -17,6 +17,39 @@ exists so the four above take no vault dependency.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connection that dies without closing is found, and its silence is a gap**
+  (`capture-recovers-dead-connections`). Measured on 2026-11-25: a change in the
+  host's network killed capture's connection inside its container, capture said
+  "connected" for minutes, and its 8-minute handover then claimed the dead time
+  as covered — 2 min 18 s of nine instruments recorded as watched. Now, for a
+  venue that declares how soon it answers its keepalive, an unanswered one
+  means the connection is dead: a `session_lost` gap for every pair from its
+  own last receipt, and a new connection at once. A handover claims continuity
+  only once the replaced connection has shown it is alive after its replacement
+  was subscribed; otherwise its silence is a gap up to the subscription. A
+  quiet market on a live connection is still not a gap. A protocol ping or pong
+  now reaches the loop as `Frame::Control` (`source::Frame` gains a variant; it
+  is `#[non_exhaustive]`).
+- **A broker that does not answer at capture's start is asked for again**
+  (`capture-recovers-dead-connections`). It used to mean a sink that published
+  nothing for the rest of the process's life — since the broker moved to the
+  host's tailnet name, every capture started while the tailnet was down. Now
+  capture archives at once, says once that the broker did not answer, and
+  keeps asking after 1, 2, 4 … seconds, never more than a minute apart,
+  publishing once it answers with no restart. A broker that answers and refuses
+  the identity still stops capture, whether at the start or on a later attempt,
+  with the same words.
+
+### Changed
+
+- **BREAKING: a venue declares how soon it answers a keepalive**
+  (`capture-recovers-dead-connections`). Both `ConnectionPolicy` variants gain
+  `reply_secs: Option<u64>`, read through `ConnectionPolicy::reply_secs`. An
+  out-of-tree venue adds `reply_secs: None` to keep today's behaviour, in which
+  nothing is inferred from a connection's silence. Hyperliquid declares 10 s.
+
 ## [0.1.0] - 2026-09-29
 
 First release, published from `4ad9350`. Nothing was on crates.io before it, so

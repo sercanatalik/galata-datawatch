@@ -5094,3 +5094,25 @@ restart is recorded; one that ends in a handover is a silent hole.
 **The broker rides it out.** Never restarted, it answered at the tailnet name
 once the address was back, and capture's connection to it, made at its
 start, came back by itself within a second of Tailscale.
+
+## A broker that answers after capture has started — 2026-11-25
+
+`capture-recovers-dead-connections`, task 4.3. A native capture (this
+branch's debug build, BTC quotes only, a scratch archive) was started with a
+`[broker]` at `nats://127.0.0.1:14222`, where nothing listened; 20 s later a
+`nats-server` 2.15.3 was started there with the deployment's authorization
+file and stand-in passwords made for the run and printed nowhere.
+
+```text
+17:30:36  capture started            "did not answer: Connection refused … asked again in the background"
+17:30:56  after 20 s                 9 quote files archived; the line above once; the same process
+17:30:56  nats-server started
+17:31:07  capture                    "publishing: the broker answered", 11.7 s later, no restart
+                                     (attempts at about 1, 3, 7, 15 and 31 s after its start)
+17:31:12  as the reader, status.>    5 messages in 5 s, status.hyperliquid
+          quote files                17, archiving throughout
+          "did not answer" lines     1 in all: none per attempt
+17:31:13  one SIGTERM each           both stopped cleanly, exit 0
+```
+
+Before this change the same start published nothing until a restart.

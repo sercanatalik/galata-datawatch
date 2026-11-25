@@ -44,7 +44,10 @@ impl Bazaar {
                     weight_per_minute: 60.0,
                     min_historical_interval_ms: 1_000,
                 },
-                connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 30 },
+                connection: ConnectionPolicy::KeepAliveOnly {
+                    keepalive_secs: 30,
+                    reply_secs: None,
+                },
                 ws_url: "wss://bazaar.invalid/stream",
                 rest_url: "https://bazaar.invalid",
             },

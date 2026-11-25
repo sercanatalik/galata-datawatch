@@ -685,7 +685,10 @@ mod tests {
                 weight_per_minute: 1_200.0,
                 min_historical_interval_ms: 100,
             },
-            connection: ConnectionPolicy::KeepAliveOnly { keepalive_secs: 20 },
+            connection: ConnectionPolicy::KeepAliveOnly {
+                keepalive_secs: 20,
+                reply_secs: None,
+            },
             ws_url: "wss://example.invalid",
             rest_url: "https://example.invalid",
         }
