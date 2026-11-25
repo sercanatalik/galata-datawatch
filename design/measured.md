@@ -4939,17 +4939,19 @@ host-service-addressing
   Capture publishes nothing               met       no published port
   The jobs lane's own interface stays
     inside                                met       no published port; it answers inside the container
-  The tailnet is down                     by stub   the guard; on this Mac it needs Tailscale stopped (task 6.3)
-  The tailnet comes up                    not seen  task 6.3
+  The tailnet is down                     met       refused at each attempt, "the tailnet is down"; nothing on 4222
+  The tailnet comes up                    met       started on launchd's next attempt, 5 s after (Tailscale stopped, below)
   The broker moves                        met       the first start was at loopback; the configured url changed and,
                                                     restarted, capture connected at the tailnet name, same image
   A wrong credential from the host itself met       -ERR 'Authorization Violation', from the Mac and from a container
   A right credential from another
     machine                               not seen  needs a second tailnet device (task 3.5)
   The tailnet goes down while capture
-    runs                                  not seen  task 7.4; with the broker stopped instead, capture kept archiving
+    runs                                  UNMET     capture ran on, but its venue stream went silent that second;
+                                                    no quotes archived for the 39 s it was watched (Tailscale stopped)
   Capture starts while the tailnet is
-    down                                  not seen  task 7.4
+    down                                  not seen  it started and read its secret; the tailnet returned 20 s later,
+                                                    inside its ~40 s of start-up fetches
 
 service-secret-delivery
   The tower's token cannot start capture  met       "this token's allow-list does not include
@@ -4976,9 +4978,58 @@ service-secret-delivery
                                                     vault was down
   The vault stops while services run      met       the vault was down from 12:41 to 12:51 for its UI's reset; the
                                                     broker, capture and the lane ran on, untouched
-  Capture starts with the tailnet down    not seen  task 5.5's second half, with task 7.4
+  Capture starts with the tailnet down    met       its secret read over loopback, its container started (below)
 ```
 
-Unmet: none. Not yet seen: the leftover container, the ledger's mode, the
-three that need Tailscale stopped, the second device, the mint result, and
-the vault answering again.
+Unmet: none when this was read. Since read again after Tailscale was
+stopped (below): one unmet, the tailnet going down while capture runs. Not
+yet seen: the leftover container, the ledger's mode, capture archiving after
+a start with the tailnet down, the second device, the mint result, and the
+vault answering again.
+
+## Tailscale stopped — 2026-11-25
+
+`containerise-host-services`, tasks 5.5, 6.3 and 7.4, with the maintainer's
+go-ahead. Tailscale was stopped from its command line at 16:08:07 and
+started again at 16:09:08; each service was sent one SIGTERM through
+launchd. The broker, capture and the lane were running in their containers.
+
+```text
+16:08:07  Tailscale stopped
+          capture, running            its venue stream went silent that second: the last quotes file
+                                      before the restart was written at 16:08:08, and none in the 39 s after
+16:08:22  the broker, one SIGTERM     exited; then, at each of launchd's attempts:
+                                      "REFUSED — the tailnet is down (Tailscale reports 'Stopped') — start
+                                      Tailscale; nothing is published on another address in its place"
+          port 4222                   nothing listening, anywhere on this Mac
+16:08:47  capture, one SIGTERM        a clean stop; a new container at 16:08:48, Tailscale still stopped:
+                                      its secret read over the vault's loopback port
+          the broker                  "did not answer: DNS error" — the tailnet name does not resolve
+16:09:08  Tailscale started           (20 s after capture's start, inside its start-up fetches)
+16:09:13  the broker                  started on launchd's next attempt, 5 s after; ready
+16:09:41  capture                     one start-up history request failed: "error sending request"
+16:10:02  capture                     subscribed; quotes archived again
+16:11:30  capture, one SIGTERM        to publish again (below); subscribed at 16:12:14, 43 s after its start
+```
+
+**A network change stalls the container's open connections.** Capture's
+live stream went silent the second Tailscale stopped and had not noticed
+39 s later; a start-up request in flight across Tailscale's return failed
+after half a minute. Quotes for the nine instruments are missing from
+16:08:08 to 16:10:02, and capture recorded the windows as gaps, not as a
+silent hole. Not established: whether a native capture loses its stream the
+same way, and whether a running capture would have found its venue again
+with the tailnet still down. Neither was waited for.
+
+**A capture started while the broker cannot be reached never publishes.**
+At its start capture connects to the broker once; if that fails it archives
+and publishes nothing for the rest of its life ("events are not published
+until this is fixed", `boot.rs`). Since the broker moved to the tailnet name,
+a capture started while the tailnet is down is such a capture, and it stays
+one after the tailnet returns, until it is restarted. It was restarted here.
+
+**Every capture start spends about 40 s before its live stream.** It fetches
+the minutes it was not covering, paced by the venue's weight (nine requests
+a series), before it subscribes: 43 s at 16:11:31 with nothing wrong, 73 s at
+16:08:48 with one request stalled. A restart's cost in quotes is that, not
+the second its container takes.
