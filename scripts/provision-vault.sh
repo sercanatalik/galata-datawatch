@@ -23,8 +23,15 @@
 #      "saved" is typed; this script types it, because the operator asked for
 #      the kit to be written here and moved afterwards.
 #   2. gv env add galata-datawatch/prod
-#   3. every GALATA_BROKER_PASSWORD_* in var/broker.env → gv set, value on stdin
-#      (never an argument, where `ps` would show it)
+#   3. every secret a service reads (scripts/required-secrets.sh) that
+#      var/broker.env gives a value → gv set, value on stdin (never an
+#      argument, where `ps` would show it)
+#
+# **A fresh project holds nothing**, so what it must hold is checked before
+# it is created: every broker password this deployment's services read has
+# to be in var/broker.env, or nothing is made. config/secrets.env.example is
+# the file to fill in. A ledger's secrets may be left out of it and set by
+# hand; the names still owed are listed at the end.
 #
 # Then scripts/mint-service-tokens.sh, then reinstall the services.
 
@@ -54,16 +61,45 @@ esac
 curl -s -o /dev/null --max-time 10 "$SERVER/" \
     || refuse "no vault answers at $SERVER — start the deployment's vault first (galata-vault: deploy/apple-container/gv-container up)"
 [[ -e "$KIT" ]] && refuse "$KIT exists: this project was provisioned already"
-[[ -f "$SECRETS" ]] || refuse "no $SECRETS to import"
+[[ -f "$SECRETS" ]] || refuse "no $SECRETS to import — copy config/secrets.env.example there, mode 0600, and fill it in"
+
+# What the services read, by name, and what the file gives a value. Checked
+# before anything is created: a project made and then found a password short
+# is a project to explain, and a service started from it is one started
+# without its secret.
+required="$("$ROOT/scripts/required-secrets.sh" | cut -f2 | awk '!seen[$0]++')" \
+    || refuse "could not list the secrets the services read (scripts/required-secrets.sh)"
+given() {  # given <name>: does the file give it a value?
+    awk -F= -v n="$1" '$1 == n && length($0) > length(n) + 1 { found = 1 } END { exit found ? 0 : 1 }' "$SECRETS"
+}
+short=""
+while read -r name; do
+    [[ "$name" == GALATA_BROKER_PASSWORD_* ]] || continue
+    given "$name" || short="$short $name"
+done <<< "$required"
+[[ -z "$short" ]] \
+    || refuse "$SECRETS gives no value for:$short — nothing was created. config/secrets.env.example names every one"
 
 umask 077
 printf 'saved\n' | "$GV" init "$PROJECT" --server "$SERVER" --kit "$KIT"
 "$GV" env add "$ENV"
-while IFS='=' read -r name value; do
-    [[ "$name" == GALATA_BROKER_PASSWORD_* ]] || continue
-    printf '%s' "$value" | "$GV" set "$name" --env "$ENV"
-    echo "imported $name"
-done < "$SECRETS"
+owed=""
+while read -r name; do
+    [[ -n "$name" ]] || continue
+    if given "$name"; then
+        # Everything after the first `=`, to the end of the line.
+        awk -v n="$name" 'index($0, n "=") == 1 { printf "%s", substr($0, length(n) + 2); exit }' "$SECRETS" \
+            | "$GV" set "$name" --env "$ENV"
+        echo "imported $name"
+    else
+        owed="$owed $name"
+    fi
+done <<< "$required"
+if [[ -n "$owed" ]]; then
+    echo
+    echo "STILL OWED, set by hand (the value is typed, and stored nowhere else):"
+    for name in $owed; do echo "  gv set $name --env $ENV"; done
+fi
 echo
 echo "RECOVERY KIT: $KIT"
 echo "  Move it to offline storage or a password manager, then delete this copy."

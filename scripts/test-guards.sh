@@ -409,6 +409,20 @@ prove "check-service-secrets (a script runs gv from a checkout)" \
       scripts/provision-vault.sh append \
       $'\n# GV="$GALATA_VAULT_ROOT/target/release/gv"\n'
 
+# A value left in the template a fresh vault project is filled from.
+prove "check-service-secrets (the template holds a value)" \
+      ./scripts/check-service-secrets.sh \
+      config/secrets.env.example replace \
+      'GALATA_BROKER_PASSWORD_READER=' \
+      'GALATA_BROKER_PASSWORD_READER=hunter2'
+
+# A secret a service reads, missing from the template.
+prove "check-service-secrets (the template lacks a name)" \
+      ./scripts/check-service-secrets.sh \
+      config/secrets.env.example replace \
+      $'\n# read by: nats, tower\nGALATA_BROKER_PASSWORD_READER=\n' \
+      $'\n'
+
 # A secret handed to a container with -e, which Apple's container writes into
 # its own state, where `container inspect` prints it.
 prove "check-container-launch (a secret passed with -e)" \

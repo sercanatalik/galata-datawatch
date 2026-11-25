@@ -510,7 +510,9 @@ of the vault this deployment once ran itself.
 First-time setup on a new machine, once the hosted vault answers:
 
 ```sh
-scripts/provision-vault.sh <vault address>   # project galata-datawatch, env .../prod, broker passwords imported from var/broker.env
+cp config/secrets.env.example var/broker.env && chmod 600 var/broker.env   # then give each name a value
+scripts/provision-vault.sh <vault address>   # project galata-datawatch, env .../prod, every secret var/broker.env gives a value
+scripts/required-secrets.sh --missing        # the names the project still lacks; none, before a service is installed
 scripts/mint-service-tokens.sh               # var/tokens/<service>.gvt, mode 0600, valid 365 days
 scripts/carry-secrets.sh --from … --to … NAME …   # what lives nowhere but another vault: a ledger's addresses and fingerprint key
 ```
