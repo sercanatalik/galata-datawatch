@@ -4950,12 +4950,13 @@ host-service-addressing
   A right credential from another
     machine                               not seen  needs a second tailnet device (task 3.5)
   The tailnet goes down while capture
-    runs                                  UNMET     in its container capture's venue stream dies at each change of
-                                                    Tailscale's state, and a native one beside it does not
-                                                    (Tailscale stopped for three minutes, below)
+    runs                                  met       since `capture-recovers-dead-connections`: the stream still dies
+                                                    at the change, and capture finds it and archives again within
+                                                    17 s, the silence a gap (Tailscale stopped and started again,
+                                                    below); before it, UNMET
   Capture starts while the tailnet is
-    down                                  not seen  it started and read its secret; the tailnet returned 20 s later,
-                                                    inside its ~40 s of start-up fetches
+    down                                  met       restarted with Tailscale stopped, it archived 47 s later and
+                                                    published once Tailscale was back, with no second restart
 
 service-secret-delivery
   The tower's token cannot start capture  met       "this token's allow-list does not include
@@ -5116,3 +5117,41 @@ file and stand-in passwords made for the run and printed nowhere.
 ```
 
 Before this change the same start published nothing until a restart.
+
+## Tailscale stopped and started again, on a capture that finds dead connections — 2026-11-25
+
+`capture-recovers-dead-connections`, task 5.3, which is `containerise-host-services`
+task 7.4 run again, with the maintainer's go-ahead. Capture in its container on
+the image built from `3eb898f`; a native capture (BTC quotes, no broker, a
+scratch archive) beside it throughout; sampled every 5 s.
+
+```text
+17:40:03  Tailscale stopped           the container's stream went silent that second, as before;
+                                      the native one did not
+17:40:18.9                            "the connection answered no keepalive within the venue's
+                                      reply time: dead though it never closed" — connected again
+17:40:19                              quotes again, 16.8 s after the last; no restart, Tailscale stopped
+17:41:19  one SIGTERM, still stopped  a clean stop; the new start read its secret over the vault's
+                                      loopback port, said once that the broker did not answer and
+                                      would be asked again, and archived 47 s later, after its
+                                      start-up fetches
+17:42:07  Tailscale started           the stream went silent again, at the change
+17:42:24                              "publishing: the broker answered" — no second restart
+17:42:33.9                            dead though it never closed — connected again
+17:42:34                              quotes again, 27.1 s after the last
+```
+
+Every silence over 5 s in BTC's and ETH's quotes in that window, against the
+gaps the archive recorded:
+
+```text
+silence 17:40:02.88 -> 17:40:19.68   16.8 s   in a session_lost gap 17:40:02.88 -> 17:40:19.36
+silence 17:41:19.32 -> 17:42:04.15   44.8 s   in a downtime gap     17:41:19.32 -> 17:42:03.77
+silence 17:42:07.75 -> 17:42:34.84   27.1 s   in a session_lost gap 17:42:07.75 -> 17:42:34.42
+silent holes                          0        (ETH's the same)
+```
+
+The same check over the first test's window finds the hole that test left:
+16:41:58 to 16:44:16, in no gap. Each change of Tailscale's state still costs
+the container's open connection; it now costs at most the keepalive interval
+plus the reply time and a connection's start, and the record says so.
