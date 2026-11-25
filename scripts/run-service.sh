@@ -114,7 +114,11 @@ from_vault() {
     local service="$1" token="$ROOT/var/tokens/$1.gvt"; shift
     [[ -f "$token" ]] || refuse "no token at $token — scripts/mint-service-tokens.sh"
     local mode
-    mode="$(stat -f %Lp "$token" 2>/dev/null || stat -c %a "$token")"
+    # GNU's form first. BSD stat (macOS) refuses `-c` and falls through to its
+    # own; GNU stat takes `-f` as "file system status" and SUCCEEDS, printing a
+    # paragraph — so the other order never reached GNU's form on Linux, and the
+    # launch guard failed there on every token (CI, 2026-11-25).
+    mode="$(stat -c %a "$token" 2>/dev/null || stat -f %Lp "$token")"
     [[ "$mode" == 600 || "$mode" == 400 ]] \
         || refuse "$token is mode $mode; a token must be 0600 or 0400"
     local judge="$ROOT/target/release/galata-token-expiry"
