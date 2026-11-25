@@ -4704,3 +4704,41 @@ project-the-recent-days, on its schedule     completed at 23:40, 1.1 s
 
 Not shown here: the tape's frontier advancing under the lane, which needs
 capture to be running.
+
+## Carrying secrets between two vaults — against throwaway vaults, 2026-11-25
+
+`containerise-host-services`. `carry-secrets.sh` is for the secrets that live
+nowhere but a vault: a ledger's account addresses and its fingerprint key,
+which the ledger's record is keyed by. The broker's passwords are in
+var/broker.env and are imported, not carried.
+
+**Not the deployment's vault.** Two `gv-server local` (0.5.1) on scratch data
+directories at loopback ports 18751 and 18752; one project named
+`galata-datawatch` in each, under a scratch home apiece, with
+`GV_CREDENTIAL_STORE=file`, so the owner keys were files there and the
+Keychain was never touched. Five secrets in the source: three shaped like the
+deployment's (a password, an address, a 64-hex key), one ending in a newline,
+and one that is not text (0xff 0xfe 0x00 'A' and two newlines).
+
+```text
+what gv does with a value's end                  `set` stores its input as given; `get` prints it with nothing added
+a second project of the same name, one home      refused: "a project named … is already configured here"
+a vault's data directory at mode 0755            refused by gv-server: it must be 0700
+
+carry, with GV_TOKEN_FILE and GV_SERVER set in the caller's environment
+    all five                                     carried, and the same in both vaults, byte for byte
+    a value in what it printed                   none
+a name the source does not hold, among others    refused; nothing set in the destination
+"no" at the pause                                refused; nothing set in the destination
+an environment carried onto itself               refused
+
+--pause, with the source vault stopped while the values waited
+    the source answers                           no
+    all five                                     arrived, the same as the copy checked against the source
+    a value in what it printed                   none
+```
+
+Not measured: that no value is in a host process's arguments while it waits.
+The check counted its own search, and the search of the test's folders was
+stopped when it read the test's own named pipe. By construction a value goes
+from `gv get` to `gv set` on pipes, and neither is given one as an argument.
