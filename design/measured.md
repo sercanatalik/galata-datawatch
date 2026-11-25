@@ -4876,8 +4876,10 @@ given.
 
 ```text
                           in use                        given        from
-flows                     0.55 GiB between runs         4, 12G       a day's rebuild: 6.5 and 8.1 GiB; the
-                                                                     three-day projection: 8.2 GiB (above)
+flows                     0.55 GiB between runs;        4, 12G       a day's rebuild: 6.5 and 8.1 GiB; the
+                          1.82 GiB at the 16:40                      three-day projection: 8.2 GiB (above)
+                          projection, whose window
+                          held quotes for today only
 nats                      27 MiB                        1, 256M
 capture:hyperliquid       210 MiB, nine instruments     2, 2G        room for fifty, if it grows with them
 ledger                    none declared                 not set
@@ -4887,6 +4889,7 @@ the image builder         9.8 GiB while idle            8, 12G       up since th
 together                                                17.25G, and 29.25G with the builder, of 64 GiB
 ```
 
+Compaction and the judge stayed under 0.6 GiB through the hour sampled.
 The builder holds its memory until it is stopped (`container builder
 stop`); nothing else is near its limit.
 
@@ -4947,8 +4950,9 @@ host-service-addressing
   A right credential from another
     machine                               not seen  needs a second tailnet device (task 3.5)
   The tailnet goes down while capture
-    runs                                  UNMET     capture ran on, but its venue stream went silent that second;
-                                                    no quotes archived for the 39 s it was watched (Tailscale stopped)
+    runs                                  UNMET     in its container capture's venue stream dies at each change of
+                                                    Tailscale's state, and a native one beside it does not
+                                                    (Tailscale stopped for three minutes, below)
   Capture starts while the tailnet is
     down                                  not seen  it started and read its secret; the tailnet returned 20 s later,
                                                     inside its ~40 s of start-up fetches
@@ -5033,3 +5037,60 @@ the minutes it was not covering, paced by the venue's weight (nine requests
 a series), before it subscribes: 43 s at 16:11:31 with nothing wrong, 73 s at
 16:08:48 with one request stalled. A restart's cost in quotes is that, not
 the second its container takes.
+
+## Tailscale stopped for three minutes, beside a native capture — 2026-11-25
+
+`containerise-host-services`, task 7.4 again, with the maintainer's go-ahead
+to find out whether the stall above is the container's. A native capture
+(the same binary, BTC quotes only, no broker, a scratch archive) ran beside
+the deployment's. Tailscale was stopped at 16:41:58 and started at 16:45:01.
+Nothing of the deployment was restarted until the end. Sampled every 5 s.
+
+```text
+                                  the container's capture           the native capture
+before                            2 to 3 quote files every 5 s      2 to 3 every 5 s
+16:41:58  Tailscale stopped       silent from that second           unchanged throughout
+                                  status still "connected"
+16:44:16  its 8-minute handover   a new socket, Tailscale still
+                                  stopped: quotes again
+16:44:34                          the broker's connection dropped
+16:45:01  Tailscale started       silent again from 16:45:03        unchanged throughout
+16:45:02                          the broker's connection back
+                                  by itself; the broker, never
+                                  restarted, answering again
+16:47:03  end of watching         silent 120 s, "connected"         stopped with one SIGTERM, cleanly
+16:47:24  one SIGTERM             restarted; quotes at 16:48:09
+```
+
+**It is the container's.** The native capture on the same Mac, on the same
+venue, in the same seconds, lost nothing when Tailscale stopped or started.
+The container's lost its stream at each change, and a socket it opened while
+Tailscale was stopped worked. So a change in the Mac's network kills the
+connections a container already holds and spares new ones. The likely
+mechanism, not verified: the NAT between the container's virtual machine
+and the Mac drops its established flows when the Mac's network configuration
+changes.
+
+**Capture does not notice a dead stream.** Its status said "connected" for
+the whole of each stall. It recovered once at its 8-minute handover and once
+when restarted; nothing in between asked whether the stream still spoke.
+
+**The record claims a window it does not hold.** Quote gaps recorded after
+16:00, nine instruments each:
+
+```text
+16:08:06 -> 16:08:49   downtime    the first test: the stall, closed by a restart
+16:08:49 -> 16:10:02   downtime    that start's fetches
+16:11:30 -> 16:12:14   downtime    the restart to publish again
+16:45:01 -> 16:47:26   downtime    the second stall, closed by a restart
+16:47:26 -> 16:48:09   downtime    that start's fetches
+```
+
+16:41:58 to 16:44:16 is not among them. The handover replaced a silent socket
+and claimed coverage across it, so for 2 min 18 s the archive says the nine
+instruments were watched and nothing happened. A stall that ends in a
+restart is recorded; one that ends in a handover is a silent hole.
+
+**The broker rides it out.** Never restarted, it answered at the tailnet name
+once the address was back, and capture's connection to it, made at its
+start, came back by itself within a second of Tailscale.
