@@ -15,8 +15,8 @@
 #   # the vault this deployment ran itself, to the hosted one; the two cannot
 #   # both hold loopback 8750, so the values wait in memory in between
 #   carry-secrets.sh --pause \
-#       --from galata-datawatch/prod \
-#       --to galata-datawatch/prod --to-home ~/.config/gv-hosted \
+#       --from galata-datawatch/mainnet \
+#       --to galata-datawatch/mainnet --to-home ~/.config/gv-hosted \
 #       GALATA_LEDGER_ADDRESS_MAIN GALATA_LEDGER_FINGERPRINT_KEY
 #
 # **A value is never an argument and never a file**, and nothing printed holds

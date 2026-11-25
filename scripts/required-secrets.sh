@@ -28,7 +28,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/vault-tools.sh
 source "$ROOT/scripts/lib/vault-tools.sh"
-ENV="galata-datawatch/prod"
+ENV="$(vault_env)"
 AUTH="$ROOT/config/nats-authorization.conf"
 
 refuse() { echo "required-secrets: REFUSED — $1" >&2; exit 2; }
@@ -104,7 +104,11 @@ case "$MODE" in
 # account's, and the fingerprint key, once a ledger has written under it,
 # can never be another: the record is keyed by it. Those may be left out of
 # the file and set by hand, with the value typed and never stored:
-#   gv set NAME --env galata-datawatch/prod
+#   gv set NAME --env galata-datawatch/mainnet
+#
+# The project has a section per network, galata-datawatch/mainnet and
+# galata-datawatch/testnet. A deployment reads one: mainnet, unless
+# GALATA_VAULT_ENV names the other.
 HEAD
         while read -r name; do
             readers="$(required | awk -F'\t' -v n="$name" '$2 == n { printf "%s%s", sep, $1; sep = ", " }')"

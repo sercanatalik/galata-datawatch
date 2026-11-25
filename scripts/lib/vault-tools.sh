@@ -80,6 +80,16 @@ gv_tool() {
     printf '%s' "$path"
 }
 
+# The vault environment this deployment's services read: one section of the
+# project per network. `mainnet` unless GALATA_VAULT_ENV names another, such
+# as galata-datawatch/testnet for a deployment that captures the testnet.
+# Provisioning makes both sections; a deployment reads one.
+VAULT_PROJECT="galata-datawatch"
+VAULT_SECTIONS="mainnet testnet"
+vault_env() {
+    printf '%s' "${GALATA_VAULT_ENV:-$VAULT_PROJECT/mainnet}"
+}
+
 # The broker's own naming: GALATA_BROKER_PASSWORD_<IDENTITY>, dashes to
 # underscores, upper case (galata_broker::password_var). `gv run` skips a
 # name that cannot be an environment variable, so the dash must not survive.

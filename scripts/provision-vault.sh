@@ -22,7 +22,10 @@
 #      or a password manager and delete that copy. gv refuses to finish until
 #      "saved" is typed; this script types it, because the operator asked for
 #      the kit to be written here and moved afterwards.
-#   2. gv env add galata-datawatch/prod
+#   2. gv env add galata-datawatch/mainnet and galata-datawatch/testnet: a
+#      section per network. The secrets go to the deployment's own section
+#      (scripts/lib/vault-tools.sh, vault_env): mainnet unless
+#      GALATA_VAULT_ENV says otherwise.
 #   3. every secret a service reads (scripts/required-secrets.sh) that
 #      var/broker.env gives a value → gv set, value on stdin (never an
 #      argument, where `ps` would show it)
@@ -42,8 +45,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib/vault-tools.sh"
 SERVER="${1:-${GV_SERVER:-}}"
 SERVER="${SERVER%/}"
-PROJECT="galata-datawatch"
-ENV="$PROJECT/prod"
+PROJECT="$VAULT_PROJECT"
+ENV="$(vault_env)"
 KIT="$ROOT/var/$PROJECT-recovery.gvkit"
 SECRETS="$ROOT/var/broker.env"
 
@@ -82,7 +85,10 @@ done <<< "$required"
 
 umask 077
 printf 'saved\n' | "$GV" init "$PROJECT" --server "$SERVER" --kit "$KIT"
-"$GV" env add "$ENV"
+sections=()
+for section in $VAULT_SECTIONS; do sections+=("$PROJECT/$section"); done
+[[ " ${sections[*]} " == *" $ENV "* ]] || sections+=("$ENV")
+for env in "${sections[@]}"; do "$GV" env add "$env"; done
 owed=""
 while read -r name; do
     [[ -n "$name" ]] || continue

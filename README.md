@@ -333,8 +333,8 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 # For a trial, against a vault of your own (`gv-server local`, from its own
 # installer). The deployment's is the hosted vault: see "Running as services".
 gv init galata-datawatch --server http://127.0.0.1:8750
-gv env add galata-datawatch/prod
-gv config set datawatch --format toml --env galata-datawatch/prod < config/datawatch.toml
+gv env add galata-datawatch/mainnet
+gv config set datawatch --format toml --env galata-datawatch/mainnet < config/datawatch.toml
 ```
 
 The binary opens the vault through the SDK's environment contract: set
@@ -343,13 +343,13 @@ must be mode `0600` or `0400`. Mint the smallest token the document needs:
 
 ```sh
 # No [broker] block: configuration documents only.
-gv token mint --scope config --env galata-datawatch/prod
+gv token mint --scope config --env galata-datawatch/mainnet
 
 # With [broker]: the document, plus only the named broker secret.
 printf %s "$BROKER_PASSWORD" | \
-  gv set GALATA_DATAWATCH_PASSWORD --env galata-datawatch/prod
+  gv set GALATA_DATAWATCH_PASSWORD --env galata-datawatch/mainnet
 gv token mint --scope read --only GALATA_DATAWATCH_PASSWORD \
-  --env galata-datawatch/prod
+  --env galata-datawatch/mainnet
 ```
 
 `password_var` names an environment variable for the file binary, and a vault
