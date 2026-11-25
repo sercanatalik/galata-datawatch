@@ -5,10 +5,14 @@
 #   install-services.sh [--uninstall] [service ...]
 #   install-services.sh --status
 #
-#   services: vault  nats  capture:<venue>  ledger:<venue>  tower  flows
-#             (default: all five below, vault first, with capture:hyperliquid;
-#             a ledger is installed only when named, since it needs accounts
-#             in the vault first)
+#   services: nats  capture:<venue>  ledger:<venue>  tower  flows
+#             (default: all four below, with capture:hyperliquid; a ledger is
+#             installed only when named, since it needs accounts in the vault
+#             first)
+#
+# **Not the vault.** It was a service here once (`gv-server local`). The
+# deployment's vault is now the hosted one, which galata-vault runs itself;
+# `--uninstall vault` still removes the old agent, and nothing installs it.
 #
 # Legacy's shape (scripts/install-compact-job.sh), for long-running jobs:
 # render the tracked template into ~/Library/LaunchAgents (untracked — it is
@@ -30,8 +34,8 @@ TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
 source "$ROOT/scripts/lib/vault-tools.sh"
 # shellcheck source=scripts/lib/container-tools.sh
 source "$ROOT/scripts/lib/container-tools.sh"
-# The installed galata-vault tools (gv, gv-server): vetted before a restart
-# like anything else freshly installed.
+# The installed galata-vault tool (gv): vetted before a restart like anything
+# else freshly installed.
 VAULT_BIN="$(vault_bin_dir)"
 TEMPLATE="$ROOT/deploy/launchd/com.galata.service.plist.in"
 AGENTS="$HOME/Library/LaunchAgents"
@@ -90,7 +94,6 @@ wait_unloaded() {  # wait_unloaded <label>: until launchd no longer has it, or r
 twins_of() {
     local spec="$1" bins="" want=""
     case "$spec" in
-        vault) bins="gv-server"; want="local" ;;
         nats) bins="nats-server"; want="$ROOT/config/nats-authorization.conf config/nats-authorization.conf" ;;
         capture:*) bins="galata-datawatch galata-datawatch-vault"; want="${spec#capture:}" ;;
         ledger:*) bins="galata-ledger galata-ledger-vault"; want="${spec#ledger:}" ;;
@@ -158,7 +161,6 @@ twins_of() {
 #   galata-token-expiry --help      usage line, exit 2
 #   gv --help                       help text
 #   galata-datawatch|ledger --help  refused as a venue, before connecting
-#   gv-server --help                usage line
 #   galata-tower --version          version, exit 0 (--help would SERVE)
 vet() {  # vet <label> <program>...
     local label="$1" program arg s took; shift
@@ -183,7 +185,7 @@ vet() {  # vet <label> <program>...
 vet_programs() {  # the programs a service's start would exec
     local spec="$1" said=""
     case "$spec" in
-        vault|nats|tower|flows) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
+        nats|tower|flows) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
         capture:*) said="$("$ROOT/scripts/run-service.sh" --check capture "${spec#capture:}" 2>/dev/null)" ;;
         ledger:*) said="$("$ROOT/scripts/run-service.sh" --check ledger "${spec#ledger:}" 2>/dev/null)" ;;
     esac
@@ -205,7 +207,8 @@ if [[ "${1:-}" == --status ]]; then
     printf '%-34s %-10s %s\n' LABEL "PID/EXIT" MANAGED
     launchctl list | awk '$3 ~ /^com\.galata\./ {print $1, $2, $3}' | sort -k3 | while read -r pid status label; do
         case "$label" in
-            com.galata.vault|com.galata.nats|com.galata.tower|com.galata.flows|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
+            com.galata.nats|com.galata.tower|com.galata.flows|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
+            com.galata.vault) managed="NO — the vault is no longer a service here; --uninstall vault removes it" ;;
             *) managed="NO — not rendered by this installer" ;;
         esac
         if [[ "$pid" == "-" ]]; then state="exit $status"; else state="pid $pid"; fi
@@ -222,7 +225,7 @@ if [[ "${1:-}" == --status ]]; then
         case "$label" in
             com.galata.capture.*) args=(capture "${label#com.galata.capture.}") ;;
             com.galata.ledger.*) args=(ledger "${label#com.galata.ledger.}") ;;
-            com.galata.vault|com.galata.nats|com.galata.tower|com.galata.flows) args=("${label#com.galata.}") ;;
+            com.galata.nats|com.galata.tower|com.galata.flows) args=("${label#com.galata.}") ;;
             *) continue ;;
         esac
         if said="$("$ROOT/scripts/run-service.sh" --check "${args[@]}" 2>&1)"; then
@@ -239,7 +242,7 @@ if [[ "${1:-}" == --status ]]; then
     echo
     printf '%-34s %s\n' TWIN "PID  COMMAND"
     twin_count=0
-    managed_specs=(vault nats tower flows)
+    managed_specs=(nats tower flows)
     for plist in "$AGENTS"/com.galata.capture.*.plist "$AGENTS"/com.galata.ledger.*.plist; do
         [[ -f "$plist" ]] || continue
         l="$(basename "$plist" .plist)"
@@ -355,17 +358,19 @@ fi
 UNINSTALL=0
 if [[ "${1:-}" == --uninstall ]]; then UNINSTALL=1; shift; fi
 services=("$@")
-(( ${#services[@]} )) || services=(vault nats capture:hyperliquid tower flows)
+(( ${#services[@]} )) || services=(nats capture:hyperliquid tower flows)
 
 
 for spec in "${services[@]}"; do
     case "$spec" in
-        vault|nats|tower|flows) service="$spec"; arg=""; label="com.galata.$spec" ;;
+        nats|tower|flows) service="$spec"; arg=""; label="com.galata.$spec" ;;
+        vault) (( UNINSTALL )) || refuse "the vault is no longer a service of this deployment: it is the hosted vault, which galata-vault runs (deploy/apple-container/gv-container up). --uninstall vault removes the old agent"
+               service=vault; arg=""; label="com.galata.vault" ;;
         capture:*) service=capture; arg="${spec#capture:}"; label="com.galata.capture.$arg"
                    [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
         ledger:*) service=ledger; arg="${spec#ledger:}"; label="com.galata.ledger.$arg"
                   [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
-        *) refuse "unknown service '$spec' (vault, nats, capture:<venue>, ledger:<venue>, tower, flows)" ;;
+        *) refuse "unknown service '$spec' (nats, capture:<venue>, ledger:<venue>, tower, flows)" ;;
     esac
     plist="$AGENTS/$label.plist"
 

@@ -8,12 +8,11 @@
 #   run-service.sh ledger <venue>
 #   run-service.sh tower
 #   run-service.sh flows
-#   run-service.sh vault
 #   run-service.sh --check <service> [<venue>]   every precondition, then `ready`;
 #                                                starts nothing
 #
 # **Each service gets only its own secrets**, read from the deployment's vault
-# (com.galata.vault) through a token minted for that service alone
+# through a token minted for that service alone
 # (var/tokens/<service>.gvt, 0600; scripts/mint-service-tokens.sh): NATS all
 # three broker passwords, capture its own venue's, the tower the reader's, the
 # ledger its own venue's account addresses and the fingerprint key, and
@@ -375,11 +374,13 @@ case "$service" in
         from_vault tower --only "$(password_var reader)" -- "$bin"
         ;;
     vault)
-        # The deployment's secret store: loopback only, data in
-        # ~/.local/share/galata-vault, no configuration. It stores ciphertext
-        # and cannot read any of it — the binary links no decryption code.
-        server="$(vault_tool gv-server 2>&1)" || refuse "$server"
-        start "$server" local
+        # Once a service here: `gv-server local`, on loopback, with its data
+        # in ~/.local/share/galata-vault. The deployment's vault is now the
+        # hosted one, which galata-vault runs in a container of its own and
+        # publishes on this machine's loopback at the same port, so GV_SERVER
+        # above still finds it. Said by name, because an old agent's plist
+        # still asks for this.
+        refuse "the vault is no longer a service of this deployment: start the hosted vault (galata-vault: deploy/apple-container/gv-container up), and remove the old agent with scripts/install-services.sh --uninstall vault"
         ;;
     flows)
         if containerised flows; then
@@ -418,6 +419,6 @@ case "$service" in
         start "$(command -v uv || echo uv)" run --project . cereyan serve . --no-open --host 127.0.0.1 --port 4200
         ;;
     *)
-        refuse "usage: run-service.sh [--check] vault | nats | capture <venue> | ledger <venue> | tower | flows"
+        refuse "usage: run-service.sh [--check] nats | capture <venue> | ledger <venue> | tower | flows"
         ;;
 esac
