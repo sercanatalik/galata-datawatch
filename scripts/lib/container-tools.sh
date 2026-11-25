@@ -17,18 +17,17 @@
 # **The limits are stated, never defaulted.** A container given no limit gets
 # 4 CPUs and 1 GiB (measured 2026-11-24, Apple container 1.7.1), which is too
 # much for the broker and too little for a tape rebuild that holds a range in
-# memory. So a service's line in var/containers.conf is both the switch that
-# puts it in a container and the statement of what it may use:
+# memory. So every service but the tower has a line in var/containers.conf
+# stating what it may use, and a service with no line does not start:
 #
 #   # service              cpus  memory
-#   capture:hyperliquid    2     1G
+#   capture:hyperliquid    2     2G
 #   nats                   1     256M
-#   flows                  2     4G
+#   flows                  4     12G
 #
-# var/, because the figures belong to this machine. A service with no line
-# starts natively (containers_conf says when that stops being true).
+# var/, because the figures belong to this machine.
 
-# The file that lists this deployment's containerised services.
+# The file that states each service's limits.
 containers_conf() {
     printf '%s' "${GALATA_CONTAINERS_CONF:-$ROOT/var/containers.conf}"
 }
@@ -145,27 +144,24 @@ container_volume() {
     "$1" volume inspect "$2" >/dev/null 2>&1
 }
 
-# containerised <spec>: does var/containers.conf list this service at all?
-# `spec` is what install-services.sh takes: nats, flows, capture:<venue>,
-# ledger:<venue>.
-containerised() {
-    local conf
-    conf="$(containers_conf)"
-    [[ -f "$conf" ]] || return 1
-    awk -v s="$1" '$1 == s { found = 1 } END { exit found ? 0 : 1 }' "$conf"
-}
-
 # container_limits <spec>: "<cpus> <memory>", as stated for this service.
-# A line that states only one of them is refused by name: half a limit is a
-# default for the other half, and the defaults are the thing being avoided.
+# `spec` is what install-services.sh takes: nats, flows, capture:<venue>,
+# ledger:<venue>. A service with no line is refused, naming it and both
+# limits; a line that states only one of them is refused by name too: half a
+# limit is a default for the other half, and the defaults are the thing being
+# avoided.
 container_limits() {
     local conf spec="$1" line cpus memory
     conf="$(containers_conf)"
     if [[ ! -f "$conf" ]]; then
-        echo "no $conf, so no CPU or memory limit is stated for $spec" >&2
+        echo "no $conf, so no CPU or memory limit is stated for $spec — cp config/containers.conf.example $conf, then state each service's" >&2
         return 1
     fi
-    line="$(awk -v s="$spec" '$1 == s && !/^[[:space:]]*#/ { print $2, $3; exit }' "$conf")"
+    if ! awk -v s="$spec" '$1 == s { found = 1 } END { exit found ? 0 : 1 }' "$conf"; then
+        echo "$conf states no CPU or memory limit for $spec, so it does not start — add a line \"$spec <cpus> <memory>\" (config/containers.conf.example)" >&2
+        return 1
+    fi
+    line="$(awk -v s="$spec" '$1 == s { print $2, $3; exit }' "$conf")"
     read -r cpus memory <<< "$line"
     if [[ -z "$cpus" ]]; then
         echo "$conf states no CPU limit for $spec" >&2

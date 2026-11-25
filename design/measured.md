@@ -4826,3 +4826,159 @@ sends one, and waits.
 
 Not measured here: the broker refused while the tailnet is down, and capture
 starting with the tailnet down. Each would take this Mac off the tailnet.
+
+## The final shape — 2026-11-25
+
+`containerise-host-services`, tasks 3.4, 3.6, 4.2, 8.1 and 8.4. The same Mac,
+with the broker, capture and the lane in their containers since the morning,
+and the hosted vault restarted once at midday.
+
+**The clock.** Each container's clock against the Mac's, the best of five
+asks; the error is half the round trip. The broker's image has BusyBox's
+`date`, which prints whole seconds, so its figure is taken at the tick of a
+second instead.
+
+```text
+the Mac's own setting                        never sleeps on power (sleep 0); no sleep logged since 2026-11-22
+                                             autorestart 0: after a power cut it stays off until switched on
+gw-api, up 3 days                            +15.7 ms   (+/- 20.5 ms)
+galata-capture-hyperliquid, up 5 hours       +19.7 ms   (+/- 24.1 ms)
+galata-nats, at a second's tick              +15.1 ms   (+/- 22 ms, four the same)
+galata-flows, up 17 hours                    +23.1 ms   (+/- 29.1 ms)
+galata-vault, up 3 hours                     +19.9 ms   (+/- 25.5 ms)
+```
+
+Every container agrees with the Mac to within the asking, and the one up
+three days agrees as closely as the one up three hours. After a sleep and
+wake is not measured: this Mac has not slept, and is set not to.
+
+**The lane on a running capture.** Its own run list (`container exec
+galata-flows cereyan runs ls`), and the tape it wrote.
+
+```text
+every hourly run from 12:20 to 15:40          completed
+    project-the-recent-days                   9.3 s to 12.7 s
+    compact-the-archive                       5.3 s
+    judge-the-record                          2.1 s to 2.2 s
+today's quotes in the tape, after 14:40       945,788 rows, up to 14:40:00
+                     after 15:40              1,260,866 rows, up to 15:39:59
+```
+
+The quotes start at 10:54:16, when capture first ran in its container:
+there was none on this Mac from 2026-11-19 until then, and quotes cannot be
+fetched afterwards. Funding's time is the settlement it belongs to and marks
+carry none, so both read as stopped by their times and are not: their rows
+were received up to 15:39:59, as on 2026-11-18. The tape's file names name
+the capture run that wrote them, not the span they hold.
+
+**The final limits.** What each service was seen to use, against what it is
+given.
+
+```text
+                          in use                        given        from
+flows                     0.55 GiB between runs         4, 12G       a day's rebuild: 6.5 and 8.1 GiB; the
+                                                                     three-day projection: 8.2 GiB (above)
+nats                      27 MiB                        1, 256M
+capture:hyperliquid       210 MiB, nine instruments     2, 2G        room for fifty, if it grows with them
+ledger                    none declared                 not set
+galata-vault              35 MiB                        4, 1G        galata-vault's own
+gw-api, gw-lane           17 MiB, 410 MiB               4, 1G each   galata-watcher's own
+the image builder         9.8 GiB while idle            8, 12G       up since the last build
+together                                                17.25G, and 29.25G with the builder, of 64 GiB
+```
+
+The builder holds its memory until it is stopped (`container builder
+stop`); nothing else is near its limit.
+
+**No line, no start.** With the native starts removed, a service is refused
+by name when its line is missing, before anything is started or written.
+
+```text
+--check, with var/containers.conf as it is    nats, capture hyperliquid and flows: ready; the tower (native): ready
+--check, with every line gone
+    nats                                      REFUSED — … states no CPU or memory limit for nats, so it does not start
+    capture hyperliquid                       REFUSED — … for capture:hyperliquid, so it does not start
+    flows                                     REFUSED — … for flows, so it does not start
+--check, with no file                         REFUSED — no var/containers.conf, so no CPU or memory limit is stated for flows
+--status, with every line gone                RESTART: NO for each; CONTAINER: "NO — no CPU or memory limit for …"
+the containers running, before and after      the same seven
+```
+
+**The three specs, scenario by scenario, against the running deployment.**
+*Met* is seen on this Mac's deployment; *by stub* is held by a guard against
+stand-ins, because the real case would stop more than it tests; *not seen*
+is open, with the task that would see it.
+
+```text
+host-service-containers
+  A service is started                    met       one container, galata-capture-hyperliquid; inside it pid 1
+                                                    is `galata-datawatch hyperliquid` and nothing else
+  A container exits                       met       the broker and capture, each stopped once: launchd started them again
+  A leftover container holds the name     not seen  removed by the launcher before each start, and by the installer;
+                                                    no real leftover has been met since
+  Capture cannot see the ledger's record  met       capture mounts /app/var/archive, /app/var/status, /app/config only
+  The broker cannot see the record        met       the broker mounts /etc/galata only
+  A native reader sees what a container
+    wrote                                 met       the archive's newest files, listed natively, seconds old
+  The ledger's record is not owner-only   not seen  no ledger is declared here (task 7.5)
+  Capture is stopped                      met       one SIGTERM: a clean stop, .clean-shutdown in the same second
+  The container is gone after a stop      met       0.2 s after the signal
+  A stated limit is applied               met       for the three running services, as stated; the ledger has no line
+  No limit is stated                      met       refused by name, each service (above)
+  The image is missing                    met       "no image galata-absent:latest — scripts/build-images.sh"
+  Checking a service                      met       ready, and the same containers before and after
+  The container tool is stopped           by stub   check-container-launch.sh; stopping it here stops every container
+  The status report                       met       state, image, tree and limits for each
+  A service is not running                met       a stated ledger line with no container: "not running"
+
+host-service-addressing
+  A container on the host connects        met       capture to the broker at the tailnet name
+  A native process on the host connects   met       the reader, +OK and PONG
+  Loopback                                met       refused
+  The local network                       met       refused at the Mac's local address, asked from the Mac itself
+  Capture publishes nothing               met       no published port
+  The jobs lane's own interface stays
+    inside                                met       no published port; it answers inside the container
+  The tailnet is down                     by stub   the guard; on this Mac it needs Tailscale stopped (task 6.3)
+  The tailnet comes up                    not seen  task 6.3
+  The broker moves                        met       the first start was at loopback; the configured url changed and,
+                                                    restarted, capture connected at the tailnet name, same image
+  A wrong credential from the host itself met       -ERR 'Authorization Violation', from the Mac and from a container
+  A right credential from another
+    machine                               not seen  needs a second tailnet device (task 3.5)
+  The tailnet goes down while capture
+    runs                                  not seen  task 7.4; with the broker stopped instead, capture kept archiving
+  Capture starts while the tailnet is
+    down                                  not seen  task 7.4
+
+service-secret-delivery
+  The tower's token cannot start capture  met       "this token's allow-list does not include
+                                                    GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID", exit 1
+  A service starts with its secret        met       capture holds its password and no other vault name
+  The service manager's signal reaches
+    the service                           met       one SIGTERM at the job's process: capture's clean stop
+  A value is in no argument list          met       none, for the broker's three and capture's
+  No host process holds the values        met       none
+  The container tool stores no value      met       none in its state, none in `container inspect`
+  A value with a line break               by stub   refused by the secret's name, under --check (task 2.3)
+  No galata-vault checkout                met       no script reaches for one (check-service-secrets.sh); provisioned,
+                                                    minted and installed with the installed gv 0.5.1
+  An older gv is installed                by stub   check-service-secrets.sh
+  gv is not installed                     by stub   check-service-secrets.sh
+  The deployment runs no vault of its own met       nothing installs one; --status lists none
+  Minting the service tokens              met       three tokens, 0600, each reading its own names and refused others
+  The mint result cannot be read          not seen  unchanged by this change: mint-service-tokens.sh refuses each
+                                                    case before it writes; not run again here
+  A token never enters a container        met       no token in any container's mounts or environment
+  The vault is stopped when a service
+    starts                                met       "the vault did not answer at http://127.0.0.1:8750" (task 2.6)
+  The vault answers again                 not seen  launchd retries every 10 s; no service restarted while the
+                                                    vault was down
+  The vault stops while services run      met       the vault was down from 12:41 to 12:51 for its UI's reset; the
+                                                    broker, capture and the lane ran on, untouched
+  Capture starts with the tailnet down    not seen  task 5.5's second half, with task 7.4
+```
+
+Unmet: none. Not yet seen: the leftover container, the ledger's mode, the
+three that need Tailscale stopped, the second device, the mint result, and
+the vault answering again.

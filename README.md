@@ -377,6 +377,9 @@ whose flows only call the release binaries as subprocesses.
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
 | `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity`, `backtest` and `realvol`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
+As a service, the lane runs in its container (Services in containers, below).
+By hand, for development:
+
 ```sh
 cargo build --release              # add --features rh-chain if it is declared
 uv sync --project py
@@ -558,15 +561,17 @@ Logs are written to `var/logs/<service>.log`.
 
 ### Services in containers
 
-A service listed in `var/containers.conf` runs in a container of its own,
-under Apple's [`container`](https://github.com/apple/container) (1.7 or
-later, started once by hand so it can install its kernel). A service with no
-line there runs natively, as above. Services move one at a time, and removing
-a line and reinstalling moves a service back.
+Every service but the tower runs in a container of its own, under Apple's
+[`container`](https://github.com/apple/container) (1.7 or later, started
+once by hand so it can install its kernel). Its line in
+`var/containers.conf` states its CPUs and memory. A service with no line does
+not start, and the refusal names the service and the missing limit: there is
+no native start to fall back to. The tower runs natively until it is
+retired.
 
 ```sh
 scripts/build-images.sh                                  # galata-datawatch, galata-nats, galata-flows
-cp config/containers.conf.example var/containers.conf    # then state each moved service's CPUs and memory
+cp config/containers.conf.example var/containers.conf    # then check each service's CPUs and memory
 scripts/run-service.sh --check capture hyperliquid       # the whole line it would start; starts nothing
 scripts/install-services.sh capture:hyperliquid          # restart it, now in its container
 scripts/install-services.sh --status                     # CONTAINER: state, image, the tree it was built from, limits
@@ -583,8 +588,8 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
   4 CPUs and 1 GiB whatever it runs. A service's line states both, and a
   line that states one is refused by name.
 - **Secrets arrive on standard input.** `run-service.sh` reads a service's
-  secrets on the Mac with that service's token, as it does natively, and
-  writes them to the container, where `with-secrets` receives them. No token
+  secrets on the Mac with that service's token, and writes them to the
+  container, where `with-secrets` receives them. No token
   enters a container. Not `container run -e`: Apple's container writes what
   it is passed that way into its own state, where `container inspect` shows
   it.

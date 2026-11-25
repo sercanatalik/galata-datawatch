@@ -1,25 +1,38 @@
-# Which of this deployment's services run in a container of their own, and
-# what each may use. Copy to var/containers.conf and uncomment a line to move
-# that service; var/, because the figures belong to one machine.
+# What each of this deployment's services may use, in the container of its own
+# that it runs in. Copy to var/containers.conf; var/, because the figures
+# belong to one machine.
 #
-# A service with a line here starts in its container (scripts/run-service.sh,
-# README "Services in containers"). A service with no line starts natively.
-# Removing a line and reinstalling the service moves it back.
+# Every service but the tower runs in a container, and needs a line here: a
+# service with no line does not start, and the refusal names the service and
+# the missing limit (scripts/run-service.sh, README "Services in containers").
+# There is no native start to fall back to.
 #
 # Both limits, always. A container given neither gets 4 CPUs and 1 GiB
 # whatever the service is, so a line that states only one of them is refused
 # by name. CPUs are a whole number; memory is a number and M or G, and
 # Apple's container refuses less than 200M.
 #
-# The figures below are places to start: set each from what the service is
-# seen to use on this machine. One is measured (design/measured.md,
-# 2026-11-24): the hourly projection's shape, three days in one run with
-# trades and quotes for nine instruments, peaked at 8.2 GiB in a container,
-# and a lane given 4G was killed, not slowed. A day captured since holds no
-# trades, and needs somewhat less.
+# The figures are this Mac mini's (64 GiB, 18 cores; design/measured.md,
+# "The final limits", 2026-11-25), set from what each service was seen to use:
+#
+#   flows   the tape rebuild holds a whole day in memory. A day with trades
+#           and quotes for nine instruments peaked at 6.5 and 8.1 GiB in a
+#           container, the hourly projection's three-day shape at 8.2 GiB, and
+#           a lane given 4G was killed, not slowed. The limit follows the largest day
+#           in the window, not the window's length.
+#   nats    27 MiB in use, serving capture and the status subjects. A replay
+#           window on the bus will need its own figure.
+#   capture 210 MiB in use for nine instruments; 2G leaves room for the cap of
+#           fifty, if what it holds grows with the instruments.
+#   ledger  not measured: no ledger is declared here. Measure it before it is
+#           relied on, and before this line is copied.
+#
+# With galata-vault's container (1G) and galata-watcher's two (1G each), the
+# deployment's containers may hold 17.25G together, and 29.25G while
+# scripts/build-images.sh's builder (12G) is up.
 #
 # service              cpus  memory
-# flows                  4     12G
-# nats                   1     256M
-# capture:hyperliquid    2     1G
-# ledger:hyperliquid     2     2G
+flows                  4     12G
+nats                   1     256M
+capture:hyperliquid    2     2G
+# ledger:hyperliquid   2     2G

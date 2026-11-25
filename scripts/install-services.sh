@@ -260,27 +260,36 @@ if [[ "${1:-}" == --status ]]; then
     done
     (( twin_count )) || echo "(none — every managed service runs only under launchd)"
 
-    # Containers: the services var/containers.conf puts in a container of
-    # their own. For each, whether its container is running, the image it
-    # runs, the tree that image was built from, and the limits it is given.
-    # A container started before the last build runs the old image under the
-    # same name, and nothing else says so (the BUILD section's reason, here).
+    # Containers: every service but the tower runs in one of its own. Each
+    # installed service, and each line of var/containers.conf: whether its
+    # container is running, the image it runs, the tree that image was built
+    # from, and the limits it is given — or that none is stated, which is a
+    # service that cannot start. A container started before the last build
+    # runs the old image under the same name, and nothing else says so (the
+    # BUILD section's reason, here).
     echo
     printf '%-26s %-12s %-26s %-18s %s\n' CONTAINER STATE IMAGE TREE LIMITS
     conf="$(containers_conf)"
-    if [[ ! -f "$conf" ]]; then
-        echo "(no $conf — every service runs natively)"
-    elif ! ctool="$(container_tool 2>&1)"; then
+    specs=""
+    [[ -f "$conf" ]] && specs="$(awk '!/^[[:space:]]*(#|$)/ {print $1}' "$conf")"
+    for spec in "${managed_specs[@]}"; do
+        [[ "$spec" != tower && -f "$AGENTS/$(label_of "$spec").plist" ]] || continue
+        grep -qxF -- "$spec" <<< "$specs" || specs="${specs:+$specs$'\n'}$spec"
+    done
+    if ! ctool="$(container_tool 2>&1)"; then
         echo "($ctool)"
+    elif [[ -z "$specs" ]]; then
+        echo "(no service is installed, and $conf states none)"
     else
-        awk '!/^[[:space:]]*(#|$)/ {print $1}' "$conf" | while read -r spec; do
+        while read -r spec; do
             name="$(container_name "$spec")"
             image="$(service_image "$spec")"
             if limits="$(container_limits "$spec" 2>&1)"; then
                 read -r cpus memory <<< "$limits"
                 limits="$cpus CPUs, $memory"
             else
-                limits="NO — ${limits##*states }"
+                limits="$(sed -E 's/.*states //; s/^no .*, so no/no/; s/, so it does not start.*//; s/ — .*//' <<< "$limits")"
+                limits="NO — $limits"
             fi
             tree="$(image_source_tree "$ctool" "$image" 2>/dev/null)" || tree="unlabelled"
             IFS=$'\t' read -r state _ digest <<< "$(container_state "$ctool" "$name")"
@@ -292,7 +301,7 @@ if [[ "${1:-}" == --status ]]; then
                 tree="STALE — started before the last build of $image; restart it"
             fi
             printf '%-26s %-12s %-26s %-18s %s\n' "$name" "$state" "$image" "$tree" "$limits"
-        done
+        done <<< "$specs"
     fi
 
     # The service tokens: a lapsed one is a service that cannot restart, and
@@ -382,9 +391,13 @@ for spec in "${services[@]}"; do
 
     [[ -f "$TEMPLATE" ]] || refuse "no template at $TEMPLATE"
     case "$service" in
-        capture) [[ -x "$ROOT/target/release/galata-datawatch" ]] || refuse "no release binary — cargo build --release first" ;;
-        ledger) [[ -x "$ROOT/target/release/galata-ledger" ]] || refuse "no galata-ledger — cargo build --release first" ;;
-        flows) [[ -x "$ROOT/target/release/galata-compact" ]] || refuse "the flows run release binaries — cargo build --release first" ;;
+        # In a container of its own: its image, and a line stating its
+        # limits. Installing one without either would load an agent that is
+        # refused at every attempt.
+        nats|capture|ledger|flows)
+            said="$(container_limits "$spec" 2>&1)" || refuse "$said"
+            ctool="$(container_tool 2>&1)" || refuse "$ctool"
+            said="$(container_image "$ctool" "$(service_image "$spec")" 2>&1)" || refuse "$said" ;;
         tower) [[ -x "$TOWER/target/release/galata-tower" ]] \
                    || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT" ;;
     esac

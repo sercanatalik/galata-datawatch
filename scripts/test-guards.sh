@@ -452,6 +452,14 @@ prove "check-container-launch (half a limit is accepted)" \
       'if [[ -z "$memory" ]]; then' \
       'if false; then'
 
+# A service with no line started anyway, at the default the limits exist to
+# avoid.
+prove "check-container-launch (a service with no line starts at the default)" \
+      ./scripts/check-container-launch.sh \
+      scripts/lib/container-tools.sh replace \
+      $'\n        echo "$conf states no CPU or memory limit for $spec, so it does not start' \
+      $'\n        printf \'4 1G\'; return 0\n        echo "$conf states no CPU or memory limit for $spec, so it does not start'
+
 # A stopped tailnet giving its last address, to publish on.
 prove "check-container-launch (a stopped tailnet gives an address)" \
       ./scripts/check-container-launch.sh \

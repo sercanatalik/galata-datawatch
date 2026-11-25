@@ -11,8 +11,10 @@
 #      skipped one would look like a start: a container with no stated limit
 #      runs, at 4 CPUs and 1 GiB; a broker published while the tailnet is down
 #      would have to be published somewhere else, and that somewhere is the
-#      LAN. Run here against stubs of `container` and of Tailscale's command
-#      line, so nothing real is asked.
+#      LAN. A service with no line in var/containers.conf is refused, naming
+#      the service and the missing limit: there is no native start left to
+#      fall back to. Run here against stubs of `container` and of Tailscale's
+#      command line, so nothing real is asked.
 #
 #   2. **No launch line hands a container a secret's file or a secret's
 #      value.** The launcher reads a service's secrets on the host, with that
@@ -102,28 +104,25 @@ half                   0     1G
 wordy                  2     1GB
 CONF
 limits() { GALATA_CONTAINERS_CONF="$conf" container_limits "$1"; }
-listed() { GALATA_CONTAINERS_CONF="$conf" containerised "$1"; }
 
 [[ "$(limits capture:hyperliquid 2>/dev/null)" == "2 1G" ]] \
     || say "capture:hyperliquid's stated limits are not read back as '2 1G'"
 [[ "$(limits nats 2>/dev/null)" == "1 256M" ]] \
     || say "nats's stated limits are not read back as '1 256M'"
-listed capture:hyperliquid || say "a listed service is not found"
-listed capture:hyper && say "capture:hyper is found: a service is matched by its whole name, not a prefix"
-listed flows && say "a commented-out service is found"
-listed tower && say "an unlisted service is found"
-refuses_with "no CPU limit for flows" limits flows \
-    || say "a commented-out service is given limits, or refused without naming the missing limit"
+refuses_with "no CPU or memory limit for capture:hyper," limits capture:hyper \
+    || say "capture:hyper is given capture:hyperliquid's limits: a service is matched by its whole name, not a prefix"
+refuses_with "no CPU or memory limit for flows," limits flows \
+    || say "a commented-out service is given limits, or refused without naming the service and the missing limits"
+refuses_with "no CPU or memory limit for tower," limits tower \
+    || say "a service with no line is given limits, or refused without naming the service and the missing limits"
 refuses_with "no memory limit for ledger:hyperliquid" limits ledger:hyperliquid \
     || say "a line with CPUs and no memory is accepted: half a limit is a default for the other half"
 refuses_with "not a whole number" limits half \
     || say "zero CPUs is accepted"
 refuses_with "512M or 2G" limits wordy \
     || say "a memory limit written '1GB' is accepted; Apple's container takes a number and one letter"
-GALATA_CONTAINERS_CONF="$stubs/absent.conf" refuses_with "no CPU or memory limit is stated" container_limits nats \
-    || say "limits are read from a file that does not exist"
-GALATA_CONTAINERS_CONF="$stubs/absent.conf" containerised nats \
-    && say "a service is containerised with no containers.conf at all"
+GALATA_CONTAINERS_CONF="$stubs/absent.conf" refuses_with "no CPU or memory limit is stated for nats" container_limits nats \
+    || say "limits are read from a file that does not exist, or refused without naming the service"
 
 [[ "$(container_name capture:hyperliquid)" == galata-capture-hyperliquid ]] \
     || say "capture:hyperliquid's container is not named galata-capture-hyperliquid"
@@ -268,11 +267,14 @@ line="$(would_start || true)"
 [[ -d "$scratch/var/archive" ]] && say "the launcher created the missing archive folder"
 mkdir -p "$scratch/var/archive"
 
-# Not listed: the native start, exactly as before.
+# No line: refused, naming the service and the missing limit. There is no
+# native start to fall back to, so nothing but the refusal may come out.
 : > "$scratch/containers.conf"
 line="$(would_start || true)"
-[[ "$line" == *"REFUSED"*"no program at $scratch/target/release/galata-datawatch"* ]] \
-    || say "capture, not listed, does not take the native path: $line"
+[[ "$line" == *"REFUSED"*"no CPU or memory limit for capture:hyperliquid"* ]] \
+    || say "capture, with no line in containers.conf, is not refused by its name and the missing limit: $line"
+[[ "$line" == *"ready:"* || "$line" == *"target/release/galata-datawatch"* ]] \
+    && say "capture, with no line in containers.conf, would start some other way: $line"
 
 # The ledger, which holds more than one secret and has roots of its own. The
 # committed configuration declares no ledger, so this root's local file is
@@ -311,6 +313,12 @@ else
         && say "the ledger's container is given the archive or the market tape, which are not its own roots"
     [[ "$line" =~ -e\ +\"?GALATA_LEDGER_ ]] && say "one of the ledger's secrets is passed with -e"
 fi
+: > "$scratch/containers.conf"
+line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
+        GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
+        /bin/bash "$scratch/scripts/run-service.sh" --check ledger hyperliquid 2>&1 || true)"
+[[ "$line" == *"REFUSED"*"no CPU or memory limit for ledger:hyperliquid"* ]] \
+    || say "the ledger, with no line in containers.conf, is not refused by its name and the missing limit: $line"
 
 # The broker: reached by the host's tailnet name, so published — on the
 # tailnet address when the tailnet is up, and not started at all when it is
@@ -343,6 +351,11 @@ line="$(broker_would_start "$stubs/ts-stopped/tailscale" || true)"
 [[ "$line" == *"REFUSED"*"the tailnet is down"* ]] \
     || say "the broker is not refused while the tailnet is down: $line"
 [[ "$line" == *"--publish"* ]] && say "the broker would be published while the tailnet is down"
+: > "$scratch/containers.conf"
+line="$(broker_would_start "$stubs/ts-up/tailscale" || true)"
+[[ "$line" == *"REFUSED"*"no CPU or memory limit for nats"* ]] \
+    || say "the broker, with no line in containers.conf, is not refused by its name and the missing limit: $line"
+[[ "$line" == *"127.0.0.1"* ]] && say "the broker, with no line in containers.conf, would start on loopback: $line"
 
 # The jobs lane: the archive and the tape, a volume of its own, and nothing
 # handed over, because it holds no secret.
@@ -366,6 +379,12 @@ else
     [[ "$line" == *"/var/status"* || "$line" == *"/var/ledger"* ]] \
         && say "the lane's container is given the status folder or the ledger's record, which are not its own roots"
 fi
+: > "$scratch/containers.conf"
+line="$(GALATA_CONTAINER_BIN="$stubs/up/container" GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
+        /bin/bash "$scratch/scripts/run-service.sh" --check flows 2>&1 || true)"
+[[ "$line" == *"REFUSED"*"no CPU or memory limit for flows"* ]] \
+    || say "the jobs lane, with no line in containers.conf, is not refused by its name and the missing limit: $line"
+[[ "$line" == *"cereyan serve"* ]] && say "the jobs lane, with no line in containers.conf, would serve natively: $line"
 
 # The tower is pointed at the broker the configuration names. Its address is
 # in the environment, so --check says it.
@@ -398,4 +417,4 @@ else
 fi
 
 if (( fails > 0 )); then exit 1; fi
-echo "$me: ok — a missing tool, image, limit or tailnet is refused by name; no launch line inherits a variable, mounts a token or publishes off the tailnet; and var/ is outside the build context"
+echo "$me: ok — a missing tool, image, limit or tailnet is refused by name, and a service with no line has nothing to fall back to; no launch line inherits a variable, mounts a token or publishes off the tailnet; and var/ is outside the build context"
