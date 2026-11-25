@@ -4528,13 +4528,13 @@ own, under Apple's `container`, reached by the host's tailnet name. Every
 figure below was taken before anything moved, so that the design rests on
 what the tools do and not on what their documentation suggests.
 
-**Not the service machine, and nothing of the deployment was touched.** A
-64 GiB, 18-core Mac; Apple container 1.7.1; the Tailscale app 1.104.7;
+**The service machine, and nothing of the deployment was touched.** The
+Mac mini that hosts the deployment, 64 GiB and 18 cores (said here as an
+earlier version of this section had it wrong); Apple container 1.7.1; the Tailscale app 1.104.7;
 nats-server 2.15.3. Throwaway containers, scratch archives, stand-in values
 for secrets. No agent was loaded or unloaded, and the vault was stopped
-throughout. What follows is true of the tools on that machine. The Mac mini,
-a second tailnet device, tailnet ACLs and the clock after a sleep are not
-measured.
+throughout. What follows is true of the tools on that machine. A second
+tailnet device, tailnet ACLs and the clock after a sleep are not measured.
 
 **Reaching a service from a container.** The reason a reached service
 publishes on the tailnet address, and the reason `tailscale serve` is not
@@ -4742,3 +4742,33 @@ Not measured: that no value is in a host process's arguments while it waits.
 The check counted its own search, and the search of the test's folders was
 stopped when it read the test's own named pipe. By construction a value goes
 from `gv get` to `gv set` on pipes, and neither is given one as an argument.
+
+## The hosted vault, provisioned fresh — 2026-11-25
+
+`containerise-host-services`, design D12. The vault this deployment ran
+itself is retired and its keys deleted: the owner key in the Keychain, the
+recovery kit, the three service tokens and `gv`'s local state. Nothing was
+carried out of it. The hosted vault (galata-vault's `deploy/apple-container`)
+was initialised and started by the maintainer; this Mac publishes it on
+loopback 8750 and behind `tailscale serve` on the tailnet name.
+
+```text
+var/broker.env                         filled from config/secrets.env.example, three new random passwords, 0600
+provision-vault.sh <https tailnet name>
+    the project                        created, pinned to the vault's https:// tailnet name
+    galata-datawatch/prod              created; all three broker passwords set
+required-secrets.sh --missing          ok: the project holds every secret a service reads
+mint-service-tokens.sh                 nats, capture-hyperliquid, tower; expire 2027-11-25
+
+each token, its own secret             over loopback 8750     at the https:// tailnet name
+    nats, all three                    the same as var/broker.env, byte for byte, both ways
+    capture-hyperliquid, its own       the same, both ways
+    tower, the reader's                the same, both ways
+tower's token, asking for capture's    refused: not in this token's allow-list
+capture's token, asking for reader's   refused: not in this token's allow-list
+run-service.sh --check                 nats, capture hyperliquid and tower: ready
+```
+
+A token minted under the `https://` name reads over loopback, so the
+launchers need no tailnet to start a service here. Not measured: a read
+with Tailscale stopped, which would interrupt this Mac's tailnet.
