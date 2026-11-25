@@ -4772,3 +4772,57 @@ run-service.sh --check                 nats, capture hyperliquid and tower: read
 A token minted under the `https://` name reads over loopback, so the
 launchers need no tailnet to start a service here. Not measured: a read
 with Tailscale stopped, which would interrupt this Mac's tailnet.
+
+## The broker and capture in containers — their first starts, 2026-11-25
+
+`containerise-host-services`, tasks 6 and 7. `nats` listed at 1 CPU and
+256 MB and `capture:hyperliquid` at 2 CPUs and 2 GB; both installed as their
+launchd agents from the images built at `65aa324`. `[broker] url` in the
+deployment's configuration names this Mac's tailnet name. Neither had run
+since 2026-11-19, and nothing natively was replaced.
+
+```text
+the broker
+    the launchd job's process                    container
+    published                                    on the tailnet address only, port 4222
+    from this Mac, at the tailnet name/address   NATS 2.15.3 answers, auth required
+    from this Mac, on loopback                   refused
+    from this Mac, at its local network address  refused
+    from another container, name and address     answers
+    reader, its own password                     +OK, PONG
+    reader, a wrong password (Mac, container)    -ERR 'Authorization Violation'
+    capture's user, the reader's password        -ERR 'Authorization Violation'
+    reader subscribing to markets.>              -ERR 'Permissions Violation'
+    reader subscribing to status.>               8 messages in 8 s, status.hyperliquid
+    its three passwords: container tool's state, `container inspect`, host processes    none, none, none
+
+capture
+    connected                                    to the broker at the tailnet name, publishing
+    its password, inside the container           held by galata-datawatch alone; no other vault name
+    its password: container tool's state, `container inspect`, host processes           none, none, none
+    archive files                                +29 in 20 s
+
+the broker stopped with one SIGTERM, capture running
+    the broker                                   "Initiating Shutdown", exited; launchd restarted it at once
+    capture                                      the same process throughout; archive +11 files in 6 s
+    capture's connection                         disconnected, then connected again within 1.1 s
+    publishing afterwards                        4 status messages in 4 s
+
+capture stopped with one SIGTERM
+    "asked to terminate; stopping cleanly"       logged
+    .clean-shutdown                              written in the same second
+    the container gone                           0.2 s after the signal (launchd allows 20 s)
+    launchd                                      started it again, last exit 0, publishing within 1 s
+```
+
+**Three signals are a kill, not three stops.** On the first restart three
+SIGTERMs reached capture's `container run` inside a second (an operator
+error, not launchd's). Apple's `container run` answered "Received 3
+SIGINT/SIGTERM's, forcefully exiting", and capture logged no clean stop for
+that run: at most its last two seconds of unflushed rows were lost, and its
+next start covered the window as a gap. launchd sends one signal, which
+stops it cleanly as above. Anyone stopping a containerised service by hand
+sends one, and waits.
+
+Not measured here: the broker refused while the tailnet is down, and capture
+starting with the tailnet down. Each would take this Mac off the tailnet.
