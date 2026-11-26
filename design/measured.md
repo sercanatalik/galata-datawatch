@@ -5500,3 +5500,60 @@ payload, it reads as present; the declaration names it, by its receipt time.
 
 The broker's container came back at 132 MiB and was at 326 MiB 90 s later, as
 on the first stop.
+
+## Reference data in one format, on the deployment — 2026-11-26
+
+`normalise-instrument-reference`, tasks 5.2 to 5.4, with the maintainer's
+go-ahead. Capture and the flows lane reinstalled at 09:10 on the images
+built from `d686340`; the lane's hourly projection runs the new
+`galata-tape-rebuild`, so the `meta` payloads are not unparsed by an older one.
+
+**What `meta` states, recorded before writing the adapter** (the venue's
+public `meta` for the main dex and `xyz`, and `spotMeta`): each coin's
+`szDecimals`, `maxLeverage` and `marginTableId`; `onlyIsolated` and
+`isDelisted` only where true (`xyz:URANIUM` has both; `MATIC` is delisted on
+the main dex); and the dex's collateral as an index, `collateralToken: 0` on
+both, which `spotMeta` names `USDC`. The replies are the adapter's test
+fixtures.
+
+```text
+09:10:36  capture's start   the universe check's two answers archived; nine rows
+09:15:37  the first refresh  main dex, three rows
+09:15:38                     xyz, six rows
+
+ticker  venue symbol  dex  tick     figures  lot      min notional  leverage  index
+BTC     BTC           -    0.1      5        0.00001  10            40        0
+ETH     ETH           -    0.01     5        0.0001   10            25        1
+HYPE    HYPE          -    0.0001   5        0.01     10            10        159
+XYZ100  xyz:XYZ100    xyz  0.01     5        0.0001   10            30        0
+NVDA    xyz:NVDA      xyz  0.001    5        0.001    10            10        2
+GOLD    xyz:GOLD      xyz  0.01     5        0.0001   10            25        3
+SILVER  xyz:SILVER    xyz  0.0001   5        0.01     10            25        26
+CL      xyz:CL        xyz  0.001    5        0.001    10            20        29
+ANT     xyz:ANT       xyz  0.0001   5        0.01     10            10        138
+        all: perp, quoted in USDC, continuous, active, not isolated-only
+```
+
+**The documented rule, against a day of the record.** The five figures and
+the decimal places are the venue's documentation, served nowhere, so every
+captured quote of 2026-11-25 was checked against each instrument's row:
+
+```text
+ticker   quotes    prices off the rule  sizes off the lot  at the five-figure cap  on the grid's last place
+ANT      353,842   0 of 707,684         0 of 707,684       621,298                 0
+BTC      464,514   0 of 929,028         0 of 929,028       0 (whole numbers)       0
+CL       209,616   0 of 419,232         0 of 419,232       370,699                 370,699
+ETH      445,419   0 of 890,838         0 of 890,838       797,095                 0
+GOLD     251,795   0 of 503,590         0 of 503,590       448,860                 0
+HYPE     389,268   0 of 778,536         0 of 778,536       696,073                 0
+NVDA     377,787   0 of 755,574         0 of 755,574       677,972                 0
+SILVER   332,101   0 of 664,202         0 of 664,202       592,570                 0
+XYZ100   366,983   0 of 733,966         0 of 733,966       0 (whole numbers)       0
+all      3,191,325 0 of 6,382,650       0 of 6,382,650
+```
+
+The check is not vacuous: for seven of the nine, 81 to 90% of prices sit
+exactly at five significant figures and are not whole, so a cap of four
+would have refused 4.2 million of them; CL's prices use the grid's last
+decimal place, so a coarser grid would have refused 370,699. BTC and XYZ100
+trade at whole-number prices, which the rule accepts whatever their figures.
