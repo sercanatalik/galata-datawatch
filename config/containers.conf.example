@@ -30,10 +30,10 @@
 #           fifty, if what it holds grows with the instruments.
 #   ledger  not measured: no ledger is declared here. Measure it before it is
 #           relied on, and before this line is copied.
-#   markets galata-markets (add-galata-markets). Provisional: an answer is held
-#           whole before it is sent (at most 2,000,000 rows), and what is held
-#           per instrument is kept in memory; 2G until measured on the
-#           deployment (its task 6.4), which replaces it.
+#   markets galata-markets. An answer is held whole before it is sent: the
+#           largest the limits allow (1.9 million rows, 167 MB) took the
+#           container to 536 MiB, idle is 30 MiB, and ten live clients on
+#           every instrument 115; 2G holds three of the largest at once.
 #
 # With galata-vault's container (1G) and galata-watcher's two (1G each), the
 # deployment's containers may hold 20G together, and 32G while

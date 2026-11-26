@@ -5563,3 +5563,112 @@ on the new image, took 30.83 s (29.28 s an hour before) and wrote the tape's
 first `instruments` partition, `date=2026-11-26`: six rows for each of the
 nine, one per read from 09:10 to 09:35, each with its venue symbol and dex.
 No payload was unparsed: the tape has no `unparsed` dataset.
+
+## galata-markets on the deployment — 2026-11-26
+
+`add-galata-markets`, tasks 6.3 to 6.5, with the maintainer's go-ahead. The
+`markets` password and the three clients' tokens set in both vault sections
+(printed nowhere) and in `var/broker.env`; the tokens re-minted, `markets`'
+the first; the broker restarted at 11:01:38 on the authorization file that
+names `markets`, back in 2 s with MARKETS' 554,917 messages and STATUS kept,
+capture reconnected 2 s later. `required-secrets.sh --missing` passes for
+both sections. The image built from `e194e74` in 77 s; installed at 11:04:59,
+connected to the bus as `markets` at once. **Port 8780, not 8790**: on
+installing, 8790 was found to be galata-watcher's API, here on loopback and
+on the NAS's address — and galata-watcher is one of this service's clients.
+
+From another process on the Mac, over the tailnet address, as the `operator`
+client: `/health` 200 with no token; `/v1/venues` 401 with none; loopback
+refused (published on the tailnet address only). The venue's health from
+STATUS: connected, current. The container wrote nothing to disk
+(`blockWriteBytes` 0): the archive and the tape are mounted read-only.
+
+```text
+read                                      time      answer       container
+a day of BTC quotes, 2026-11-25           0.46 s    66.6 MB      176 MiB    464,514 rows: the
+                                                                            count this file
+                                                                            records for that day
+the 24 h of BTC quotes to now             0.76 s    111 MB                  772,905 rows
+a year of BTC 1h bars                     4.54 s    738 KB       175 MiB    5,230 bars
+a month of BTC 5m bars                    2.11 s    437 KB       169 MiB    3,079 bars
+funding, the venue, 192 h                 1.20 s    167 MB       536 MiB    1,900,828 rows: the
+                                                                            largest the limits allow
+funding, the venue, 31 days: refused      0.29 s    88 B         350 MiB    2,513,139 rows, the
+                                                                            limit named
+ten live clients, nine instruments,       60 s      59 events/s  115 MiB    1.0% of a core; none
+  every dataset                                       each                  behind; ids distinct
+```
+
+The container's memory is the cgroup's, page cache of the read-only mounts
+included: 28 MiB on starting, 176 after the first reads, 115 a few minutes
+later with nothing asked. **The limits are kept** (design D3, D6, D7) and the
+`markets 2 2G` line with them: three of the largest answers at once fit.
+
+**The bars, as the tape holds them.** The year of 1h bars names
+2025-11-26 → 2026-04-22 13:00 unsourced (3,541 h) and has no bars there;
+5,057 are the venue's own hourly candles and 173, from 2026-11-13 on, are
+built from 1m candles where an hour's sixty were held. The last, 10:00, is
+incomplete: 41 of 60 source minutes, the tape being projected at :40. The
+month of 5m bars is all from 1m, with 32 unsourced spans (498 h; the longest
+2026-10-26 → 11-13 09:55, before 1m candles were captured, and
+11-19 19:30 → 11-21 23:30). 937 of its 3,079 bars are not final: a streamed
+1m candle is final only when an update arrives at or after its close, and
+for about a third of the minutes the venue's last update came before it.
+Funding is windowed by its venue time, which Hyperliquid's moves in steps,
+so 204 h and 216 h hold the same 2,468,432 rows.
+
+**The broker stopped for 240 s, a client following BTC after a history
+read's bound — first run, 11:11:12 → 11:15:12.** The client read the 24 h
+of BTC quotes, took the answer's bound, and followed `after` it. Capture's
+queue held the first 2 min 37 s and published them on reconnecting; the rest,
+11:13:49.654 → 11:15:16.282, it declared unpublished for its 27 pairs.
+
+```text
+history + live, against the archive       801,697 BTC quotes received in the period
+    each once                             800,935
+    missing                               762: 3 at the start (below), 759 the whole
+                                          declared span
+    twice / at or below the bound /       0 / 0 / 0 / 0
+    in both answers / not archived
+fills, declarations reaching the client   0, 0
+```
+
+**Every declaration was lost to a client started after a bound.** Capture
+publishes a declaration with no record sequence (`Envelope::new` gives it
+`seq` 0), and the live stream dropped any envelope at or below the bound
+before asking whether it was a declaration: no fill, and nothing to say the
+span was missing. The fill tests had started their clients from a moment or
+by resuming, never after a bound. Fixed in `3596281`: a declaration is
+judged first, and the bound applies to what fills it, so nothing the tape
+held is sent twice; two tests start after a bound, and wait out their 5 s on
+the previous code. Reinstalled at 11:30:07.
+
+**Second run, on `3596281`, 11:31:54 → 11:35:54.**
+
+```text
+history + live, against the archive       799,674 BTC quotes received in the period
+    each once                             799,671
+    missing                               3, at the start (below)
+    twice / at or below the bound /       0 / 0 / 0 / 0
+    in both answers / not archived
+live events out of order                  0
+fills                                     1,174, in two fills; no declaration reached
+                                          the client
+    the first run's span                  759 quotes, still in the window: sent as
+                                          the client caught up, 299 s before the stop
+    this run's span                       11:34:49.494 -> 11:35:58.035 (68.5 s),
+                                          declared at 11:35:58.086: 415 quotes, the
+                                          first 2.20 s after the declaration, all in
+                                          8 ms, the last carrying its id
+    from 5 s before the stop to 60 s      1,524 as live events (capture's queue,
+      after the start                     published late), 415 as fills
+the span, every instrument                3,468 payloads archived (quotes 2,580,
+                                          funding 612, candles 244)
+galata-markets                            183-185 MiB, 0.3% of a core, in the minute
+                                          after the broker's start
+```
+
+**The three missing at the start are not missing.** Each run's three were
+received in the first quarter-second of the asked window, with venue times
+before its start; a history read is windowed by venue time, the comparison
+by receipt time. Asked from five seconds earlier, the tape returns all six.
