@@ -374,6 +374,11 @@ mod tests {
             Kind::Fills,
             Kind::FundingPayments,
             Kind::LedgerUpdates,
+            Kind::Balances,
+            Kind::BorrowLend,
+            Kind::LendHealth,
+            Kind::PortfolioMargin,
+            Kind::TokenMargin,
         ];
         for kind in accounts {
             assert!(!projected(kind), "{kind}");

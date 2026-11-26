@@ -242,6 +242,16 @@ pub enum Event {
     EventsReach(EventsReach),
     /// An option's implied volatility and greeks, as the venue computed them.
     OptionPricing(OptionPricing),
+    /// One coin an account holds in spot.
+    Balance(Balance),
+    /// What an account has borrowed and supplied of one token.
+    BorrowLend(BorrowLend),
+    /// An account's borrowing health, as the venue states it.
+    LendHealth(LendHealth),
+    /// Whether an account is portfolio-margined, and its ratio, as stated.
+    PortfolioMargin(PortfolioMargin),
+    /// One token's margin figures for an account, as stated.
+    TokenMargin(TokenMargin),
 }
 
 impl Event {
@@ -268,6 +278,11 @@ impl Event {
             Event::FundingPayment(_) => Kind::FundingPayments,
             Event::LedgerUpdate(_) => Kind::LedgerUpdates,
             Event::OptionPricing(_) => Kind::OptionPricing,
+            Event::Balance(_) => Kind::Balances,
+            Event::BorrowLend(_) => Kind::BorrowLend,
+            Event::LendHealth(_) => Kind::LendHealth,
+            Event::PortfolioMargin(_) => Kind::PortfolioMargin,
+            Event::TokenMargin(_) => Kind::TokenMargin,
         }
     }
 }
@@ -884,12 +899,16 @@ impl AccountMode {
     }
 
     /// Why the perp account value is **not** this account's equity, or `None`
-    /// where it is.
+    /// where it is. For the two spot-collateral modes it says where the
+    /// collateral is: in the account's [`Balance`] rows, which the ledger
+    /// records beside the margin.
     pub fn equity_not_held(&self) -> Option<&'static str> {
         match self {
-            AccountMode::Unified => Some("collateral is spot (unifiedAccount), out of scope"),
+            AccountMode::Unified => {
+                Some("collateral is spot (unifiedAccount), recorded as balances")
+            }
             AccountMode::PortfolioMargin => {
-                Some("collateral is spot (portfolioMargin), out of scope")
+                Some("collateral is spot (portfolioMargin), recorded as balances")
             }
             AccountMode::Unknown => Some("account mode unknown"),
             AccountMode::Disabled | AccountMode::Default => None,
@@ -1116,6 +1135,91 @@ pub struct AccountSeen {
     pub name: Option<String>,
 }
 
+/// One coin an account holds in spot, as the venue stated it.
+///
+/// Hyperliquid states these in `spotClearinghouseState`. Under portfolio
+/// margin and unified account **this is where the collateral is**, which is
+/// why [`Margin::account_value`] is not the equity there. Every figure is as
+/// printed: a negative `hold` is what the venue said, not an error, and a
+/// figure the venue did not state is absent, not zero.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Balance {
+    /// The coin, as the venue names it.
+    pub asset: String,
+    /// The venue's index for the token: the key [`BorrowLend`] and
+    /// [`TokenMargin`] name it by.
+    pub token_index: Option<u32>,
+    /// The amount held.
+    pub total: Num,
+    /// The amount on hold.
+    pub hold: Option<Num>,
+    /// The entry notional.
+    pub entry_notional: Option<Num>,
+    /// The amount on hold in spot, stated for a collateral token.
+    pub spot_hold: Option<Num>,
+    /// The token's loan-to-value, stated for a collateral token.
+    pub ltv: Option<Num>,
+    /// The amount supplied to lending, stated for a collateral token.
+    pub supplied: Option<Num>,
+}
+
+/// What an account has borrowed and supplied of one token, as the venue
+/// stated it. Hyperliquid states it in `borrowLendUserState`, by token index;
+/// the name is the venue's own reference data's, absent where that names none.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BorrowLend {
+    /// The venue's index for the token, as stated.
+    pub token_index: u32,
+    /// The token's name, from the venue's reference data.
+    pub token: Option<String>,
+    /// The borrowed amount's basis.
+    pub borrow_basis: Option<Num>,
+    /// The borrowed amount's value.
+    pub borrow_value: Option<Num>,
+    /// The supplied amount's basis.
+    pub supply_basis: Option<Num>,
+    /// The supplied amount's value.
+    pub supply_value: Option<Num>,
+}
+
+/// An account's borrowing health, as the venue states it: one per read, so an
+/// account that borrows and supplies nothing still has one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LendHealth {
+    /// The venue's word for it, such as `healthy`.
+    pub health: Option<String>,
+    /// The health factor; absent where the venue states `null`.
+    pub health_factor: Option<Num>,
+}
+
+/// Whether an account is portfolio-margined, and its ratio, **as the venue
+/// states them**. The ratio is the venue's own figure, never computed here;
+/// an account whose answer states neither has no row.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PortfolioMargin {
+    /// Whether portfolio margin is enabled.
+    pub enabled: Option<bool>,
+    /// The portfolio-margin ratio; the venue liquidates above its threshold.
+    pub ratio: Option<Num>,
+}
+
+/// One token's margin figures for an account, as the venue states them. Each
+/// comes from its own list in the venue's answer, so each is absent where its
+/// list does not name the token.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TokenMargin {
+    /// The venue's index for the token, as stated.
+    pub token_index: u32,
+    /// The token's name, from the venue's reference data.
+    pub token: Option<String>,
+    /// The token's portfolio borrow ratio.
+    pub borrow_ratio: Option<Num>,
+    /// The token's portfolio supply ratio.
+    pub supply_ratio: Option<Num>,
+    /// The amount of the token available after maintenance.
+    pub available_after_maintenance: Option<Num>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,6 +1322,93 @@ mod tests {
             assert!(bad.is_empty(), "numbers on the wire: {bad:?}");
             let back: Envelope = serde_json::from_value(json).unwrap();
             assert_eq!(back, envelope, "the row round-trips exactly");
+        }
+    }
+
+    #[test]
+    fn a_balance_row_carries_no_float_and_round_trips() {
+        // The figures of the public portfolio-margin account read on
+        // 2026-11-26 (design/measured.md), a negative hold among them. Every
+        // amount must cross the wire as text and come back digit for digit;
+        // a token's index is a key, the one integer allowed.
+        let account = Account::new("main").unwrap();
+        let rows = [
+            Event::Balance(Balance {
+                asset: "USDC".into(),
+                token_index: Some(0),
+                total: Decimal::from_str("185390.10278742").unwrap(),
+                hold: num("-366701.7986019201"),
+                entry_notional: num("0.0"),
+                spot_hold: num("44280.81087107"),
+                ltv: num("0.0"),
+                supplied: num("141087.89598842"),
+            }),
+            Event::Balance(Balance {
+                asset: "WOW".into(),
+                token_index: Some(98),
+                total: Decimal::from_str("179.40071").unwrap(),
+                hold: num("0.0"),
+                entry_notional: num("3.44772284"),
+                spot_hold: None,
+                ltv: None,
+                supplied: None,
+            }),
+            Event::BorrowLend(BorrowLend {
+                token_index: 150,
+                token: Some("HYPE".into()),
+                borrow_basis: num("0.0"),
+                borrow_value: num("0.0"),
+                supply_basis: num("10376.86515991"),
+                supply_value: num("10376.86515991"),
+            }),
+            Event::LendHealth(LendHealth {
+                health: Some("healthy".into()),
+                health_factor: None,
+            }),
+            Event::PortfolioMargin(PortfolioMargin {
+                enabled: Some(true),
+                ratio: num("0.0229134385"),
+            }),
+            Event::TokenMargin(TokenMargin {
+                token_index: 150,
+                token: Some("HYPE".into()),
+                borrow_ratio: None,
+                supply_ratio: num("0.0103768652"),
+                available_after_maintenance: num("10376.86515991"),
+            }),
+        ];
+        let integers = ["seq", "at_micros", "recv_micros", "token_index"];
+        fn walk(value: &serde_json::Value, key: &str, integers: &[&str], bad: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Number(_) if !integers.contains(&key) => {
+                    bad.push(format!("{key} = {value}"))
+                }
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        walk(v, k, integers, bad);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, key, integers, bad);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for event in rows {
+            let kind = event.kind();
+            let envelope = Envelope::for_account(venue(), account.clone(), None, 20, event);
+            let json = serde_json::to_value(&envelope).unwrap();
+            let mut bad = Vec::new();
+            walk(&json, "", &integers, &mut bad);
+            assert!(bad.is_empty(), "{kind}: numbers on the wire: {bad:?}");
+            assert!(
+                matches!(kind.addressing(), crate::dataset::Addressing::Account),
+                "{kind} sits under the account"
+            );
+            let back: Envelope = serde_json::from_value(json).unwrap();
+            assert_eq!(back, envelope, "{kind} round-trips exactly");
         }
     }
 
@@ -1353,8 +1544,17 @@ mod tests {
             AccountMode::from_venue("somethingNew"),
             AccountMode::Unknown
         );
-        assert!(AccountMode::Unified.equity_not_held().is_some());
-        assert!(AccountMode::PortfolioMargin.equity_not_held().is_some());
+        // The two spot-collateral modes name themselves and where the
+        // collateral is recorded, and no longer call it out of scope.
+        for (mode, name) in [
+            (AccountMode::Unified, "unifiedAccount"),
+            (AccountMode::PortfolioMargin, "portfolioMargin"),
+        ] {
+            let said = mode.equity_not_held().unwrap();
+            assert!(said.contains(name), "{said}");
+            assert!(said.contains("recorded as balances"), "{said}");
+            assert!(!said.contains("out of scope"), "{said}");
+        }
         assert!(AccountMode::Unknown.equity_not_held().is_some());
         assert!(AccountMode::Disabled.equity_not_held().is_none());
         assert!(AccountMode::Default.equity_not_held().is_none());

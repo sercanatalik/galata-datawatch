@@ -35,6 +35,7 @@ framework.
 - [Quick start](#quick-start)
 - [Storage layout](#storage-layout)
 - [Querying the tape](#querying-the-tape)
+- [The account ledger](#the-account-ledger)
 - [Operations](#operations)
   - [Configuration and secrets](#configuration-and-secrets)
   - [Scheduled maintenance](#scheduled-maintenance)
@@ -241,6 +242,7 @@ published crates link none of it.
 |---|---|
 | `galata-datawatch` | capture one venue, with configuration from a file |
 | `galata-datawatch-vault` | the same, with configuration and secrets fetched from galata-vault at boot |
+| `galata-ledger` | record one venue's declared accounts: margin, positions, balances, borrowing and history ([The account ledger](#the-account-ledger)) |
 | `galata-tape-rebuild` | project the archive into the tape; `--replace` rebuilds a venue's range |
 | `galata-compact` | merge the small segments of closed days, and with `--closed-hours` of today's closed hours (never the open hour) |
 | `galata-watch` | judge the record's freshness and completeness, per venue |
@@ -430,6 +432,43 @@ built, for a history read and a live stream alike.
   bar is the same in every answer.
 - **A span no source covers is named, not filled**: 5m bars from before 1m
   capture began come back as an unsourced span, never as hourly bars.
+
+---
+
+## The account ledger
+
+`galata-ledger <venue>` records the operator's own accounts, as `capture`
+records markets: every answer archived verbatim before anything reads it, a
+missed read recorded as a gap, and **nothing computed** from what the venue
+states. It reads Hyperliquid today, by address, with no key.
+
+```text
+  every snapshot_secs   per account and dex     clearinghouseState   ──▶ margin, positions
+                        per account             spotClearinghouseState ──▶ balances,
+                                                                         portfolio_margin, token_margin
+                        per account             borrowLendUserState  ──▶ borrow_lend, lend_health
+  every discover_secs   per master              subAccounts, userRole, userAbstraction
+                        for the venue           spotMeta: names the tokens the two above refer to
+  every events_secs     per account             fills, funding payments, ledger updates
+
+  var/ledger/          THE RECORD, owner-only (0700): venue=/account=<alias>/kind=/date=
+  var/ledger-tape/     ITS PROJECTION, owner-only: venue=/account=<alias>/kind=/rows.parquet
+```
+
+- **Under portfolio margin and unified account, the collateral is spot**: the
+  margin row's account value is not the equity, and its `equity_not_held`
+  says the collateral is recorded as balances. Under portfolio margin the
+  venue also states its own portfolio-margin ratio and per-token ratios, which
+  are recorded as stated (`portfolio_margin`, `token_margin`).
+- **An account's state is read, not dated by the venue**: balances, borrowing
+  and the portfolio figures carry their read's receipt as their time. A reader
+  takes an account's newest rows of a kind with `ledger::project::newest`, so
+  it never mixes one read's balance with another's.
+- **Its cost is declared**: each read's weight counts against `ledger_share`
+  of the venue's budget, and a configuration that cannot afford its cadences
+  is refused at load.
+- **An address never names anything**: accounts are aliases (`main`, and
+  `main_s1` for a discovered sub-account) in every path, subject and log.
 
 ---
 

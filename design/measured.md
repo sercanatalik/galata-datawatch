@@ -5727,3 +5727,62 @@ tailnet machine with a valid identity and password was admitted. Its one
 identity holds no grants, so admission with the deployment's identities'
 grants from another machine is not seen; that needs one of the broker's
 passwords typed on a second device.
+
+## What Hyperliquid states of an account's spot and borrowing — 2026-11-26
+
+`add-hyperliquid-portfolio-margin-state` task 1.1. Mainnet `info`,
+unauthenticated, paced by weight to about 400 a minute beside capture.
+Three accounts: the operator's master, its address read from
+galata-watcher's settings and passed only into request bodies; and two
+public ones taken from the participants of `recentTrades`, one in each
+mode wanted. No address is recorded, and the operator's balances are not
+either: its figures below are shapes and modes only.
+
+```text
+                                     the master       public, PM        public, unified
+userAbstraction                      portfolioMargin  portfolioMargin   unifiedAccount
+spot balances                        1                8                 2
+  with spotHold, ltv, supplied       1 (USDC)         3 (USDC, HYPE,    0
+                                                        USDT0)
+portfolioMarginEnabled               true             true              absent
+portfolioMarginRatio                 stated           "0.0229134385"    absent
+tokenToPortfolioBorrowRatio          1 token          2 tokens          absent
+tokenToPortfolioSupplyRatio          none             1 (HYPE           absent
+                                                        "0.0103768652")
+tokenToAvailableAfterMaintenance     5 tokens         5 tokens          stated
+borrowLend tokenToState              1 (USDC          3 (USDC, HYPE,    none
+                                       supplied)        USDT0 supplied)
+health / healthFactor                healthy / null   healthy / null    healthy / null
+```
+
+**The master is in portfolio margin.** On 2026-09-25 it was
+`unifiedAccount` and flat; today `userAbstraction` answers
+`portfolioMargin`.
+
+**The spot answer says more than its documentation.** The documented
+answer is `balances[]` of `{coin, token, hold, total, entryNtl}`. Under
+portfolio margin it also holds `portfolioMarginEnabled`,
+`portfolioMarginRatio` and three lists of `[tokenIndex, decimal]`:
+`tokenToPortfolioBorrowRatio`, `tokenToPortfolioSupplyRatio` and
+`tokenToAvailableAfterMaintenance`. A unified account's holds the last
+list alone. **The venue states the portfolio-margin ratio**, which the
+margin optimiser's design had taken to be computed only.
+
+**A collateral token's balance carries three more fields**: `spotHold`,
+`ltv` and `supplied`, on USDC, HYPE and USDT0 and on no other coin. Under
+portfolio margin `hold` can be negative: the public account's USDC read
+`total 185390.10278742`, `hold -366701.7986019201`, `spotHold
+44280.81087107`, `supplied 141087.89598842`.
+
+**`borrowLendUserState` answers as documented**:
+`tokenToState: [[index, {borrow: {basis, value}, supply: {basis,
+value}}]]`, `health` and `healthFactor`. The health factor was `null` on
+all three, which the ledger records as absent. A unified account with
+nothing lent answers an empty `tokenToState`.
+
+**Every token index is named by `spotMeta`** (521 tokens): none of the
+indices in `tokenToState` or the three lists went unnamed.
+
+**Weight**: the three accounts' `userAbstraction`, spot and borrow reads,
+`spotMeta` and the search through recent trades cost 424 and about 200
+more for the unified sample.

@@ -1,0 +1,150 @@
+{
+ "tokens": [
+  {
+   "name": "USDC",
+   "szDecimals": 8,
+   "weiDecimals": 8,
+   "index": 0,
+   "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+   "isCanonical": true,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": null,
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "WOW",
+   "szDecimals": 0,
+   "weiDecimals": 5,
+   "index": 98,
+   "tokenId": "0xc81b9a04884f4a8107f734c4d88f811a",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": 13
+   },
+   "fullName": null,
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "MUNCH",
+   "szDecimals": 0,
+   "weiDecimals": 5,
+   "index": 146,
+   "tokenId": "0x26f2bebc98ec2a579febeb5d7b7e3456",
+   "isCanonical": false,
+   "evmContract": null,
+   "fullName": "\ud83c\udf69 Staying Hungry We Keep \ud83c\udf69n Munching \ud83c\udf69",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "HYPE",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 150,
+   "tokenId": "0x0d01dc56dcaaca66ad901c959b4011ec",
+   "isCanonical": false,
+   "evmContract": null,
+   "fullName": "Hyperliquid",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "STAR",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 154,
+   "tokenId": "0x68aa39b6a6d8abe04ba97d3953fea816",
+   "isCanonical": false,
+   "evmContract": null,
+   "fullName": null,
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "FARM",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 161,
+   "tokenId": "0x11c83b5cfeb6419a74a85a5aaba0511d",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": 10
+   },
+   "fullName": "World's 1st GenAI AI Agent Game",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "SENT",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 186,
+   "tokenId": "0x2ceb1907ce5c0c98b86e733d15aea34b",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": 10
+   },
+   "fullName": "https://x.com/Sentiient_AI",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "UBTC",
+   "szDecimals": 5,
+   "weiDecimals": 10,
+   "index": 197,
+   "tokenId": "0x8f254b963e8468305d409b33aa137c67",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": "Unit Bitcoin",
+   "deployerTradingFeeShare": "1.0"
+  },
+  {
+   "name": "UETH",
+   "szDecimals": 4,
+   "weiDecimals": 9,
+   "index": 221,
+   "tokenId": "0xe1edd30daaf5caac3fe63569e24748da",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": 9
+   },
+   "fullName": "Unit Ethereum",
+   "deployerTradingFeeShare": "1.0"
+  },
+  {
+   "name": "USDT0",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 268,
+   "tokenId": "0x25faedc3f054130dbb4e4203aca63567",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": "USDT0",
+   "deployerTradingFeeShare": "0.0"
+  },
+  {
+   "name": "USDH",
+   "szDecimals": 2,
+   "weiDecimals": 8,
+   "index": 360,
+   "tokenId": "0x54e00a5988577cb0b0c9ab0cb6ef7f4b",
+   "isCanonical": false,
+   "evmContract": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "evm_extra_wei_decimals": -2
+   },
+   "fullName": "USDH",
+   "deployerTradingFeeShare": "0.0"
+  }
+ ],
+ "universe": []
+}

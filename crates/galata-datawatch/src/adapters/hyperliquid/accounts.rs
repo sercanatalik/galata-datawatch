@@ -5,7 +5,7 @@
 //! holds **no key** for this venue — only the addresses, which are secrets of
 //! a different kind (`crate::ledger`).
 
-use galata_wire::{Kind, Venue};
+use galata_wire::{Kind, Series, Venue};
 
 use super::client::{Client, FetchError};
 use super::events;
@@ -59,7 +59,35 @@ impl AccountVenue for HyperliquidAccounts {
             Ask::Listing => ledger::LISTING_CHANNEL,
             Ask::Role => ledger::ROLE_CHANNEL,
             Ask::Mode => ledger::MODE_CHANNEL,
+            Ask::Balances => ledger::BALANCES_CHANNEL,
+            Ask::BorrowLend => ledger::BORROW_LEND_CHANNEL,
         }
+    }
+
+    fn account_wide_asks(&self) -> &'static [(Ask, Series)] {
+        &[
+            (Ask::Balances, Series::Balances),
+            (Ask::BorrowLend, Series::BorrowLend),
+        ]
+    }
+
+    async fn account_wide(&self, ask: Ask, address: &Secret) -> Result<Vec<u8>, Refusal> {
+        match ask {
+            Ask::Balances => self.client.spot_clearinghouse_state(address).await,
+            Ask::BorrowLend => self.client.borrow_lend_user_state(address).await,
+            // Not an account-wide read: the loop never asks one.
+            _ => return Err(Refusal::Unreachable),
+        }
+        .map_err(refused)
+    }
+
+    async fn reference(&self) -> Result<Vec<u8>, Refusal> {
+        self.client.spot_meta().await.map_err(refused)
+    }
+
+    fn compose_wide(&self, ask: Ask, reference: Option<&[u8]>, answer: &[u8]) -> Vec<u8> {
+        let key = self.channel(ask);
+        ledger::wide_bytes(key, ledger::names_for(reference, answer).as_ref(), answer)
     }
 
     async fn snapshot(&self, address: &Secret, dex: &str) -> Result<Vec<u8>, Refusal> {

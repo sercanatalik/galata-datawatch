@@ -48,6 +48,13 @@ pub enum Series {
     FundingPayments,
     /// An account's ledger updates, walked by the ledger.
     LedgerUpdates,
+    /// An account's spot balances, one read per account, **polled by the
+    /// ledger**. The portfolio-margin figures stated in the same answer ride
+    /// along, so a gap here is a gap in them too.
+    Balances,
+    /// An account's borrowed and supplied amounts, one read per account,
+    /// polled by the ledger. Its health rides along.
+    BorrowLend,
 }
 
 /// A dataset a store writes, and the last token of a market-data subject.
@@ -116,6 +123,17 @@ pub enum Kind {
     /// and it rides the option's ticker the way marks ride an asset context,
     /// so it is not separately declarable.
     OptionPricing,
+    /// [`Series::Balances`]: one coin an account holds in spot per row.
+    Balances,
+    /// [`Series::BorrowLend`]: what an account borrowed and supplied, per token.
+    BorrowLend,
+    /// An account's borrowing health, riding a borrow and lend read.
+    LendHealth,
+    /// Whether an account is portfolio-margined and its ratio, as the venue
+    /// stated them, riding a balances read.
+    PortfolioMargin,
+    /// One token's margin figures for an account, riding a balances read.
+    TokenMargin,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -148,7 +166,7 @@ impl Addressing {
 impl Series {
     /// Every series, for a loader that must refuse an unknown one by listing
     /// the known ones.
-    pub const ALL: [Series; 11] = [
+    pub const ALL: [Series; 13] = [
         Series::Trades,
         Series::Book,
         Series::Candles,
@@ -160,6 +178,8 @@ impl Series {
         Series::Fills,
         Series::FundingPayments,
         Series::LedgerUpdates,
+        Series::Balances,
+        Series::BorrowLend,
     ];
 
     /// The discriminator written to disk and to a subject.
@@ -176,6 +196,8 @@ impl Series {
             Series::Fills => "fills",
             Series::FundingPayments => "funding_payments",
             Series::LedgerUpdates => "ledger_updates",
+            Series::Balances => "balances",
+            Series::BorrowLend => "borrow_lend",
         }
     }
 
@@ -193,6 +215,8 @@ impl Series {
             Series::Fills => Kind::Fills,
             Series::FundingPayments => Kind::FundingPayments,
             Series::LedgerUpdates => Kind::LedgerUpdates,
+            Series::Balances => Kind::Balances,
+            Series::BorrowLend => Kind::BorrowLend,
         }
     }
 }
@@ -228,7 +252,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 21] = [
+    pub const ALL: [Kind; 26] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -250,6 +274,11 @@ impl Kind {
         Kind::LedgerUpdates,
         Kind::Signals,
         Kind::OptionPricing,
+        Kind::Balances,
+        Kind::BorrowLend,
+        Kind::LendHealth,
+        Kind::PortfolioMargin,
+        Kind::TokenMargin,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -277,7 +306,12 @@ impl Kind {
             | Kind::Accounts
             | Kind::Fills
             | Kind::FundingPayments
-            | Kind::LedgerUpdates => Addressing::Account,
+            | Kind::LedgerUpdates
+            | Kind::Balances
+            | Kind::BorrowLend
+            | Kind::LendHealth
+            | Kind::PortfolioMargin
+            | Kind::TokenMargin => Addressing::Account,
             Kind::Signals => Addressing::Market,
         }
     }
@@ -306,6 +340,11 @@ impl Kind {
             Kind::LedgerUpdates => "ledger_updates",
             Kind::Signals => "signals",
             Kind::OptionPricing => "option_pricing",
+            Kind::Balances => "balances",
+            Kind::BorrowLend => "borrow_lend",
+            Kind::LendHealth => "lend_health",
+            Kind::PortfolioMargin => "portfolio_margin",
+            Kind::TokenMargin => "token_margin",
         }
     }
 }
@@ -342,7 +381,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 21);
+        assert_eq!(Kind::ALL.len(), 26);
     }
 
     #[test]
@@ -369,6 +408,9 @@ mod tests {
             Kind::Accounts,
             Kind::Signals,
             Kind::OptionPricing,
+            Kind::LendHealth,
+            Kind::PortfolioMargin,
+            Kind::TokenMargin,
         ] {
             assert!(!declarable.contains(&kind), "{kind} must not be declarable");
         }
@@ -409,7 +451,16 @@ mod tests {
     fn an_accounts_datasets_sit_under_the_account() {
         // An account's history must be one subtree, so that it can be retained
         // or dropped without touching another account's.
-        for kind in [Kind::Margin, Kind::Positions, Kind::Accounts] {
+        for kind in [
+            Kind::Margin,
+            Kind::Positions,
+            Kind::Accounts,
+            Kind::Balances,
+            Kind::BorrowLend,
+            Kind::LendHealth,
+            Kind::PortfolioMargin,
+            Kind::TokenMargin,
+        ] {
             assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
         }
         assert!(matches!(Kind::Quotes.addressing(), Addressing::Venue));

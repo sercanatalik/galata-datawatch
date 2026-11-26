@@ -589,6 +589,14 @@ pub struct LedgerCost {
     /// One events request (fills, funding or ledger updates), before any
     /// per-item weight the answer adds.
     pub events: f64,
+    /// One read of an account's spot balances, account-wide, each snapshot.
+    pub balances: f64,
+    /// One read of an account's borrow and lend state, account-wide, each
+    /// snapshot.
+    pub borrow_lend: f64,
+    /// One read of the reference data that names the balances' tokens, once
+    /// per discovery run for the venue, not per account.
+    pub reference: f64,
 }
 
 impl Ledger {
@@ -603,18 +611,28 @@ impl Ledger {
             Some(secs) => 60.0 / secs.max(1) as f64,
             None => 0.0,
         };
-        self.account
+        let accounts: f64 = self
+            .account
             .values()
             .filter(|a| a.venue == venue)
             .map(|a| {
                 a.dexes.len().max(1) as f64 * cost.snapshot * per_snapshot
+                    // Account-wide: once per account, whatever its dexes.
+                    + (cost.balances + cost.borrow_lend) * per_snapshot
                     + (cost.discovery + cost.mode) * per_discovery
                     // Three kinds a poll: fills, funding, ledger updates.
                     // Their per-item weight is paid at run time and paced
                     // within the share, as discovered accounts are.
                     + 3.0 * cost.events * per_events
             })
-            .sum()
+            .sum();
+        // The reference is the venue's, read once a run for all its accounts.
+        let reference = if self.account.values().any(|a| a.venue == venue) {
+            cost.reference * per_discovery
+        } else {
+            0.0
+        };
+        accounts + reference
     }
 }
 
@@ -1234,6 +1252,9 @@ mod tests {
                 discovery: 20.0,
                 mode: 20.0,
                 events: 20.0,
+                balances: 2.0,
+                borrow_lend: 20.0,
+                reference: 20.0,
             })
         }
         fn keeps_ledgers(&self) -> bool {
@@ -1534,8 +1555,10 @@ dexes = ["", "xyz"]
     #[test]
     fn a_cadence_the_share_cannot_afford_is_refused_with_both_figures() {
         // Two dexes every second at weight 2 is 240 a minute for snapshots;
-        // one master's discovery and mode every 600 s is 4; three events
-        // requests every 300 s is 12. 256 against the 1% share's 12.
+        // the account's spot (2) and borrow and lend (20) reads every second
+        // are 1,320; one master's discovery and mode every 600 s is 4; three
+        // events requests every 300 s is 12; the venue's spotMeta every 600 s
+        // is 2. 1,578 against the 1% share's 12.
         let err = with_ledger(
             &LEDGER
                 .replace("snapshot_secs = 10", "snapshot_secs = 1")
@@ -1543,8 +1566,22 @@ dexes = ["", "xyz"]
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("256.0"), "the cost: {err}");
+        assert!(err.contains("1578.0"), "the cost: {err}");
         assert!(err.contains("12.0"), "the allowance: {err}");
+    }
+
+    #[test]
+    fn the_balance_reads_count_against_the_share() {
+        // At a 10 s snapshot the declared set costs 40 a minute without the
+        // account-wide reads (24 snapshots, 4 discovery, 12 events) and 174
+        // with them (+132 spot and borrow, +2 spotMeta): inside a 25% share,
+        // and over a 10% one, which only the balance reads take it past.
+        assert!(with_ledger(LEDGER).is_ok());
+        let err = with_ledger(&LEDGER.replace("ledger_share = 0.25", "ledger_share = 0.1"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("174.0"), "the cost: {err}");
+        assert!(err.contains("120.0"), "the allowance: {err}");
     }
 
     #[test]

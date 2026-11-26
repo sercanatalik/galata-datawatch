@@ -37,14 +37,69 @@ use galata_wire::{
 
 use crate::ledger::accounts::LedgerError;
 
-/// The kinds this projection writes: every kind the fold reads.
-pub const PROJECTED: [Kind; 5] = [
+/// The kinds this projection writes: every kind the fold reads, and the
+/// account's state read beside them — its balances, its borrowing and the
+/// margin figures the venue states with them. The fold pass reads all of these
+/// and folds only its own.
+pub const PROJECTED: [Kind; 10] = [
     Kind::Fills,
     Kind::FundingPayments,
     Kind::Margin,
     Kind::Positions,
     Kind::LedgerUpdates,
+    Kind::Balances,
+    Kind::BorrowLend,
+    Kind::LendHealth,
+    Kind::PortfolioMargin,
+    Kind::TokenMargin,
 ];
+
+/// An account's newest rows of one kind, and the time they were stated: the
+/// rows of the latest read. **The time is the read's receipt**, since these
+/// answers state none of their own. `None` where the kind holds no rows.
+///
+/// What a reader of the account's state asks — the margin engine, for one —
+/// so that it never takes a balance from one read beside another's.
+pub fn newest(
+    root: &Path,
+    venue: &str,
+    account: &str,
+    kind: Kind,
+) -> Result<Option<(i64, RecordBatch)>, ProjectError> {
+    let path = path_of(root, venue, account, kind);
+    let schema = schema_for(kind).ok_or(ProjectError::Arrow {
+        kind,
+        detail: "not a projected kind".into(),
+    })?;
+    let batches = galata_segments::read_segment(&path)?;
+    let all =
+        arrow::compute::concat_batches(&schema, &batches).map_err(|e| ProjectError::Arrow {
+            kind,
+            detail: e.to_string(),
+        })?;
+    let recv = all
+        .column_by_name("recv_micros")
+        .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>())
+        .ok_or(ProjectError::Arrow {
+            kind,
+            detail: "no recv_micros column".into(),
+        })?;
+    let Some(latest) = arrow::compute::max(recv) else {
+        return Ok(None);
+    };
+    let mask =
+        arrow::compute::kernels::cmp::eq(recv, &arrow::array::Int64Array::new_scalar(latest))
+            .map_err(|e| ProjectError::Arrow {
+                kind,
+                detail: e.to_string(),
+            })?;
+    let rows =
+        arrow::compute::filter_record_batch(&all, &mask).map_err(|e| ProjectError::Arrow {
+            kind,
+            detail: e.to_string(),
+        })?;
+    Ok(Some((latest, rows)))
+}
 
 /// The file each kind is written to, under its directory.
 pub const FILE: &str = "rows.parquet";
@@ -205,6 +260,45 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("amount", MONEY, true),
             Field::new("fee", MONEY, true),
         ]),
+        // One coin held in spot per row, as stated: a negative hold included.
+        Kind::Balances => fields.extend([
+            Field::new("asset", DataType::Utf8, false),
+            // The venue's index, the key the borrowing and token rows name.
+            Field::new("token_index", DataType::UInt32, true),
+            Field::new("total", MONEY, false),
+            Field::new("hold", MONEY, true),
+            Field::new("entry_notional", MONEY, true),
+            // Stated on a collateral token only.
+            Field::new("spot_hold", MONEY, true),
+            Field::new("ltv", MONEY, true),
+            Field::new("supplied", MONEY, true),
+        ]),
+        Kind::BorrowLend => fields.extend([
+            Field::new("token_index", DataType::UInt32, false),
+            // From the venue's reference data; null where it named none.
+            Field::new("token", DataType::Utf8, true),
+            Field::new("borrow_basis", MONEY, true),
+            Field::new("borrow_value", MONEY, true),
+            Field::new("supply_basis", MONEY, true),
+            Field::new("supply_value", MONEY, true),
+        ]),
+        Kind::LendHealth => fields.extend([
+            Field::new("health", DataType::Utf8, true),
+            // Null where the venue stated null: absent, not zero.
+            Field::new("health_factor", MONEY, true),
+        ]),
+        // The venue's own figures; none is computed here.
+        Kind::PortfolioMargin => fields.extend([
+            Field::new("enabled", DataType::Boolean, true),
+            Field::new("ratio", MONEY, true),
+        ]),
+        Kind::TokenMargin => fields.extend([
+            Field::new("token_index", DataType::UInt32, false),
+            Field::new("token", DataType::Utf8, true),
+            Field::new("borrow_ratio", MONEY, true),
+            Field::new("supply_ratio", MONEY, true),
+            Field::new("available_after_maintenance", MONEY, true),
+        ]),
         _ => return None,
     }
     Some(Arc::new(Schema::new(fields)))
@@ -243,6 +337,42 @@ fn update_of(e: &Envelope) -> Option<&galata_wire::LedgerUpdate> {
         Event::LedgerUpdate(u) => Some(u),
         _ => None,
     }
+}
+fn balance_of(e: &Envelope) -> Option<&galata_wire::Balance> {
+    match &e.event {
+        Event::Balance(b) => Some(b),
+        _ => None,
+    }
+}
+fn borrow_lend_of(e: &Envelope) -> Option<&galata_wire::BorrowLend> {
+    match &e.event {
+        Event::BorrowLend(b) => Some(b),
+        _ => None,
+    }
+}
+fn lend_health_of(e: &Envelope) -> Option<&galata_wire::LendHealth> {
+    match &e.event {
+        Event::LendHealth(h) => Some(h),
+        _ => None,
+    }
+}
+fn portfolio_margin_of(e: &Envelope) -> Option<&galata_wire::PortfolioMargin> {
+    match &e.event {
+        Event::PortfolioMargin(p) => Some(p),
+        _ => None,
+    }
+}
+fn token_margin_of(e: &Envelope) -> Option<&galata_wire::TokenMargin> {
+    match &e.event {
+        Event::TokenMargin(t) => Some(t),
+        _ => None,
+    }
+}
+
+fn u32s(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<u32>) -> ArrayRef {
+    let mut b = UInt32Builder::with_capacity(rows.len());
+    rows.iter().for_each(|e| b.append_option(f(e)));
+    Arc::new(b.finish())
 }
 
 fn dex_of(e: &Envelope) -> Option<&str> {
@@ -421,6 +551,61 @@ fn batch_for(
             }));
             columns.push(dec(rows, |e| update_of(e).and_then(|x| x.amount))?);
             columns.push(dec(rows, |e| update_of(e).and_then(|x| x.fee))?);
+        }
+        Kind::Balances => {
+            let each = |g: fn(&galata_wire::Balance) -> Option<Num>| {
+                move |e: &Envelope| balance_of(e).and_then(g)
+            };
+            columns.push(text(rows, |e| balance_of(e).map(|x| x.asset.as_str())));
+            columns.push(u32s(rows, |e| balance_of(e).and_then(|x| x.token_index)));
+            columns.push(dec(rows, each(|x| Some(x.total)))?);
+            columns.push(dec(rows, each(|x| x.hold))?);
+            columns.push(dec(rows, each(|x| x.entry_notional))?);
+            columns.push(dec(rows, each(|x| x.spot_hold))?);
+            columns.push(dec(rows, each(|x| x.ltv))?);
+            columns.push(dec(rows, each(|x| x.supplied))?);
+        }
+        Kind::BorrowLend => {
+            let each = |g: fn(&galata_wire::BorrowLend) -> Option<Num>| {
+                move |e: &Envelope| borrow_lend_of(e).and_then(g)
+            };
+            columns.push(u32s(rows, |e| borrow_lend_of(e).map(|x| x.token_index)));
+            columns.push(text(rows, |e| {
+                borrow_lend_of(e).and_then(|x| x.token.as_deref())
+            }));
+            columns.push(dec(rows, each(|x| x.borrow_basis))?);
+            columns.push(dec(rows, each(|x| x.borrow_value))?);
+            columns.push(dec(rows, each(|x| x.supply_basis))?);
+            columns.push(dec(rows, each(|x| x.supply_value))?);
+        }
+        Kind::LendHealth => {
+            columns.push(text(rows, |e| {
+                lend_health_of(e).and_then(|x| x.health.as_deref())
+            }));
+            columns.push(dec(rows, |e| {
+                lend_health_of(e).and_then(|x| x.health_factor)
+            })?);
+        }
+        Kind::PortfolioMargin => {
+            columns.push({
+                let mut b = BooleanBuilder::with_capacity(rows.len());
+                rows.iter()
+                    .for_each(|e| b.append_option(portfolio_margin_of(e).and_then(|x| x.enabled)));
+                Arc::new(b.finish())
+            });
+            columns.push(dec(rows, |e| portfolio_margin_of(e).and_then(|x| x.ratio))?);
+        }
+        Kind::TokenMargin => {
+            let each = |g: fn(&galata_wire::TokenMargin) -> Option<Num>| {
+                move |e: &Envelope| token_margin_of(e).and_then(g)
+            };
+            columns.push(u32s(rows, |e| token_margin_of(e).map(|x| x.token_index)));
+            columns.push(text(rows, |e| {
+                token_margin_of(e).and_then(|x| x.token.as_deref())
+            }));
+            columns.push(dec(rows, each(|x| x.borrow_ratio))?);
+            columns.push(dec(rows, each(|x| x.supply_ratio))?);
+            columns.push(dec(rows, each(|x| x.available_after_maintenance))?);
         }
         _ => unreachable!("only projected kinds are built"),
     }

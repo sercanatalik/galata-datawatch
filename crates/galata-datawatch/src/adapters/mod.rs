@@ -208,6 +208,12 @@ pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
             // 20 each, as "all other documented info requests", plus 1 per
             // 20 items for fills and funding (read 2026-09-25).
             events: 20.0,
+            // `spotClearinghouseState` weighs 2; `borrowLendUserState` and
+            // `spotMeta` 20, as other documented info requests (read
+            // 2026-11-26).
+            balances: 2.0,
+            borrow_lend: 20.0,
+            reference: 20.0,
         }),
         _ => None,
     }

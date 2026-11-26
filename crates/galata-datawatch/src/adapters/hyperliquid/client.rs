@@ -216,6 +216,43 @@ impl Client {
             .await
     }
 
+    /// An account's spot state, raw: its balances and, under portfolio margin,
+    /// the venue's own portfolio-margin figures, which the documentation does
+    /// not list (`design/measured.md`, 2026-11-26). Account-wide, so asked
+    /// once per account and never per dex. Weighs 2.
+    #[cfg(feature = "ledger")]
+    pub async fn spot_clearinghouse_state(
+        &self,
+        address: &crate::config::Secret,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({
+            "type": "spotClearinghouseState",
+            "user": address.expose(),
+        }))
+        .await
+    }
+
+    /// What an account has borrowed and supplied, per token index, and its
+    /// health, raw. Account-wide. Weighs 20.
+    #[cfg(feature = "ledger")]
+    pub async fn borrow_lend_user_state(
+        &self,
+        address: &crate::config::Secret,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({
+            "type": "borrowLendUserState",
+            "user": address.expose(),
+        }))
+        .await
+    }
+
+    /// The spot tokens' reference data, raw: what names a token index in the
+    /// two answers above. Asks about no account. Weighs 20.
+    #[cfg(feature = "ledger")]
+    pub async fn spot_meta(&self) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({ "type": "spotMeta" })).await
+    }
+
     /// One page of an account's events, raw: the oldest at or after
     /// `start_ms`, as the venue pages each kind (2,000 fills, 500 funding
     /// payments, 2,000 ledger updates; measured 2026-09-25). `kind` is the
@@ -382,5 +419,135 @@ mod tests {
     #[test]
     fn a_page_that_is_not_rows_has_no_end() {
         assert!(funding_page_end(b"{\"error\":\"nope\"}").is_none());
+    }
+
+    #[cfg(feature = "ledger")]
+    mod balances {
+        use std::sync::{Arc, Mutex};
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use super::super::*;
+        use crate::config::Secret;
+
+        const ADDRESS: &str = "0x00000000000000000000000000000000000000aa";
+
+        /// Answer every request on 127.0.0.1 with one status and body, and keep
+        /// what was asked: the request line and the body.
+        async fn serve(status: u16, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let record = asked.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => raw.extend_from_slice(&buf[..n]),
+                        }
+                        let text = String::from_utf8_lossy(&raw);
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length: usize = text
+                                .to_lowercase()
+                                .lines()
+                                .find_map(|l| {
+                                    l.strip_prefix("content-length: ").map(str::to_string)
+                                })
+                                .and_then(|v| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            if raw.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    record
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&raw).to_string());
+                    let reason = if status == 200 { "OK" } else { "Refused" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            });
+            (url, asked)
+        }
+
+        fn body_of(asked: &str) -> serde_json::Value {
+            let (_, body) = asked.split_once("\r\n\r\n").unwrap();
+            serde_json::from_str(body).unwrap()
+        }
+
+        #[tokio::test]
+        async fn the_three_reads_ask_what_they_say_and_return_the_bytes_unread() {
+            let answer = r#"{"balances":[],"tokenToState":[],"tokens":[]}"#;
+            let (url, asked) = serve(200, answer).await;
+            let client = Client::new(&url);
+            let address = Secret::new(ADDRESS);
+            let spot = client.spot_clearinghouse_state(&address).await.unwrap();
+            let lend = client.borrow_lend_user_state(&address).await.unwrap();
+            let meta = client.spot_meta().await.unwrap();
+            for bytes in [spot, lend, meta] {
+                assert_eq!(bytes, answer.as_bytes(), "the venue's bytes, untouched");
+            }
+            let asked = asked.lock().unwrap();
+            assert_eq!(asked.len(), 3);
+            for request in asked.iter() {
+                assert!(request.starts_with("POST /info "), "{request}");
+            }
+            assert_eq!(
+                body_of(&asked[0]),
+                serde_json::json!({"type": "spotClearinghouseState", "user": ADDRESS})
+            );
+            assert_eq!(
+                body_of(&asked[1]),
+                serde_json::json!({"type": "borrowLendUserState", "user": ADDRESS})
+            );
+            // Account-wide reads name no dex; the reference read names no account.
+            assert_eq!(body_of(&asked[2]), serde_json::json!({"type": "spotMeta"}));
+        }
+
+        #[tokio::test]
+        async fn a_refused_read_names_neither_the_address_nor_the_url() {
+            let (url, _) = serve(500, "busy").await;
+            let client = Client::new(&url);
+            let address = Secret::new(ADDRESS);
+            for refusal in [
+                client.spot_clearinghouse_state(&address).await.unwrap_err(),
+                client.borrow_lend_user_state(&address).await.unwrap_err(),
+            ] {
+                let said = refusal.to_string();
+                assert!(said.contains("hyperliquid"), "{said}");
+                assert!(said.contains("500"), "{said}");
+                assert!(!said.contains(ADDRESS), "{said}");
+                assert!(!said.contains("127.0.0.1"), "{said}");
+                assert!(!said.contains("://"), "{said}");
+            }
+        }
+
+        #[tokio::test]
+        async fn an_unreachable_venue_is_said_without_its_address() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            drop(listener);
+            let said = Client::new(&url)
+                .spot_clearinghouse_state(&Secret::new(ADDRESS))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(said.contains("hyperliquid"), "{said}");
+            assert!(!said.contains("127.0.0.1"), "{said}");
+            assert!(!said.contains(ADDRESS), "{said}");
+        }
     }
 }

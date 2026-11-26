@@ -317,3 +317,42 @@ instruments = [
 #   # from this block is kept forever rather than assigned a number nobody
 #   # chose.
 #   hyperliquid = 90
+
+# THE LEDGER IS NOT DECLARED HERE: IT READS THE OPERATOR'S OWN ACCOUNTS.
+#
+# `galata-ledger <venue>` records the accounts a deployment declares, by
+# address and with no key (README, "The account ledger"): each account's
+# margin and positions per dex, its spot balances, its borrow and lend state,
+# and its history. Addresses and the fingerprint key are secrets: this file
+# names the variables that hold them, never the values. Both roots must be
+# owner-only (0700), and a root others can read is refused.
+#
+#   [ledger]
+#   # The record: every answer, verbatim.
+#   root = "var/ledger"
+#   # Its projection, typed Parquet per account and kind. Optional.
+#   tape = "var/ledger-tape"
+#   # Seconds between reads of each account's state. 1..=3600.
+#   snapshot_secs = 300
+#   # Seconds between discovery runs: sub-accounts, role, mode, and the
+#   # venue's names for the tokens balances refer to. 1..=86400.
+#   discover_secs = 600
+#   # Seconds between asks for each account's fills, funding and ledger
+#   # updates. Optional: without it no history is walked.
+#   events_secs = 300
+#   # How far the fold's book may stray from a snapshot before it says so.
+#   fold_position_tolerance = 0.0
+#   fold_relative_tolerance = 0.00002
+#   # The ledger's share of the venue's request budget; with walk_share, at
+#   # most the whole. Cadences the share cannot afford are refused at load.
+#   ledger_share = 0.25
+#   # The variable holding the key addresses are fingerprinted under. Once a
+#   # ledger has written under it, it can never be another.
+#   fingerprint_key_var = "GALATA_LEDGER_FINGERPRINT_KEY"
+#
+#   [ledger.account.main]
+#   venue = "hyperliquid"
+#   # The variable holding the account's address: never the address.
+#   address_var = "GALATA_LEDGER_HL_MAIN"
+#   # The dexes to read margin and positions on; "" is the main one.
+#   dexes = ["", "xyz"]

@@ -40,6 +40,20 @@ pub const EVENT_KINDS: [Kind; 3] = [Kind::FundingPayments, Kind::Fills, Kind::Le
 pub fn identity(envelope: &Envelope) -> String {
     match &envelope.event {
         Event::Fill(f) => format!("fill:{}:{}", f.trade_id, f.order_id),
+        // **An account's state, read**: the answers state no time of their
+        // own, so two reads that found the same balance are two statements,
+        // told apart by when each was received. A payload read twice keeps
+        // its receipt, so a replay still collapses to one.
+        Event::Balance(_)
+        | Event::BorrowLend(_)
+        | Event::LendHealth(_)
+        | Event::PortfolioMargin(_)
+        | Event::TokenMargin(_) => format!(
+            "{}:recv:{}:{}",
+            envelope.kind(),
+            envelope.recv_micros,
+            serde_json::to_string(&envelope.event).unwrap_or_default()
+        ),
         other => format!(
             "{}:{}:{}",
             envelope.kind(),

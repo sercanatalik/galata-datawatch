@@ -1,0 +1,108 @@
+{
+ "portfolioMarginEnabled": true,
+ "balances": [
+  {
+   "coin": "USDC",
+   "token": 0,
+   "total": "185390.10278742",
+   "hold": "-366701.7986019201",
+   "entryNtl": "0.0",
+   "spotHold": "44280.81087107",
+   "ltv": "0.0",
+   "supplied": "141087.89598842"
+  },
+  {
+   "coin": "WOW",
+   "token": 98,
+   "total": "179.40071",
+   "hold": "0.0",
+   "entryNtl": "3.44772284"
+  },
+  {
+   "coin": "MUNCH",
+   "token": 146,
+   "total": "5820.19715",
+   "hold": "0.0",
+   "entryNtl": "1.27281891"
+  },
+  {
+   "coin": "HYPE",
+   "token": 150,
+   "total": "10376.86515991",
+   "hold": "0.0",
+   "entryNtl": "0.0",
+   "ltv": "0.65",
+   "supplied": "10376.86515991"
+  },
+  {
+   "coin": "STAR",
+   "token": 154,
+   "total": "31.26816329",
+   "hold": "0.0",
+   "entryNtl": "4.38066967"
+  },
+  {
+   "coin": "FARM",
+   "token": 161,
+   "total": "34.0",
+   "hold": "0.0",
+   "entryNtl": "1.25426"
+  },
+  {
+   "coin": "SENT",
+   "token": 186,
+   "total": "6000.0",
+   "hold": "0.0",
+   "entryNtl": "6000.0"
+  },
+  {
+   "coin": "USDT0",
+   "token": 268,
+   "total": "31.5385544",
+   "hold": "-411422.83190312",
+   "entryNtl": "31.5385544",
+   "spotHold": "0.0",
+   "ltv": "0.0",
+   "supplied": "31.5385544"
+  }
+ ],
+ "portfolioMarginRatio": "0.0229134385",
+ "tokenToPortfolioBorrowRatio": [
+  [
+   0,
+   "0.0"
+  ],
+  [
+   268,
+   "0.0"
+  ]
+ ],
+ "tokenToPortfolioSupplyRatio": [
+  [
+   150,
+   "0.0103768652"
+  ]
+ ],
+ "tokenToAvailableAfterMaintenance": [
+  [
+   0,
+   "690202.43559317"
+  ],
+  [
+   150,
+   "10376.86515991"
+  ],
+  [
+   197,
+   "0.0"
+  ],
+  [
+   268,
+   "522222.05597002"
+  ],
+  [
+   360,
+   "0.0"
+  ]
+ ]
+}

@@ -4,6 +4,7 @@
 //!   boot        each declared master's role, once   ──▶ refuse a sub-account
 //!               discovery                            ──▶ bindings, modes
 //!   every snapshot_secs   each (account, dex)        ──▶ the one path
+//!                         each account, account-wide ──▶ balances, borrow and lend
 //!                         a failure                  ──▶ a gap, from the last answer
 //!   every discover_secs   discovery again            ──▶ a report, always
 //! ```
@@ -46,6 +47,10 @@ pub enum Ask {
     Role,
     /// How an account's collateral is held.
     Mode,
+    /// What an account holds in spot: account-wide, asked once per account.
+    Balances,
+    /// What an account has borrowed and supplied: account-wide.
+    BorrowLend,
 }
 
 /// What a venue must answer for its ledger to run. Its adapter implements it.
@@ -72,6 +77,21 @@ pub trait AccountVenue: Send + Sync {
     fn dex_known(&self, dex: &str) -> impl Future<Output = Result<bool, Refusal>> + Send;
     /// A snapshot payload from the dex, the mode last heard and the state.
     fn compose(&self, dex: &str, mode: Option<(&[u8], i64)>, state: &[u8]) -> Vec<u8>;
+    /// The account-wide reads this venue makes at each snapshot, each with the
+    /// series a miss is a gap in. Asked once per account, never per dex.
+    fn account_wide_asks(&self) -> &'static [(Ask, Series)];
+    /// One account's answer to an account-wide `ask`, raw.
+    fn account_wide(
+        &self,
+        ask: Ask,
+        address: &Secret,
+    ) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
+    /// The venue's reference data that names what account-wide answers refer
+    /// to by index, raw. Read at each discovery run.
+    fn reference(&self) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
+    /// An account-wide payload: the answer verbatim, with what the reference
+    /// last read says of it. `None` where no reference has been read.
+    fn compose_wide(&self, ask: Ask, reference: Option<&[u8]>, answer: &[u8]) -> Vec<u8>;
     /// The sub-accounts a listing names.
     fn listed(&self, answer: &[u8]) -> Result<Vec<Listed>, NormaliseError>;
     /// Whether a role answer says the address is a sub-account.
@@ -134,6 +154,9 @@ pub struct AccountStatus {
     pub polled: bool,
     /// When each dex last answered, by dex (`""` is the main one).
     pub answered_micros: BTreeMap<String, i64>,
+    /// When each account-wide read last answered, by series (`balances`,
+    /// `borrow_lend`).
+    pub account_wide_micros: BTreeMap<String, i64>,
     /// Snapshots that did not answer, since start.
     pub missed: u64,
     /// When a discovery run last did not list it, where one did not.
@@ -196,6 +219,10 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
     modes: BTreeMap<Account, (Vec<u8>, i64)>,
     /// (account, dex) → its cadence.
     polls: BTreeMap<(Account, String), Cadence>,
+    /// (account, series) → the cadence of an account-wide read.
+    wide_polls: BTreeMap<(Account, Series), Cadence>,
+    /// The venue's reference data as last read at discovery, raw.
+    reference: Option<Vec<u8>>,
     role_unverified: BTreeSet<Account>,
     backoff: Backoff,
     status: LedgerStatus,
@@ -239,7 +266,11 @@ pub struct Pass {
     pub answered: u32,
     /// Snapshots that did not.
     pub missed: u32,
-    /// Gaps recorded.
+    /// Account-wide reads that answered, all archived.
+    pub wide_answered: u32,
+    /// Account-wide reads that did not.
+    pub wide_missed: u32,
+    /// Gaps recorded, of either.
     pub gaps: u32,
     /// Whether any refusal was a throttle, which backs the loop off.
     pub throttled: bool,
@@ -277,6 +308,8 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             bindings,
             modes: BTreeMap::new(),
             polls: BTreeMap::new(),
+            wide_polls: BTreeMap::new(),
+            reference: None,
             role_unverified: BTreeSet::new(),
             backoff: Backoff::default(),
             status,
@@ -329,11 +362,13 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             // under one account used to end the whole ledger, so a report
             // about the recording stopped the recording. The account is left
             // out of this report, by name, and asked again next pass.
+            // Every kind projected: the fold's own and the account's state,
+            // which the fold passes over.
             if let Err(error) = history.extend(
                 self.archive.root(),
                 account.venue.as_str(),
                 account.alias.as_str(),
-                &crate::ledger::fold::FOLD_KINDS,
+                &crate::ledger::project::PROJECTED,
                 self.venue.normaliser(),
                 &ours,
             ) {
@@ -386,6 +421,8 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         let kind = match ask {
             Ask::Snapshot | Ask::Mode => Series::Margin.kind(),
             Ask::Listing | Ask::Role => galata_wire::Kind::Accounts,
+            Ask::Balances => Series::Balances.kind(),
+            Ask::BorrowLend => Series::BorrowLend.kind(),
         };
         let payload = Payload {
             seq: 0,
@@ -546,6 +583,14 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                     .map_err(record_error)?;
             }
         }
+        // What names the account-wide answers' tokens, once per run. A failed
+        // read keeps the last one: names change rarely, and an absent name is
+        // only absent.
+        if !self.venue.account_wide_asks().is_empty()
+            && let Ok(reference) = self.venue.reference().await
+        {
+            self.reference = Some(reference);
+        }
         self.write_status();
         Ok(runs)
     }
@@ -644,6 +689,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                     }
                 }
             }
+            self.account_wide(&account, &mut pass).await?;
         }
         // A throttle backs the loop off (`run`); anything else resets it.
         if !pass.throttled {
@@ -651,6 +697,61 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         }
         self.write_status();
         Ok(pass)
+    }
+
+    /// One account's account-wide reads, each on its own cadence: an answer is
+    /// archived with what the reference names in it, and a miss is a gap in
+    /// that read's own series — so a failed borrow and lend read costs its
+    /// rows and keeps the spot rows of the same pass. Nothing earlier is
+    /// recorded again in a miss's place.
+    async fn account_wide(
+        &mut self,
+        account: &ResolvedAccount,
+        pass: &mut Pass,
+    ) -> Result<(), LedgerError> {
+        for &(ask, series) in self.venue.account_wide_asks() {
+            let asked = self.clock.now_micros();
+            let key = (account.alias.clone(), series);
+            let interval = self.cadences.snapshot_micros;
+            match self.venue.account_wide(ask, account.address()).await {
+                Ok(answer) => {
+                    let bytes = self
+                        .venue
+                        .compose_wide(ask, self.reference.as_deref(), &answer);
+                    self.record(account, ask, bytes).map_err(record_error)?;
+                    self.wide_polls
+                        .entry(key)
+                        .or_insert_with(|| Cadence::new(interval))
+                        .answered(asked);
+                    self.status
+                        .accounts
+                        .entry(account.alias.to_string())
+                        .or_default()
+                        .account_wide_micros
+                        .insert(series.to_string(), asked);
+                    pass.wide_answered += 1;
+                }
+                Err(refusal) => {
+                    pass.wide_missed += 1;
+                    pass.throttled |= refusal == Refusal::Throttled;
+                    let missed = self
+                        .wide_polls
+                        .entry(key)
+                        .or_insert_with(|| Cadence::new(interval))
+                        .missed(asked, refusal.cause());
+                    if let Polled::Missed {
+                        from_micros,
+                        to_micros,
+                        cause,
+                    } = missed
+                    {
+                        self.record_gap_for(account, series, None, from_micros, to_micros, cause)?;
+                        pass.gaps += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn record_gap(
@@ -1059,7 +1160,17 @@ mod tests {
         events: Mutex<Scripts>,
         /// Every events ask: (address, kind, start).
         asked: Mutex<Vec<(String, Kind, i64)>>,
+        balances: Mutex<Result<Vec<u8>, Refusal>>,
+        borrow_lend: Mutex<Result<Vec<u8>, Refusal>>,
+        /// Every account-wide ask: (address, ask).
+        wide_asked: Mutex<Vec<(String, Ask)>>,
     }
+
+    /// The public portfolio-margin account's answers of 2026-11-26.
+    const SPOT: &[u8] =
+        include_bytes!("../../tests/fixtures/hyperliquid/ledger-spot-portfolio-margin.json");
+    const LEND: &[u8] = include_bytes!("../../tests/fixtures/hyperliquid/ledger-borrow-lend.json");
+    const META: &[u8] = include_bytes!("../../tests/fixtures/hyperliquid/ledger-spot-meta.json");
 
     impl Scripted {
         fn new() -> Scripted {
@@ -1073,6 +1184,9 @@ mod tests {
                 role: Mutex::new(Ok(br#"{"role":"user"}"#.to_vec())),
                 events: Mutex::new(BTreeMap::new()),
                 asked: Mutex::new(Vec::new()),
+                balances: Mutex::new(Ok(SPOT.to_vec())),
+                borrow_lend: Mutex::new(Ok(LEND.to_vec())),
+                wide_asked: Mutex::new(Vec::new()),
             }
         }
         fn pages(&self, address: &str, kind: Kind, pages: &[&str]) {
@@ -1116,7 +1230,35 @@ mod tests {
                 Ask::Listing => hl::LISTING_CHANNEL,
                 Ask::Role => hl::ROLE_CHANNEL,
                 Ask::Mode => hl::MODE_CHANNEL,
+                Ask::Balances => hl::BALANCES_CHANNEL,
+                Ask::BorrowLend => hl::BORROW_LEND_CHANNEL,
             }
+        }
+        fn account_wide_asks(&self) -> &'static [(Ask, Series)] {
+            &[
+                (Ask::Balances, Series::Balances),
+                (Ask::BorrowLend, Series::BorrowLend),
+            ]
+        }
+        async fn account_wide(&self, ask: Ask, address: &Secret) -> Result<Vec<u8>, Refusal> {
+            self.wide_asked
+                .lock()
+                .unwrap()
+                .push((address.expose().to_string(), ask));
+            match ask {
+                Ask::Balances => self.balances.lock().unwrap().clone(),
+                _ => self.borrow_lend.lock().unwrap().clone(),
+            }
+        }
+        async fn reference(&self) -> Result<Vec<u8>, Refusal> {
+            Ok(META.to_vec())
+        }
+        fn compose_wide(&self, ask: Ask, reference: Option<&[u8]>, answer: &[u8]) -> Vec<u8> {
+            hl::wide_bytes(
+                self.channel(ask),
+                hl::names_for(reference, answer).as_ref(),
+                answer,
+            )
         }
         async fn snapshot(&self, _: &Secret, _: &str) -> Result<Vec<u8>, Refusal> {
             self.snapshot.lock().unwrap().clone()
@@ -1845,6 +1987,199 @@ mod tests {
         assert!(
             main.iter().all(|g| g.from_micros == T0),
             "every one from the last answer"
+        );
+    }
+
+    /// The rows a recorded account-wide payload normalises to.
+    fn wide_rows(run: &LedgerRun<Scripted, TestClock>, payload: &Payload) -> Vec<Envelope> {
+        run.venue.normaliser().normalise(payload).unwrap()
+    }
+
+    #[tokio::test]
+    async fn two_accounts_give_two_balance_and_two_borrow_lend_answers_per_cadence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        *run.venue.listing.lock().unwrap() = Ok(Scripted::listing_of(&[(SUB_A, "a")]));
+        run.boot().await.unwrap();
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(pass.answered, 4, "two accounts on two dexes");
+        assert_eq!(pass.wide_answered, 4, "two reads for each of two accounts");
+
+        // Account-wide: each account asked once per read, never per dex.
+        let asked = run.venue.wide_asked.lock().unwrap().clone();
+        for address in [MAIN, SUB_A] {
+            for ask in [Ask::Balances, Ask::BorrowLend] {
+                let n = asked
+                    .iter()
+                    .filter(|(a, k)| a == address && *k == ask)
+                    .count();
+                assert_eq!(n, 1, "{ask:?} once for one account");
+            }
+        }
+        let balances = payloads(&root, "balances");
+        let lends = payloads(&root, "borrow_lend");
+        assert_eq!(balances.len(), 2);
+        assert_eq!(lends.len(), 2);
+        let accounts: BTreeSet<String> = balances
+            .iter()
+            .map(|p| match &p.address {
+                PayloadAddress::Account(a) => a.account.clone(),
+                _ => panic!("not addressed to an account"),
+            })
+            .collect();
+        assert_eq!(accounts.len(), 2, "one each, under each account's alias");
+
+        // Archived with the names the reference gave, and read back into rows.
+        let rows = wide_rows(&run, &balances[0]);
+        let coins = rows
+            .iter()
+            .filter(|e| matches!(e.event, Event::Balance(_)))
+            .count();
+        assert_eq!(coins, 8, "a row per coin held");
+        assert!(rows.iter().any(|e| matches!(
+            &e.event,
+            Event::TokenMargin(t) if t.token_index == 150 && t.token.as_deref() == Some("HYPE")
+        )));
+        let rows = wide_rows(&run, &lends[0]);
+        assert!(rows.iter().any(|e| matches!(
+            &e.event,
+            Event::BorrowLend(b) if b.token.as_deref() == Some("USDT0")
+        )));
+
+        // Ten seconds on, a second pass: the same again.
+        run.clock.advance_secs(10);
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(pass.wide_answered, 4);
+        assert_eq!(payloads(&root, "balances").len(), 4);
+        assert_eq!(payloads(&root, "borrow_lend").len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_failed_borrow_lend_read_is_its_own_gap_and_keeps_the_spot_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.clock.advance_secs(10);
+        *run.venue.borrow_lend.lock().unwrap() = Err(Refusal::Unreachable);
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(pass.wide_answered, 1, "the spot read");
+        assert_eq!(pass.wide_missed, 1, "the borrow and lend read");
+        assert_eq!(pass.gaps, 1);
+
+        let gaps = gaps(&root);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(
+            gaps[0].series,
+            Series::BorrowLend,
+            "named for what was not read"
+        );
+        assert_eq!(gaps[0].dex, None, "account-wide: no dex");
+        assert_eq!(gaps[0].cause, GapCause::PollFailed);
+        assert_eq!(gaps[0].to_micros - gaps[0].from_micros, 10 * SECOND);
+
+        // The spot rows of the failed pass are recorded; no borrow and lend
+        // answer stands in for the missed one.
+        assert_eq!(payloads(&root, "balances").len(), 2);
+        assert_eq!(payloads(&root, "borrow_lend").len(), 1);
+        // And the snapshots of the pass are untouched by it.
+        let snapshots = payloads(&root, "margin")
+            .into_iter()
+            .filter(|p| p.channel == hl::SNAPSHOT_CHANNEL)
+            .count();
+        assert_eq!(snapshots, 4);
+    }
+
+    #[tokio::test]
+    async fn a_reader_takes_an_accounts_newest_balances_and_their_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, _root) = ledger(dir.path());
+        let tape = dir.path().join("ledger-tape");
+        std::fs::create_dir(&tape).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tape, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let file = StatusFile::named(&dir.path().join("status"), "ledger-fold-hyperliquid");
+        let mut run = run
+            .with_fold(
+                file,
+                crate::ledger::fold::Tolerances {
+                    position: "0".parse().unwrap(),
+                    relative: "0.00002".parse().unwrap(),
+                },
+            )
+            .with_projection(Some(tape.clone()));
+        run.boot().await.unwrap();
+        // Two reads, ten seconds apart, the venue saying the same both times:
+        // two statements, not one.
+        run.snapshot_all().await.unwrap();
+        let first = run.clock.now_micros();
+        run.clock.advance_secs(10);
+        run.snapshot_all().await.unwrap();
+        let second = run.clock.now_micros();
+        run.fold_all().unwrap();
+
+        let all = galata_segments::read_segment(&crate::ledger::project::path_of(
+            &tape,
+            "hyperliquid",
+            "main",
+            Kind::Balances,
+        ))
+        .unwrap()
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>();
+        assert_eq!(all, 16, "eight coins, read twice, both kept");
+
+        let newest = |kind| {
+            crate::ledger::project::newest(&tape, "hyperliquid", "main", kind)
+                .unwrap()
+                .unwrap()
+        };
+        let (at, rows) = newest(Kind::Balances);
+        assert_eq!(at, second, "the second read's time");
+        assert_ne!(at, first);
+        assert_eq!(
+            rows.num_rows(),
+            8,
+            "the second read's coins, none of the first's"
+        );
+        let (at, rows) = newest(Kind::PortfolioMargin);
+        assert_eq!((at, rows.num_rows()), (second, 1));
+        let (at, rows) = newest(Kind::LendHealth);
+        assert_eq!((at, rows.num_rows()), (second, 1));
+        let (_, rows) = newest(Kind::TokenMargin);
+        assert_eq!(rows.num_rows(), 5);
+        // A kind with no rows has no newest.
+        assert!(
+            crate::ledger::project::newest(&tape, "hyperliquid", "main", Kind::Fills)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missed_spot_read_records_no_earlier_balance_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        *run.venue.balances.lock().unwrap() = Err(Refusal::Unreachable);
+        for _ in 0..2 {
+            run.clock.advance_secs(10);
+            run.snapshot_all().await.unwrap();
+        }
+        assert_eq!(payloads(&root, "balances").len(), 1, "only the one answer");
+        let widths: Vec<i64> = gaps(&root)
+            .into_iter()
+            .filter(|g| g.series == Series::Balances)
+            .map(|g| (g.to_micros - g.from_micros) / SECOND)
+            .collect();
+        assert_eq!(
+            widths,
+            vec![10, 20],
+            "nested from the last answer, as snapshots are"
         );
     }
 

@@ -57,6 +57,14 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 **`galata-wire`**
 
+- **An account's spot and borrowing, as stated**
+  (`add-hyperliquid-portfolio-margin-state`), additive: `Event::Balance`,
+  `BorrowLend`, `LendHealth`, `PortfolioMargin` and `TokenMargin`, with
+  `Kind::Balances`, `BorrowLend`, `LendHealth`, `PortfolioMargin` and
+  `TokenMargin` addressed by account, and `Series::Balances` and `BorrowLend`
+  for the reads a gap can be about. Every figure a `Num` as the venue printed
+  it, absent where it stated none; the portfolio-margin ratio is the venue's,
+  never computed.
 - `GapCause::Unpublished` (`unpublished`), additive (`add-bus-replay-window`):
   the bus did not carry a span the record holds, so a consumer fetches it from
   history. Sent on the bus only and never archived, so the tape never holds
@@ -79,6 +87,16 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 **`galata-datawatch`**
 
+- **The ledger reads an account's spot and borrowing**
+  (`add-hyperliquid-portfolio-margin-state`): each snapshot asks every polled
+  Hyperliquid account's `spotClearinghouseState` and `borrowLendUserState`
+  once, whatever its mode, each archived with the token names `spotMeta` gave
+  at discovery, each on its own cadence and a miss a gap in its own series.
+  Under portfolio margin the venue's own ratio and per-token figures are
+  recorded as stated. Their weight is declared and checked against
+  `ledger_share` at load. `ledger::project` projects the five new kinds, and
+  `ledger::project::newest` returns an account's latest rows of a kind with
+  the time they were read.
 - **Candles at a period** (`add-galata-markets`): `tape::bars` builds bars at
   1m to 1d from the `candles` dataset exactly, from the finest held interval
   that divides the period and covers the bar with final bars, never mixing
@@ -161,6 +179,14 @@ both `ConnectionPolicy` variants gain `reply_secs`.
   `reply_secs: Option<u64>`, read through `ConnectionPolicy::reply_secs`. An
   out-of-tree venue adds `reply_secs: None` to keep today's behaviour, in which
   nothing is inferred from a connection's silence. Hyperliquid declares 10 s.
+- **BREAKING: a ledger venue answers account-wide reads**
+  (`add-hyperliquid-portfolio-margin-state`). `ledger::run::AccountVenue`
+  gains `account_wide_asks`, `account_wide`, `reference` and `compose_wide`;
+  an out-of-tree venue with none returns `&[]` from the first and is never
+  asked the others. `config::LedgerCost` gains `balances`, `borrow_lend` and
+  `reference`, which a struct literal must name.
+- `AccountMode::equity_not_held` says a unified or portfolio-margin account's
+  collateral is "recorded as balances", where it said "out of scope".
 
 ### Fixed
 

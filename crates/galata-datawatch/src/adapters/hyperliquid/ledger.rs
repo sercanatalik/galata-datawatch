@@ -6,6 +6,11 @@
 //!   listing    subAccounts   ──▶ the sub-accounts, addresses held as secrets
 //!   role       userRole      ──▶ user | subAccount | …
 //!   mode       userAbstraction ──▶ AccountMode
+//!   balances   { names, spotClearinghouseState }
+//!                 ──▶ a `balances` row per coin, and where stated the
+//!                     `portfolio_margin` row and a `token_margin` row per token
+//!   borrow     { names, borrowLendUserState }
+//!                 ──▶ a `borrow_lend` row per token + one `lend_health` row
 //! ```
 //!
 //! **A snapshot is recorded as one payload holding two answers**, each byte for
@@ -40,6 +45,276 @@ pub const LISTING_CHANNEL: &str = "subAccounts";
 pub const ROLE_CHANNEL: &str = "userRole";
 /// The channel a mode answer is recorded under.
 pub const MODE_CHANNEL: &str = "userAbstraction";
+/// The channel a composed spot-state answer is recorded under.
+pub const BALANCES_CHANNEL: &str = "spotClearinghouseState";
+/// The channel a composed borrow and lend answer is recorded under.
+pub const BORROW_LEND_CHANNEL: &str = "borrowLendUserState";
+
+/// The token indices an account-wide answer refers to: a spot answer's
+/// balances and its three per-token lists, a borrow and lend answer's
+/// `tokenToState`. Read from the answer as JSON, so a field the venue adds or
+/// drops costs a name, never the answer.
+fn referenced_indices(answer: &[u8]) -> std::collections::BTreeSet<u32> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(answer) else {
+        return out;
+    };
+    let index = |v: &serde_json::Value| v.as_u64().and_then(|i| u32::try_from(i).ok());
+    if let Some(balances) = value.get("balances").and_then(|b| b.as_array()) {
+        out.extend(
+            balances
+                .iter()
+                .filter_map(|b| b.get("token").and_then(index)),
+        );
+    }
+    for list in [
+        "tokenToState",
+        "tokenToPortfolioBorrowRatio",
+        "tokenToPortfolioSupplyRatio",
+        "tokenToAvailableAfterMaintenance",
+    ] {
+        if let Some(pairs) = value.get(list).and_then(|l| l.as_array()) {
+            out.extend(pairs.iter().filter_map(|p| p.get(0).and_then(index)));
+        }
+    }
+    out
+}
+
+/// The names `spotMeta` gives the token indices an answer refers to. `None`
+/// where no `spotMeta` has been read, or it would not parse; an index it does
+/// not name is simply missing from the map.
+pub fn names_for(
+    reference: Option<&[u8]>,
+    answer: &[u8],
+) -> Option<std::collections::BTreeMap<u32, String>> {
+    #[derive(Deserialize)]
+    struct Meta {
+        tokens: Vec<MetaToken>,
+    }
+    #[derive(Deserialize)]
+    struct MetaToken {
+        index: u32,
+        name: String,
+    }
+    let meta: Meta = serde_json::from_slice(reference?).ok()?;
+    let wanted = referenced_indices(answer);
+    Some(
+        meta.tokens
+            .into_iter()
+            .filter(|t| wanted.contains(&t.index))
+            .map(|t| (t.index, t.name))
+            .collect(),
+    )
+}
+
+/// Compose an account-wide payload: the names its token indices had in the
+/// `spotMeta` last read, and the answer **verbatim** under `key`.
+///
+/// The names travel with the answer for the reason the mode travels with a
+/// snapshot: a normaliser is a function of the bytes, so what named a token
+/// when the row was written must be in the record, or a rebuild could not name
+/// it again.
+pub fn wide_bytes(
+    key: &str,
+    names: Option<&std::collections::BTreeMap<u32, String>>,
+    answer: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(answer.len() + 64);
+    out.extend_from_slice(b"{\"names\":");
+    match names {
+        Some(names) => {
+            out.extend_from_slice(serde_json::to_string(names).unwrap_or_default().as_bytes())
+        }
+        None => out.extend_from_slice(b"null"),
+    }
+    out.extend_from_slice(b",");
+    out.extend_from_slice(serde_json::to_string(key).unwrap_or_default().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(answer);
+    out.push(b'}');
+    out
+}
+
+#[derive(Deserialize)]
+struct WideComposed<'a> {
+    names: Option<std::collections::BTreeMap<u32, String>>,
+    #[serde(borrow, rename = "spotClearinghouseState")]
+    spot: Option<&'a RawValue>,
+    #[serde(borrow, rename = "borrowLendUserState")]
+    borrow_lend: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Spot {
+    #[serde(default)]
+    balances: Vec<SpotBalance>,
+    portfolio_margin_enabled: Option<bool>,
+    portfolio_margin_ratio: Option<Num>,
+    token_to_portfolio_borrow_ratio: Option<Vec<(u32, Num)>>,
+    token_to_portfolio_supply_ratio: Option<Vec<(u32, Num)>>,
+    token_to_available_after_maintenance: Option<Vec<(u32, Num)>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpotBalance {
+    coin: String,
+    token: Option<u32>,
+    total: Num,
+    hold: Option<Num>,
+    entry_ntl: Option<Num>,
+    spot_hold: Option<Num>,
+    ltv: Option<Num>,
+    supplied: Option<Num>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BorrowLendState {
+    #[serde(default)]
+    token_to_state: Vec<(u32, TokenState)>,
+    health: Option<String>,
+    health_factor: Option<Num>,
+}
+
+#[derive(Deserialize)]
+struct TokenState {
+    borrow: Option<BasisValue>,
+    supply: Option<BasisValue>,
+}
+
+#[derive(Deserialize)]
+struct BasisValue {
+    basis: Option<Num>,
+    value: Option<Num>,
+}
+
+/// A composed spot-state payload to its rows: a `balances` row per coin; where
+/// the venue states them, the account's portfolio-margin row and a
+/// `token_margin` row per token named in any of the three lists. **Every
+/// figure as stated**, a negative hold included; nothing is computed.
+pub fn balance_rows(
+    venue: &Venue,
+    account: &Account,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let composed: WideComposed<'_> =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let raw = composed.spot.ok_or_else(|| NormaliseError::Shape {
+        kind: BALANCES_CHANNEL,
+        detail: "no spot state in the payload".into(),
+    })?;
+    let spot: Spot = serde_json::from_str(raw.get()).map_err(|e| NormaliseError::Shape {
+        kind: BALANCES_CHANNEL,
+        detail: e.to_string(),
+    })?;
+    let names = composed.names.unwrap_or_default();
+    // The answer states no time of its own: the row's time is its receipt.
+    let envelope =
+        |event| Envelope::for_account(venue.clone(), account.clone(), None, recv_micros, event);
+    let mut out = Vec::with_capacity(spot.balances.len() + 2);
+    for b in spot.balances {
+        out.push(envelope(Event::Balance(galata_wire::Balance {
+            asset: b.coin,
+            token_index: b.token,
+            total: b.total,
+            hold: b.hold,
+            entry_notional: b.entry_ntl,
+            spot_hold: b.spot_hold,
+            ltv: b.ltv,
+            supplied: b.supplied,
+        })));
+    }
+    if spot.portfolio_margin_enabled.is_some() || spot.portfolio_margin_ratio.is_some() {
+        out.push(envelope(Event::PortfolioMargin(
+            galata_wire::PortfolioMargin {
+                enabled: spot.portfolio_margin_enabled,
+                ratio: spot.portfolio_margin_ratio,
+            },
+        )));
+    }
+    // One row per token named in any of the three lists, each figure from its
+    // own list and absent where that list does not name the token.
+    fn token<'m>(
+        tokens: &'m mut std::collections::BTreeMap<u32, galata_wire::TokenMargin>,
+        names: &std::collections::BTreeMap<u32, String>,
+        index: u32,
+    ) -> &'m mut galata_wire::TokenMargin {
+        tokens
+            .entry(index)
+            .or_insert_with(|| galata_wire::TokenMargin {
+                token_index: index,
+                token: names.get(&index).cloned(),
+                borrow_ratio: None,
+                supply_ratio: None,
+                available_after_maintenance: None,
+            })
+    }
+    let mut tokens = std::collections::BTreeMap::new();
+    for (index, ratio) in spot.token_to_portfolio_borrow_ratio.unwrap_or_default() {
+        token(&mut tokens, &names, index).borrow_ratio = Some(ratio);
+    }
+    for (index, ratio) in spot.token_to_portfolio_supply_ratio.unwrap_or_default() {
+        token(&mut tokens, &names, index).supply_ratio = Some(ratio);
+    }
+    for (index, amount) in spot
+        .token_to_available_after_maintenance
+        .unwrap_or_default()
+    {
+        token(&mut tokens, &names, index).available_after_maintenance = Some(amount);
+    }
+    out.extend(
+        tokens
+            .into_values()
+            .map(|t| envelope(Event::TokenMargin(t))),
+    );
+    Ok(out)
+}
+
+/// A composed borrow and lend payload to its rows: a `borrow_lend` row per
+/// token, and **always** the account's `lend_health` row, since an account
+/// that borrows and supplies nothing still has a health.
+pub fn borrow_lend_rows(
+    venue: &Venue,
+    account: &Account,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let composed: WideComposed<'_> =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let raw = composed.borrow_lend.ok_or_else(|| NormaliseError::Shape {
+        kind: BORROW_LEND_CHANNEL,
+        detail: "no borrow and lend state in the payload".into(),
+    })?;
+    let state: BorrowLendState =
+        serde_json::from_str(raw.get()).map_err(|e| NormaliseError::Shape {
+            kind: BORROW_LEND_CHANNEL,
+            detail: e.to_string(),
+        })?;
+    let names = composed.names.unwrap_or_default();
+    let envelope =
+        |event| Envelope::for_account(venue.clone(), account.clone(), None, recv_micros, event);
+    let mut out = Vec::with_capacity(state.token_to_state.len() + 1);
+    for (index, s) in state.token_to_state {
+        let (borrow_basis, borrow_value) = s.borrow.map_or((None, None), |b| (b.basis, b.value));
+        let (supply_basis, supply_value) = s.supply.map_or((None, None), |b| (b.basis, b.value));
+        out.push(envelope(Event::BorrowLend(galata_wire::BorrowLend {
+            token_index: index,
+            token: names.get(&index).cloned(),
+            borrow_basis,
+            borrow_value,
+            supply_basis,
+            supply_value,
+        })));
+    }
+    out.push(envelope(Event::LendHealth(galata_wire::LendHealth {
+        health: state.health,
+        health_factor: state.health_factor,
+    })));
+    Ok(out)
+}
 
 /// Compose a snapshot payload: the dex asked about, the most recent mode
 /// answer and when it arrived, and the state answer — **both answers
@@ -325,6 +600,21 @@ impl Normalise for LedgerNormaliser {
                 snapshot_rows(&self.venue, &account, payload.recv_micros, &payload.payload)
             }
             LISTING_CHANNEL | ROLE_CHANNEL | MODE_CHANNEL => Ok(Vec::new()),
+            BALANCES_CHANNEL | BORROW_LEND_CHANNEL => {
+                let PayloadAddress::Account(address) = &payload.address else {
+                    return Err(NormaliseError::Shape {
+                        kind: "account-wide state",
+                        detail: "an answer not addressed to an account".into(),
+                    });
+                };
+                let account = Account::new(address.account.as_str())?;
+                let (venue, recv, bytes) = (&self.venue, payload.recv_micros, &payload.payload);
+                if payload.channel == BALANCES_CHANNEL {
+                    balance_rows(venue, &account, recv, bytes)
+                } else {
+                    borrow_lend_rows(venue, &account, recv, bytes)
+                }
+            }
             super::events::FILLS_CHANNEL
             | super::events::FUNDING_CHANNEL
             | super::events::UPDATES_CHANNEL => {
@@ -473,14 +763,16 @@ mod tests {
 
     #[test]
     fn portfolio_margin_is_not_reported_as_equity_either() {
+        // The account value is still not the equity, and the row says where
+        // the collateral is: the balances recorded beside it.
         let m = rows("", Some(br#""portfolioMargin""#), STATE);
-        assert!(
-            margin(&m)
-                .equity_not_held
-                .as_deref()
-                .unwrap()
-                .contains("portfolioMargin")
-        );
+        let said = margin(&m).equity_not_held.clone().unwrap();
+        assert!(said.contains("portfolioMargin"), "{said}");
+        assert!(said.contains("recorded as balances"), "{said}");
+        assert!(!said.contains("out of scope"), "{said}");
+        // A standard account's margin is its own, and says nothing.
+        let d = rows("", Some(br#""default""#), STATE);
+        assert_eq!(margin(&d).equity_not_held, None);
     }
 
     #[test]
@@ -491,6 +783,212 @@ mod tests {
             assert_eq!(m.mode, AccountMode::Unknown, "{mode:?}");
             assert!(m.equity_not_held.is_some(), "{mode:?}");
         }
+    }
+
+    use std::collections::BTreeMap;
+
+    // The answers read on 2026-11-26 from two public accounts
+    // (`design/measured.md`), saved by add-hyperliquid-portfolio-margin-state.
+    const PM_SPOT: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-spot-portfolio-margin.json");
+    const UNIFIED_SPOT: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-spot-unified.json");
+    const PM_LEND: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-borrow-lend.json");
+    const EMPTY_LEND: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-borrow-lend-empty.json");
+    const META: &[u8] = include_bytes!("../../../tests/fixtures/hyperliquid/ledger-spot-meta.json");
+
+    fn wide(channel: &str, reference: Option<&[u8]>, answer: &[u8]) -> Vec<Envelope> {
+        let bytes = wide_bytes(channel, names_for(reference, answer).as_ref(), answer);
+        let venue = Venue::new("hyperliquid").unwrap();
+        let account = Account::new("main").unwrap();
+        if channel == BALANCES_CHANNEL {
+            balance_rows(&venue, &account, 7, &bytes).unwrap()
+        } else {
+            borrow_lend_rows(&venue, &account, 7, &bytes).unwrap()
+        }
+    }
+
+    fn d(s: &str) -> Option<Num> {
+        Some(Num::from_str(s).unwrap())
+    }
+
+    #[test]
+    fn a_portfolio_margin_spot_answer_is_carried_digit_for_digit() {
+        let rows = wide(BALANCES_CHANNEL, Some(META), PM_SPOT);
+        let balances: Vec<&galata_wire::Balance> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::Balance(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(balances.len(), 8);
+        let usdc = balances.iter().find(|b| b.asset == "USDC").unwrap();
+        assert_eq!(usdc.token_index, Some(0));
+        assert_eq!(Some(usdc.total), d("185390.10278742"));
+        assert_eq!(
+            usdc.hold,
+            d("-366701.7986019201"),
+            "a negative hold, as stated"
+        );
+        assert_eq!(usdc.entry_notional, d("0.0"));
+        assert_eq!(usdc.spot_hold, d("44280.81087107"));
+        assert_eq!(usdc.ltv, d("0.0"));
+        assert_eq!(usdc.supplied, d("141087.89598842"));
+        // A coin that is not collateral carries none of the three.
+        let wow = balances.iter().find(|b| b.asset == "WOW").unwrap();
+        assert_eq!((wow.spot_hold, wow.ltv, wow.supplied), (None, None, None));
+        assert_eq!(wow.entry_notional, d("3.44772284"));
+
+        let pm: Vec<&galata_wire::PortfolioMargin> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::PortfolioMargin(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pm.len(), 1);
+        assert_eq!(pm[0].enabled, Some(true));
+        assert_eq!(pm[0].ratio, d("0.0229134385"), "the venue's own ratio");
+
+        let tokens: BTreeMap<u32, &galata_wire::TokenMargin> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::TokenMargin(t) => Some((t.token_index, t)),
+                _ => None,
+            })
+            .collect();
+        // Every index any of the three lists names: 0, 150, 197, 268, 360.
+        assert_eq!(
+            tokens.keys().copied().collect::<Vec<_>>(),
+            vec![0, 150, 197, 268, 360]
+        );
+        let hype = tokens[&150];
+        assert_eq!(hype.token.as_deref(), Some("HYPE"));
+        assert_eq!(hype.supply_ratio, d("0.0103768652"));
+        assert_eq!(hype.borrow_ratio, None, "its borrow list does not name it");
+        assert_eq!(hype.available_after_maintenance, d("10376.86515991"));
+        assert_eq!(tokens[&0].borrow_ratio, d("0.0"));
+        assert_eq!(tokens[&0].available_after_maintenance, d("690202.43559317"));
+        // The answer states no time: every row's is its receipt.
+        assert!(
+            rows.iter()
+                .all(|e| e.at_micros.is_none() && e.recv_micros == 7)
+        );
+    }
+
+    #[test]
+    fn a_unified_answer_gives_token_rows_and_no_portfolio_margin_row() {
+        let rows = wide(BALANCES_CHANNEL, Some(META), UNIFIED_SPOT);
+        assert!(
+            !rows
+                .iter()
+                .any(|e| matches!(e.event, Event::PortfolioMargin(_)))
+        );
+        let tokens: Vec<&galata_wire::TokenMargin> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::TokenMargin(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(!tokens.is_empty());
+        for t in tokens {
+            assert!(t.available_after_maintenance.is_some());
+            assert_eq!((t.borrow_ratio, t.supply_ratio), (None, None));
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(|e| matches!(e.event, Event::Balance(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn an_empty_balance_list_is_no_row() {
+        let rows = wide(BALANCES_CHANNEL, Some(META), br#"{"balances":[]}"#);
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn a_borrow_lend_answer_is_carried_as_stated() {
+        let rows = wide(BORROW_LEND_CHANNEL, Some(META), PM_LEND);
+        let lends: Vec<&galata_wire::BorrowLend> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::BorrowLend(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lends.len(), 3);
+        let usdc = lends.iter().find(|b| b.token_index == 0).unwrap();
+        assert_eq!(usdc.token.as_deref(), Some("USDC"));
+        assert_eq!(usdc.borrow_basis, d("0.0"));
+        assert_eq!(usdc.supply_basis, d("141087.89571312"));
+        assert_eq!(usdc.supply_value, d("141087.89608165"));
+        let health: Vec<&galata_wire::LendHealth> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::LendHealth(h) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(health.len(), 1);
+        assert_eq!(health[0].health.as_deref(), Some("healthy"));
+        assert_eq!(health[0].health_factor, None, "null is absent, not zero");
+    }
+
+    #[test]
+    fn an_account_that_lends_nothing_still_has_a_health() {
+        let rows = wide(BORROW_LEND_CHANNEL, Some(META), EMPTY_LEND);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0].event, Event::LendHealth(_)));
+    }
+
+    #[test]
+    fn a_name_is_absent_where_no_reference_names_it() {
+        // No reference read yet: every name absent, every figure kept.
+        let rows = wide(BORROW_LEND_CHANNEL, None, PM_LEND);
+        for e in &rows {
+            if let Event::BorrowLend(b) = &e.event {
+                assert_eq!(b.token, None);
+                assert!(b.supply_value.is_some());
+            }
+        }
+        // A reference that does not name an index leaves that one nameless.
+        let partial = br#"{"tokens":[{"index":0,"name":"USDC"}],"universe":[]}"#;
+        let rows = wide(BORROW_LEND_CHANNEL, Some(partial), PM_LEND);
+        let named: BTreeMap<u32, Option<String>> = rows
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::BorrowLend(b) => Some((b.token_index, b.token.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named[&0].as_deref(), Some("USDC"));
+        assert_eq!(named[&150], None);
+    }
+
+    #[test]
+    fn the_names_travel_in_the_record_with_only_the_indices_used() {
+        let bytes = wide_bytes(
+            BORROW_LEND_CHANNEL,
+            names_for(Some(META), PM_LEND).as_ref(),
+            PM_LEND,
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let names = value["names"].as_object().unwrap();
+        let mut keys: Vec<&str> = names.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["0", "150", "268"], "the three tokens it lends");
+        // The answer itself is carried verbatim.
+        assert_eq!(
+            value["borrowLendUserState"],
+            serde_json::from_slice::<serde_json::Value>(PM_LEND).unwrap()
+        );
     }
 
     #[test]
