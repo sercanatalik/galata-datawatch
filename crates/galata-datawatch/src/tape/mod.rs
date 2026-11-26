@@ -35,6 +35,7 @@
 //! argument that removes ticker removes venue for the same reason, one level
 //! up.
 
+pub mod bars;
 pub mod layout;
 pub mod reader;
 pub mod rebuild;

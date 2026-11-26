@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_nats::jetstream::{self, consumer::DeliverPolicy, consumer::pull::OrderedConfig};
 use futures_util::StreamExt;
 use galata_broker::streams::{self, Applied};
-use galata_broker::{BUS_ADMIN, BUS_ADMIN_INBOX};
+use galata_broker::{BUS_ADMIN, BUS_ADMIN_INBOX, GALATA_MARKETS, GALATA_MARKETS_INBOX};
 use galata_wire::{Envelope, Event, Kind, Quote, Ticker, Venue};
 use support::{Broker, TEST_CONSUMER, TEST_LEDGER, connect, connect_with};
 
@@ -352,4 +352,85 @@ async fn joining_the_tape_to_the_window_counts_nothing_twice() {
     let seqs: Vec<u64> = have.iter().map(|e| e.seq).collect();
     assert_eq!(seqs, [1, 2, 3, 4, 5, 6], "every envelope once, in order");
     assert!(have.iter().all(|e| e.kind() == Kind::Quotes));
+}
+
+// ---- galata-markets' identity (`add-galata-markets`) -----------------------
+
+/// Connected as galata-markets, on the one inbox prefix it may hear on, with
+/// requests that fail in a second.
+async fn galata_markets(broker: &Broker) -> async_nats::Client {
+    connect_with(
+        broker,
+        GALATA_MARKETS,
+        async_nats::ConnectOptions::new()
+            .custom_inbox_prefix(GALATA_MARKETS_INBOX)
+            .request_timeout(Some(Duration::from_secs(1))),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn galata_markets_replays_the_window_and_reads_each_venues_latest_status() {
+    let (broker, admin) = applied().await;
+    let capture = connect(&broker, "datawatch-hyperliquid").await;
+    publish_all(&capture, BTC_QUOTES, (0..3).map(|n| n.to_string())).await;
+    publish_all(&capture, "status.hyperliquid", ["up".to_string()]).await;
+    assert_eq!(settled(&admin, "MARKETS", 3).await, 3);
+    assert_eq!(settled(&admin, "STATUS", 1).await, 1);
+
+    let markets = jetstream::new(galata_markets(&broker).await);
+    let mut window = markets.get_stream("MARKETS").await.unwrap();
+    assert_eq!(window.info().await.unwrap().state.messages, 3);
+    let mut replay = window
+        .create_consumer(OrderedConfig {
+            filter_subject: "markets.hyperliquid.BTC.>".into(),
+            deliver_policy: DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .messages()
+        .await
+        .unwrap();
+    assert_eq!(next_payloads(&mut replay, 3).await, ["0", "1", "2"]);
+
+    let mut latest = markets
+        .get_stream("STATUS")
+        .await
+        .unwrap()
+        .create_consumer(OrderedConfig {
+            filter_subject: "status.>".into(),
+            deliver_policy: DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .messages()
+        .await
+        .unwrap();
+    assert_eq!(next_payloads(&mut latest, 1).await, ["up"]);
+}
+
+#[tokio::test]
+async fn galata_markets_publishes_nothing_and_changes_no_stream() {
+    let (broker, admin) = applied().await;
+    let client = galata_markets(&broker).await;
+
+    // A publish it is not granted: the server drops it, so the window holds
+    // nothing it sent.
+    let _ = client
+        .publish(BTC_QUOTES.to_string(), "forged".into())
+        .await;
+    let _ = client.flush().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(settled(&admin, "MARKETS", 0).await, 0);
+
+    let markets = jetstream::new(client);
+    assert!(markets.delete_stream("MARKETS").await.is_err());
+    assert!(
+        streams::held(&admin, "MARKETS").await.is_some(),
+        "the window is unchanged"
+    );
+    // Account data is not its to read.
+    assert!(markets.get_stream("ACCOUNTS").await.is_err());
 }

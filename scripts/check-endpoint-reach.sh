@@ -104,6 +104,11 @@ EXPOSE_ALLOWED = {
     # apply the stream table (`Secret::expose`). Added 2026-11-25 with
     # `add-bus-replay-window`.
     "crates/galata-datawatch/src/bin/galata-bus.rs",
+    # galata-markets: its bus password, to the connection (`main.rs`), and a
+    # client's token, compared with what a request presents and nowhere else
+    # (`access.rs`). Added 2026-11-26 with `add-galata-markets`.
+    "crates/galata-markets/src/main.rs",
+    "crates/galata-markets/src/access.rs",
     # Where a vault's bytes become a `Secret`, which is the same job
     # `config/source.rs` does for the environment. Added 2026-09-23 with
     # `VaultSecrets`.

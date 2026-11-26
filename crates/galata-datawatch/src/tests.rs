@@ -675,3 +675,61 @@ fn capture_seeds_the_archive_from_the_clock_it_owns() {
         "the archive was not seeded from the loop's clock"
     );
 }
+
+/// Every file and folder under `root` made read-only, or writable again.
+#[cfg(unix)]
+fn read_only(root: &std::path::Path, on: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let dir = path.is_dir();
+        if dir {
+            stack.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        }
+        let mode = match (dir, on) {
+            (true, true) => 0o555,
+            (true, false) => 0o755,
+            (false, true) => 0o444,
+            (false, false) => 0o644,
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_record_replays_into_the_events_capture_produced() {
+    // galata-markets mounts the archive read-only and fills a hole from it
+    // (`add-galata-markets`): no archive handle, so nothing can be opened for
+    // writing, and the events are capture's own.
+    let root = tempfile::tempdir().unwrap();
+    let live = RecordingSink::default();
+    let mut archive = Archive::open(root.path());
+    for (n, recv) in [
+        1_758_326_400_000_000_i64,
+        1_758_326_401_000_000,
+        1_758_326_402_500_000,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let bytes = format!("{{\"n\":{n}}}");
+        let p = payload(Origin::Fetched, recv, bytes.as_bytes());
+        ingest(&mut archive, &Witness::default(), &live, p).unwrap();
+    }
+    archive.flush().unwrap();
+    drop(archive);
+
+    read_only(root.path(), true);
+    let replayed = RecordingSink::default();
+    for payload in crate::replay::stream_range(root.path(), None, i64::MIN, i64::MAX) {
+        crate::ingest::normalise_replayed(&Witness::default(), &replayed, payload.unwrap())
+            .unwrap();
+    }
+    read_only(root.path(), false);
+
+    let key = |e: &Envelope| (e.seq, e.recv_micros, e.event.clone());
+    let live: Vec<_> = live.emitted().iter().map(key).collect();
+    assert_eq!(live.len(), 3);
+    assert_eq!(replayed.emitted().iter().map(key).collect::<Vec<_>>(), live);
+}

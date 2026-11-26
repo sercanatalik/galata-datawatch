@@ -8,6 +8,9 @@ members = [
     # Not published. The vault lives here so the four above can say they link
     # none of it, and a guard can check that rather than a comment claiming it.
     "crates/galata-datawatch-vault",
+    # Not published: the service that serves market data to clients
+    # (`add-galata-markets`), in a container of its own.
+    "crates/galata-markets",
 ]
 
 # Declared once, and taken once — every member says `license.workspace = true`.

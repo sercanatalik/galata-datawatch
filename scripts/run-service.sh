@@ -8,6 +8,7 @@
 #   run-service.sh ledger <venue>
 #   run-service.sh tower
 #   run-service.sh flows
+#   run-service.sh markets
 #   run-service.sh --check <service> [<venue>]   every precondition, then `ready`;
 #                                                starts nothing
 #
@@ -198,6 +199,9 @@ use_config() {
 DATAWATCH_IMAGE="$(service_image capture)"
 NATS_IMAGE="$(service_image nats)"
 FLOWS_IMAGE="$(service_image flows)"
+MARKETS_IMAGE="$(service_image markets)"
+# Where galata-markets is published on the tailnet address.
+MARKETS_PORT="${GALATA_MARKETS_PORT:-8790}"
 CONTAINER_RUN=()
 in_container() {
     local spec="$1" image="$2"; shift 2
@@ -231,6 +235,20 @@ root_mounts() {
         [[ -d "$host" ]] || refuse "no folder at $host, which $GALATA_CONFIG names as a root — a container is given a folder that exists; mkdir -p it if the path is right"
         ROOT_MOUNTS+=(-v "$host:$inside")
     done <<< "$lines"
+}
+
+# The same roots, **read-only**: for a service that serves them and must not
+# be able to change them (galata-markets).
+#
+#   root_mounts_readonly <key> [<key> ...]     sets ROOT_MOUNTS
+root_mounts_readonly() {
+    local i host inside out=()
+    root_mounts "$@"
+    for (( i = 1; i < ${#ROOT_MOUNTS[@]}; i += 2 )); do
+        host="${ROOT_MOUNTS[i]%%:*}"; inside="${ROOT_MOUNTS[i]#*:}"
+        out+=(--mount "type=bind,source=$host,target=$inside,readonly")
+    done
+    ROOT_MOUNTS=("${out[@]}")
 }
 
 # The configuration a container reads: a copy, in a folder of this service's
@@ -414,7 +432,25 @@ case "$service" in
         if (( ! CHECK )); then own_volume "$FLOWS_STATE" "$FLOWS_IMAGE"; fi
         start "${CONTAINER_RUN[@]}"
         ;;
+    markets)
+        # galata-markets (add-galata-markets): the archive and the tape
+        # read-only, which it serves and must not be able to change; the
+        # configuration; its bus password and its clients' tokens on standard
+        # input; and its port published on the tailnet address alone, as the
+        # broker's is, for clients on the tailnet.
+        use_config
+        root_mounts_readonly paths.archive paths.tape
+        config_mount "$(container_name markets)"
+        secrets=(); only=()
+        while read -r name; do secrets+=("$name"); only+=(--only "$name"); done < <(markets_secrets)
+        tailnet="$(tailnet_address 2>&1)" || refuse "$tailnet"
+        in_container markets "$MARKETS_IMAGE" -i "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}" \
+            --publish "$tailnet:$MARKETS_PORT:8790"
+        from_vault markets "${only[@]}" -- \
+            /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
+            "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- galata-markets
+        ;;
     *)
-        refuse "usage: run-service.sh [--check] nats | capture <venue> | ledger <venue> | tower | flows"
+        refuse "usage: run-service.sh [--check] nats | capture <venue> | ledger <venue> | tower | flows | markets"
         ;;
 esac

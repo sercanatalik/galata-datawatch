@@ -1,0 +1,46 @@
+[package]
+name = "galata-markets"
+description = "The one door for market data: history from the tape, the live window, and what exists, over HTTP."
+# **Never published, and this is the design**: a service, deployed in a
+# container of its own (`add-galata-markets`). It takes galata-datawatch
+# without `capture` — the tape reader, the record's replay and the venues'
+# normalisers, and no venue transport — which
+# `scripts/check-markets-no-transport.sh` asserts of this package built alone,
+# as its image builds it. (A whole-workspace build unifies features and would
+# hand it `capture` anyway; that build is not the one deployed.)
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The normalisers of the venues whose holes it fills from the record, and no
+# capture loop.
+galata-datawatch = { version = "0.1.0", path = "../galata-datawatch", default-features = false, features = ["hyperliquid", "derive-xyz"] }
+galata-broker = { version = "0.1.0", path = "../galata-broker" }
+galata-wire = { version = "0.1.0", path = "../galata-wire" }
+arrow.workspace = true
+async-nats.workspace = true
+# The server, as galata-tower's: routes, query strings, JSON and server-sent
+# events.
+axum = "0.8"
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The window's start by time, as async-nats takes it.
+time = "0.3"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# Asking the router in-process, with no socket.
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

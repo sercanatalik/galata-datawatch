@@ -85,6 +85,11 @@ impl Grants {
 ///   because *an identity that could read every venue's firehose is exactly
 ///   what a password on an operator's laptop should not be*. The grant is the
 ///   boundary; galata-tower's `check-no-market-reach.sh` holds the other side.
+///
+/// Beside them, two services: `bus-admin`, which administers the streams at
+/// the broker's start, and galata-markets ([`GALATA_MARKETS`]), which consumes
+/// the windows and serves clients over HTTP — so the firehose's one password
+/// stays in a container and never reaches an operator.
 pub fn table(venues: &[&str]) -> Grants {
     let mut grants = Vec::new();
     for venue in venues {
@@ -116,8 +121,36 @@ pub fn table(venues: &[&str]) -> Grants {
         publish: admin,
         subscribe: vec![format!("{BUS_ADMIN_INBOX}.>")],
     });
+    // **galata-markets, the one consumer of the windows** (`add-galata-markets`).
+    // It serves every client, so no client holds a bus password: this one
+    // lives in the vault and galata-markets' container. It may read the market
+    // and status streams and run consumers of its own on them — create, read,
+    // page and delete — and it hears replies only on an inbox of its own. It
+    // publishes nothing to any root, and creates, changes and deletes no stream.
+    let mut markets = Vec::new();
+    for stream in [crate::streams::MARKET_STREAM, crate::streams::STATUS_STREAM] {
+        markets.push(format!("$JS.API.STREAM.INFO.{stream}"));
+        // An unnamed consumer — an ordered replay — is created on the stream's
+        // own subject, which `.>` does not match (async-nats 0.50).
+        markets.push(format!("$JS.API.CONSUMER.CREATE.{stream}"));
+        for verb in ["CREATE", "DELETE", "INFO", "MSG.NEXT"] {
+            markets.push(format!("$JS.API.CONSUMER.{verb}.{stream}.>"));
+        }
+    }
+    grants.push(Grant {
+        identity: GALATA_MARKETS.into(),
+        publish: markets,
+        subscribe: vec![format!("{GALATA_MARKETS_INBOX}.>")],
+    });
     Grants(grants)
 }
+
+/// The identity galata-markets reads the bus as.
+pub const GALATA_MARKETS: &str = "markets";
+
+/// The inbox prefix [`GALATA_MARKETS`] connects with, and the only one it may
+/// hear replies — and the messages its consumers deliver — on.
+pub const GALATA_MARKETS_INBOX: &str = "_INBOX_MARKETS";
 
 /// The identity the broker's start administers its streams as.
 pub const BUS_ADMIN: &str = "bus-admin";
@@ -353,9 +386,41 @@ mod tests {
     }
 
     #[test]
+    fn galata_markets_may_consume_the_windows_and_nothing_else() {
+        let grants = table(&["hyperliquid"]);
+        let markets = grants
+            .iter()
+            .find(|g| g.identity == GALATA_MARKETS)
+            .unwrap();
+        for stream in ["MARKETS", "STATUS"] {
+            let info = format!("$JS.API.STREAM.INFO.{stream}");
+            assert!(markets.publish.contains(&info), "missing {info}");
+            let unnamed = format!("$JS.API.CONSUMER.CREATE.{stream}");
+            assert!(markets.publish.contains(&unnamed), "missing {unnamed}");
+            for verb in ["CREATE", "DELETE", "INFO", "MSG.NEXT"] {
+                let subject = format!("$JS.API.CONSUMER.{verb}.{stream}.>");
+                assert!(markets.publish.contains(&subject), "missing {subject}");
+            }
+        }
+        for subject in &markets.publish {
+            assert!(
+                subject.starts_with("$JS.API.CONSUMER.")
+                    || subject.starts_with("$JS.API.STREAM.INFO."),
+                "it administers no stream and publishes no data: {subject}"
+            );
+            assert!(
+                !subject.contains("ACCOUNTS"),
+                "account data is not its to read: {subject}"
+            );
+        }
+        assert_eq!(markets.subscribe, vec![format!("{GALATA_MARKETS_INBOX}.>")]);
+    }
+
+    #[test]
     fn no_other_identity_touches_the_stream_api() {
         for grant in table(&["hyperliquid", "rh-chain"]).iter() {
-            if grant.identity == BUS_ADMIN {
+            // The two that do, each pinned by a test of its own above.
+            if grant.identity == BUS_ADMIN || grant.identity == GALATA_MARKETS {
                 continue;
             }
             assert!(

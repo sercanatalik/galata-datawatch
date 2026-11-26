@@ -139,6 +139,21 @@ prove "check-no-transport (the pure half reaches for the runtime)" \
     "$ROOT/crates/galata-datawatch/src/calendar.rs" \
     own
 
+# galata-markets given the record writable: it serves it and must not be able
+# to change it.
+prove "check-container-launch (galata-markets mounts the record writable)" \
+    "$ROOT/scripts/check-container-launch.sh" \
+    "$ROOT/scripts/run-service.sh" \
+    replace '        root_mounts_readonly paths.archive paths.tape' \
+    '        root_mounts paths.archive paths.tape'
+
+# galata-markets taking galata-datawatch with its capture loop.
+prove "check-markets-no-transport (the service links a venue transport)" \
+    "$ROOT/scripts/check-markets-no-transport.sh" \
+    "$ROOT/crates/galata-markets/Cargo.toml" \
+    replace 'features = ["hyperliquid", "derive-xyz"] }' \
+    'features = ["hyperliquid", "derive-xyz", "capture"] }'
+
 # The fourth wall. `own` because the guard plants a dependency, and where a
 # dependency is planted matters: [dev-dependencies] would not break the wall,
 # so the guard is the only thing that knows the right place to put it.

@@ -66,6 +66,7 @@ service_image() {
     case "$1" in
         nats) printf '%s' "${GALATA_NATS_IMAGE:-galata-nats:latest}" ;;
         flows) printf '%s' "${GALATA_FLOWS_IMAGE:-galata-flows:latest}" ;;
+        markets) printf '%s' "${GALATA_MARKETS_IMAGE:-galata-markets:latest}" ;;
         *) printf '%s' "${GALATA_DATAWATCH_IMAGE:-galata-datawatch:latest}" ;;
     esac
 }

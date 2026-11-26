@@ -103,6 +103,10 @@ done < <(awk '$1 == "user:" { print $2 }' "$ROOT/config/nats-authorization.conf"
 mint nats "${broker_names[@]}"
 mint capture-hyperliquid GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
 mint tower GALATA_BROKER_PASSWORD_READER
+# galata-markets: its bus password and its clients' tokens.
+markets_names=()
+while read -r name; do markets_names+=("$name"); done < <(markets_secrets)
+mint markets "${markets_names[@]}"
 
 # The ledger, per venue: that venue's account addresses and the fingerprint
 # key, named by the deployment's own [ledger] tables (scripts/lib/ledger_vars.py)

@@ -79,7 +79,7 @@ exit 0
 STUB
     chmod 755 "$1/container"
 }
-images="galata-datawatch:latest galata-nats:latest galata-flows:latest"
+images="galata-datawatch:latest galata-nats:latest galata-flows:latest galata-markets:latest"
 container_stub "$stubs/up" 0 "$images"
 container_stub "$stubs/down" 1 "$images"
 
@@ -401,6 +401,41 @@ line="$(GALATA_CONTAINER_BIN="$stubs/up/container" GALATA_CONTAINERS_CONF="$scra
 [[ "$line" == *"REFUSED"*"no CPU or memory limit for flows"* ]] \
     || say "the jobs lane, with no line in containers.conf, is not refused by its name and the missing limit: $line"
 [[ "$line" == *"cereyan serve"* ]] && say "the jobs lane, with no line in containers.conf, would serve natively: $line"
+
+# galata-markets (add-galata-markets): the archive and the tape READ-ONLY,
+# which it serves and must not be able to change; its port on the tailnet
+# address; its bus password and its clients' tokens over standard input.
+cp "$scratch/var/tokens/capture-hyperliquid.gvt" "$scratch/var/tokens/markets.gvt"
+chmod 600 "$scratch/var/tokens/markets.gvt"
+printf 'markets    2     2G\n' > "$scratch/containers.conf"
+markets_names="$(markets_secrets | paste -sd ' ' -)"
+[[ "$markets_names" == GALATA_BROKER_PASSWORD_MARKETS\ GALATA_MARKETS_TOKEN_* ]] \
+    || say "galata-markets' secrets are not its bus password and then its clients' tokens: $markets_names"
+line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
+        GALATA_CONTAINERS_CONF="$scratch/containers.conf" GALATA_TAILSCALE_BIN="$stubs/ts-up/tailscale" \
+        /bin/bash "$scratch/scripts/run-service.sh" --check markets 2>&1 || true)"
+if [[ "$line" != ready:* ]]; then
+    say "galata-markets, listed in containers.conf, does not check as ready in a root with everything in place: $line"
+else
+    has() { [[ "$line" == *"$1"* ]] || say "galata-markets' container line lacks '$1': $2"; }
+    has " run --rm --name galata-markets --cpus 2 --memory 2G " "it runs under its own name with the limits its line states"
+    has "source=$scratch/var/archive,target=/app/var/archive,readonly" "it is given the archive read-only: it serves the record and must not be able to change it"
+    has "source=$scratch/var/tape,target=/app/var/tape,readonly" "it is given the tape read-only"
+    has " --publish 100.64.0.7:8790:8790 " "its port is published on the tailnet address"
+    has "hand-secrets.sh $markets_names -- " "its bus password and its clients' tokens are handed over standard input, by name"
+    has " with-secrets $markets_names -- galata-markets" "the entrypoint receives every name, then becomes galata-markets"
+    [[ "$line" == *" -v $scratch/var/archive"* || "$line" == *" -v $scratch/var/tape"* ]] \
+        && say "galata-markets is given the archive or the tape writable"
+    [[ "$line" == *"/var/status"* || "$line" == *"/var/ledger"* ]] \
+        && say "galata-markets' container is given the status folder or the ledger's record, which are not its to read"
+    [[ "$line" =~ -e\ +\"?GALATA_(MARKETS_TOKEN|BROKER_PASSWORD) ]] && say "one of galata-markets' secrets is passed with -e"
+fi
+: > "$scratch/containers.conf"
+line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
+        GALATA_CONTAINERS_CONF="$scratch/containers.conf" GALATA_TAILSCALE_BIN="$stubs/ts-up/tailscale" \
+        /bin/bash "$scratch/scripts/run-service.sh" --check markets 2>&1 || true)"
+[[ "$line" == *"REFUSED"*"no CPU or memory limit for markets"* ]] \
+    || say "galata-markets, with no line in containers.conf, is not refused by its name and the missing limit: $line"
 
 # The tower is pointed at the broker the configuration names. Its address is
 # in the environment, so --check says it.

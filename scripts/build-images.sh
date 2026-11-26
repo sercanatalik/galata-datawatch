@@ -4,11 +4,12 @@
 #
 #   build-images.sh [--dirty] [image ...]
 #
-#   images: datawatch  nats  flows     (default: all three)
+#   images: datawatch  nats  flows  markets     (default: all four)
 #
 #   datawatch   capture, the ledger and the maintenance binaries
 #   nats        the broker, with the door its passwords enter by
 #   flows       the scheduling lane and the binaries its flows spawn
+#   markets     galata-markets, the one door for market data
 #
 # **An image is built from a tree someone can name.** Each is labelled with
 # `git describe` (org.galata.source-tree), which `install-services.sh
@@ -39,7 +40,7 @@ refuse() { echo "build-images: REFUSED — $1" >&2; exit 1; }
 DIRTY=0
 if [[ "${1:-}" == --dirty ]]; then DIRTY=1; shift; fi
 images=("$@")
-(( ${#images[@]} )) || images=(datawatch nats flows)
+(( ${#images[@]} )) || images=(datawatch nats flows markets)
 
 tool="$(container_tool 2>&1)" || refuse "$tool"
 said="$(container_running "$tool" 2>&1)" || refuse "$said"
@@ -60,7 +61,8 @@ for image in "${images[@]}"; do
         datawatch) file=deploy/container/Containerfile ;;
         nats) file=deploy/container/Containerfile.nats ;;
         flows) file=deploy/container/Containerfile.flows ;;
-        *) refuse "unknown image '$image' (datawatch, nats, flows)" ;;
+        markets) file=deploy/container/Containerfile.markets ;;
+        *) refuse "unknown image '$image' (datawatch, nats, flows, markets)" ;;
     esac
     [[ -f "$file" ]] || refuse "no $file"
     echo "building galata-$image:latest from $tree"

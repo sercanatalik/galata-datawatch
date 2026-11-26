@@ -5,7 +5,7 @@
 #   install-services.sh [--uninstall] [service ...]
 #   install-services.sh --status
 #
-#   services: nats  capture:<venue>  ledger:<venue>  tower  flows
+#   services: nats  capture:<venue>  ledger:<venue>  tower  flows  markets
 #             (default: all four below, with capture:hyperliquid; a ledger is
 #             installed only when named, since it needs accounts in the vault
 #             first)
@@ -99,6 +99,7 @@ twins_of() {
         ledger:*) bins="galata-ledger galata-ledger-vault"; want="${spec#ledger:}" ;;
         tower) bins="galata-tower" ;;
         flows) ;;
+        markets) bins="galata-markets" ;;
     esac
     local owned
     owned=" $(owned_by_launchd "$spec" | tr '\n' ' ') "
@@ -185,7 +186,7 @@ vet() {  # vet <label> <program>...
 vet_programs() {  # the programs a service's start would exec
     local spec="$1" said=""
     case "$spec" in
-        nats|tower|flows) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
+        nats|tower|flows|markets) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
         capture:*) said="$("$ROOT/scripts/run-service.sh" --check capture "${spec#capture:}" 2>/dev/null)" ;;
         ledger:*) said="$("$ROOT/scripts/run-service.sh" --check ledger "${spec#ledger:}" 2>/dev/null)" ;;
     esac
@@ -225,7 +226,7 @@ if [[ "${1:-}" == --status ]]; then
         case "$label" in
             com.galata.capture.*) args=(capture "${label#com.galata.capture.}") ;;
             com.galata.ledger.*) args=(ledger "${label#com.galata.ledger.}") ;;
-            com.galata.nats|com.galata.tower|com.galata.flows) args=("${label#com.galata.}") ;;
+            com.galata.nats|com.galata.tower|com.galata.flows|com.galata.markets) args=("${label#com.galata.}") ;;
             *) continue ;;
         esac
         if said="$("$ROOT/scripts/run-service.sh" --check "${args[@]}" 2>&1)"; then
@@ -242,7 +243,7 @@ if [[ "${1:-}" == --status ]]; then
     echo
     printf '%-34s %s\n' TWIN "PID  COMMAND"
     twin_count=0
-    managed_specs=(nats tower flows)
+    managed_specs=(nats tower flows markets)
     for plist in "$AGENTS"/com.galata.capture.*.plist "$AGENTS"/com.galata.ledger.*.plist; do
         [[ -f "$plist" ]] || continue
         l="$(basename "$plist" .plist)"
@@ -367,19 +368,19 @@ fi
 UNINSTALL=0
 if [[ "${1:-}" == --uninstall ]]; then UNINSTALL=1; shift; fi
 services=("$@")
-(( ${#services[@]} )) || services=(nats capture:hyperliquid tower flows)
+(( ${#services[@]} )) || services=(nats capture:hyperliquid tower flows markets)
 
 
 for spec in "${services[@]}"; do
     case "$spec" in
-        nats|tower|flows) service="$spec"; arg=""; label="com.galata.$spec" ;;
+        nats|tower|flows|markets) service="$spec"; arg=""; label="com.galata.$spec" ;;
         vault) (( UNINSTALL )) || refuse "the vault is no longer a service of this deployment: it is the hosted vault, which galata-vault runs (deploy/apple-container/gv-container up). --uninstall vault removes the old agent"
                service=vault; arg=""; label="com.galata.vault" ;;
         capture:*) service=capture; arg="${spec#capture:}"; label="com.galata.capture.$arg"
                    [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
         ledger:*) service=ledger; arg="${spec#ledger:}"; label="com.galata.ledger.$arg"
                   [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
-        *) refuse "unknown service '$spec' (nats, capture:<venue>, ledger:<venue>, tower, flows)" ;;
+        *) refuse "unknown service '$spec' (nats, capture:<venue>, ledger:<venue>, tower, flows, markets)" ;;
     esac
     plist="$AGENTS/$label.plist"
 
@@ -394,7 +395,7 @@ for spec in "${services[@]}"; do
         # In a container of its own: its image, and a line stating its
         # limits. Installing one without either would load an agent that is
         # refused at every attempt.
-        nats|capture|ledger|flows)
+        nats|capture|ledger|flows|markets)
             said="$(container_limits "$spec" 2>&1)" || refuse "$said"
             ctool="$(container_tool 2>&1)" || refuse "$ctool"
             said="$(container_image "$ctool" "$(service_image "$spec")" 2>&1)" || refuse "$said" ;;
@@ -402,9 +403,9 @@ for spec in "${services[@]}"; do
                    || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT" ;;
     esac
 
-    # The four that hold a secret read it through their own vault token.
+    # The five that hold a secret read it through their own vault token.
     # (Not `;;&` in the case above: macOS's bash is 3.2.)
-    if [[ "$service" == capture || "$service" == ledger || "$service" == nats || "$service" == tower ]]; then
+    if [[ "$service" == capture || "$service" == ledger || "$service" == nats || "$service" == tower || "$service" == markets ]]; then
         [[ -x "$ROOT/target/release/galata-token-expiry" ]] \
             || refuse "no galata-token-expiry — cargo build --release -p galata-datawatch-vault first"
         said="$(gv_tool 2>&1)" || refuse "$said"

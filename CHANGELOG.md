@@ -24,8 +24,24 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Added
 
+**`galata-markets`** (new, not published)
+
+- **The one door for market data** (`add-galata-markets`): history from the
+  tape as Arrow IPC (`/v1/tape/{kind}`), candles at a period (`/v1/candles`),
+  venues and instruments in one format (`/v1/venues`, `/v1/instruments`), and
+  the live window as server-sent events (`/v1/live`), resumable by
+  `Last-Event-ID`, joinable to a history read by its tape bound, with every
+  hole the bus declared filled in place from the record. A token per client;
+  it reads the tape and the archive read-only, reads the bus as `markets`,
+  publishes nothing, and links no venue transport.
+
 **`galata-broker`**
 
+- **galata-markets' identity** (`add-galata-markets`): `grants::table` grants
+  `markets` the stream info of MARKETS and STATUS and consumers of its own on
+  them, replies on `_INBOX_MARKETS` alone, and nothing else — no publish, no
+  stream administration, no account data. `GALATA_MARKETS`,
+  `GALATA_MARKETS_INBOX`, `streams::MARKET_STREAM` and `streams::STATUS_STREAM`.
 - **The broker keeps a window of the bus** (`add-bus-replay-window`):
   `streams::table` declares MARKETS (`markets.>`, two hours within a byte cap),
   ACCOUNTS (`accounts.>`, seven days) and STATUS (`status.>`, the last message
@@ -63,6 +79,16 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 **`galata-datawatch`**
 
+- **Candles at a period** (`add-galata-markets`): `tape::bars` builds bars at
+  1m to 1d from the `candles` dataset exactly, from the finest held interval
+  that divides the period and covers the bar with final bars, never mixing
+  intervals; each bar states its source interval, how complete it is, whether
+  a recorded gap touches it and whether it is final; a span no source covers
+  is named, not filled. `Forming` keeps the live bar with the same function.
+- `ingest::normalise_replayed`: a payload read back out of the record,
+  normalised and emitted with no archive handle, for a reader whose view of
+  the record is read-only. `ingest_replayed` is now that, and touches its
+  archive parameter no more than it did.
 - **Hyperliquid records reference data** (`normalise-instrument-reference`):
   each captured dex's `meta`, at capture's start and every five minutes,
   becomes a row per captured coin in the one format — the grid and five

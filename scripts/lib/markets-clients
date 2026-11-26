@@ -1,0 +1,7 @@
+# The clients galata-markets serves, one per line, each with a token of its
+# own (GALATA_MARKETS_TOKEN_<CLIENT>). The service's own table is
+# crates/galata-markets/src/access.rs CLIENTS; a test there holds the two
+# the same, so a script and the service cannot disagree.
+controlboard
+watcher
+operator

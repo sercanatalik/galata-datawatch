@@ -52,7 +52,10 @@ pub mod subject;
 pub mod subscriber;
 
 pub use encode::{DecodeError, EncodeError, decode, encode};
-pub use grants::{BUS_ADMIN, BUS_ADMIN_INBOX, Grant, Grants, ROOTS, password_var, to_nats_config};
+pub use grants::{
+    BUS_ADMIN, BUS_ADMIN_INBOX, GALATA_MARKETS, GALATA_MARKETS_INBOX, Grant, Grants, ROOTS,
+    password_var, to_nats_config,
+};
 pub use identity::BrokerIdentity;
 pub use publisher::{ConnectRefusal, NatsPublisher, NullPublisher, PublishError, Publisher};
 pub use subject::Subject;

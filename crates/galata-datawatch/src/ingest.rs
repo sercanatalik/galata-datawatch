@@ -84,7 +84,7 @@ pub fn ingest(
     sink: &dyn Sink,
     payload: Payload,
 ) -> Result<Ingested, RecordError> {
-    one_path(archive, normaliser, sink, payload, false)
+    one_path(Some(archive), normaliser, sink, payload)
 }
 
 /// The same path, for a payload that came **out of** the record.
@@ -98,30 +98,50 @@ pub fn ingest(
 /// constructs and which cannot be turned back into a [`Payload`]. The previous
 /// form asked a caller to set an origin field correctly; this one cannot be got
 /// wrong.
+///
+/// **The archive is never touched**: this is [`normalise_replayed`], kept with
+/// an archive parameter for the callers that hold one.
 pub fn ingest_replayed(
-    archive: &mut Archive,
+    _archive: &mut Archive,
     normaliser: &dyn Normalise,
     sink: &dyn Sink,
     replayed: crate::replay::Replayed,
 ) -> Result<Ingested, RecordError> {
-    one_path(archive, normaliser, sink, replayed.into_payload(), true)
+    normalise_replayed(normaliser, sink, replayed)
 }
 
+/// A payload read back out of the record, normalised and emitted **with no
+/// archive handle at all** (`add-galata-markets`).
+///
+/// For a reader whose view of the record is read-only — galata-markets, whose
+/// container mounts the archive that way — and which therefore cannot open an
+/// [`Archive`], a writer. The events are the ones live capture produced: the
+/// same normaliser, the same sequence, the same receipt time.
+pub fn normalise_replayed(
+    normaliser: &dyn Normalise,
+    sink: &dyn Sink,
+    replayed: crate::replay::Replayed,
+) -> Result<Ingested, RecordError> {
+    one_path(None, normaliser, sink, replayed.into_payload())
+}
+
+/// The three steps. **`None` is a replay**: the payload came out of the
+/// record, so it keeps its sequence and nothing is appended or failed.
 fn one_path(
-    archive: &mut Archive,
+    mut archive: Option<&mut Archive>,
     normaliser: &dyn Normalise,
     sink: &dyn Sink,
     mut payload: Payload,
-    replaying: bool,
 ) -> Result<Ingested, RecordError> {
-    let seq = if replaying {
+    let seq = match archive.as_deref_mut() {
+        Some(archive) => {
+            let seq = archive.next_seq();
+            payload.seq = seq;
+            seq
+        }
         // The sequence a replayed payload already carries: it is the record
         // row it came out of, and every row derived from it names that.
-        payload.seq
-    } else {
-        let seq = archive.next_seq();
-        payload.seq = seq;
-        seq
+        None => payload.seq,
     };
 
     let mut result = Ingested {
@@ -131,7 +151,7 @@ fn one_path(
 
     // 1. The bytes are durable — or buffered against the flush timer — before
     //    anything looks at them.
-    if !replaying {
+    if let Some(archive) = archive.as_deref_mut() {
         archive.append(payload.clone())?;
     }
 
@@ -143,7 +163,7 @@ fn one_path(
         Ok(events) => events,
         Err(error) => {
             result.unparsed = true;
-            if !replaying {
+            if let Some(archive) = archive {
                 archive.append_failure(Failure {
                     seq,
                     recv_micros: payload.recv_micros,

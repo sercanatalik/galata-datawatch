@@ -98,6 +98,18 @@ password_var() {
     printf 'GALATA_BROKER_PASSWORD_%s' "$(printf '%s' "$id" | tr '[:lower:]' '[:upper:]')"
 }
 
+# markets_secrets: the names galata-markets reads, one per line: its bus
+# password, then each client's token (scripts/lib/markets-clients).
+markets_secrets() {
+    local root client
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    printf '%s\n' "$(password_var markets)"
+    while read -r client; do
+        [[ -n "$client" && "$client" != \#* ]] || continue
+        printf 'GALATA_MARKETS_TOKEN_%s\n' "$(printf '%s' "$client" | tr 'a-z-' 'A-Z_')"
+    done < "$root/scripts/lib/markets-clients"
+}
+
 # is_env_name <name>: could a process be handed this as a variable?
 is_env_name() {
     [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]

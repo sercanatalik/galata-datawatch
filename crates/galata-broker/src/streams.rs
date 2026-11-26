@@ -167,11 +167,17 @@ pub async fn apply(client: &AdminClient) -> Vec<Applied> {
     outcomes
 }
 
+/// The market window's name.
+pub const MARKET_STREAM: &str = "MARKETS";
+
+/// The status stream's name: each venue's latest status.
+pub const STATUS_STREAM: &str = "STATUS";
+
 /// The streams, in the order the broker's start applies them.
 pub fn table() -> Vec<Stream> {
     vec![
         Stream {
-            name: "MARKETS",
+            name: MARKET_STREAM,
             subjects: vec!["markets.>".into()],
             max_age: MARKET_WINDOW,
             max_bytes: MARKET_WINDOW_BYTES,
@@ -185,7 +191,7 @@ pub fn table() -> Vec<Stream> {
             max_messages_per_subject: -1,
         },
         Stream {
-            name: "STATUS",
+            name: STATUS_STREAM,
             subjects: vec!["status.>".into()],
             max_age: Duration::ZERO,
             max_bytes: -1,

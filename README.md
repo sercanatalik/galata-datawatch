@@ -401,6 +401,139 @@ Two things to know before filtering:
   subscribe does so again on every reconnection: 1.55% of a 24-minute run,
   once per session rotation. Both receipts are recorded because both
   happened. Group on `trade_id` to count each execution once.
+- **`candles` holds several intervals at once**: galata's live 1m bars, most
+  of whose rows are updates to the forming bar, and the venue's 1h, 4h and 1d
+  bars walked back through its history. Filter on `interval` before grouping
+  on `at_micros`, or a venue hourly bar received later takes the minute it
+  shares.
+
+### Candles at a period
+
+`tape::bars` builds candles at 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h or
+1d from the `candles` dataset, exactly, in the tape's own decimal units. It is
+what galata-markets serves (`add-galata-markets`), and the one place a bar is
+built, for a history read and a live stream alike.
+
+- **The source is chosen, never mixed.** A bar is built from the finest held
+  interval that divides its period and covers it with final bars; failing
+  that, the finest with any bars in it. A venue hourly bar beside 59 of 60
+  final minutes is the complete answer; for the hour still forming, galata's
+  live minutes are. A 5m bar is never made from an hourly one.
+- **Each source bar at its latest version**: the row received last for its
+  interval and moment.
+- **A bar says what it is**: its source interval, how many source bars it
+  holds against how many its period does, whether a recorded gap touches it,
+  and whether every source bar in it was final. One missing its first or last
+  minute is incomplete by construction.
+- **Aligned to UTC, and whole**: a bar begins at a multiple of its period
+  from the epoch (a day at 00:00 UTC), and a window selects whole bars, so a
+  bar is the same in every answer.
+- **A span no source covers is named, not filled**: 5m bars from before 1m
+  capture began come back as an unsourced span, never as hourly bars.
+
+---
+
+## galata-markets: market data over HTTP
+
+`galata-markets` (`crates/galata-markets`, `add-galata-markets`) is the one
+door for market data: history from the tape, candles at a period, what
+exists, and the live window. A client needs its token and nothing else; it
+never connects to the bus. The service reads the tape and the archive
+read-only, reads the bus as `markets` and publishes nothing, and links no
+venue transport (`scripts/check-markets-no-transport.sh`).
+
+**Every request but `/health` carries a client's token**, as
+`Authorization: Bearer <token>`. The clients are a table in the code
+(`controlboard`, `watcher`, `operator`), each token held in the vault as
+`GALATA_MARKETS_TOKEN_<CLIENT>`. No token and a token not issued are refused
+alike, and the refusal names no client.
+
+| Route | Answers | As |
+|---|---|---|
+| `/v1/tape/{kind}?venue&ticker&from&to` | one dataset's rows over a venue-time window | Arrow IPC |
+| `/v1/candles?venue&ticker&period&from&to` | candles at a period (`tape::bars`) | Arrow IPC |
+| `/v1/venues` | each venue, its dexes, and its capture's latest health | JSON |
+| `/v1/instruments?venue&base&contract_type&active&at` | each instrument's reference data, in the one format | JSON |
+| `/v1/instruments/{venue}/{ticker}` | the same, and what the tape holds for it | JSON |
+| `/health` | that it answers; no token | text |
+
+```sh
+T="Authorization: Bearer $GALATA_MARKETS_TOKEN_OPERATOR"
+M=http://<the Mac's tailnet name>:<port>
+
+# A day of BTC's funding, as Arrow IPC.
+curl -sH "$T" "$M/v1/tape/funding?venue=hyperliquid&ticker=BTC&from=1795564800000000&to=1795651200000000" -o btc-funding.arrows
+
+# BTC's 5m candles over an hour.
+curl -sH "$T" "$M/v1/candles?venue=hyperliquid&ticker=BTC&period=5m&from=1795687200000000&to=1795690800000000" -o btc-5m.arrows
+
+# Every venue and its capture's health.
+curl -sH "$T" "$M/v1/venues"
+
+# Every BTC instrument, across venues.
+curl -sH "$T" "$M/v1/instruments?base=BTC"
+
+# One instrument, and what is held for it.
+curl -sH "$T" "$M/v1/instruments/hyperliquid/BTC"
+```
+
+- **History is the tape's own columns**, prices `Decimal128(38, 18)`, oldest
+  first. Each answer's Arrow schema metadata says where the tape ends,
+  `galata.bound.<venue>`: the live stream continues after that position with
+  nothing missing and nothing repeated.
+- **Limits are refused, never cut short**, naming the limit: quotes one ticker
+  at a time and a day per request, other datasets 31 days, an answer at most
+  2,000,000 rows, candles at most 200,000 bars.
+- **Candles** add `galata.unsourced` to the metadata, a JSON list of `[from,
+  to)` spans no source covers. Each bar carries `source_interval`,
+  `sources`, `sources_expected`, `complete`, `gap` and `is_final`.
+- **A venue's health is its capture's own report**, with the moment it was
+  made; one older than a minute says `current: false`.
+- **An instrument's reference data** is its newest row, or as of `at`;
+  `reference` is null where none is held yet. What is held is per dataset and,
+  for candles, per source interval, computed on first asking and kept fifteen
+  minutes.
+
+### The live stream
+
+`/v1/live?venue&tickers&kinds[&period][&after|&from]` is server-sent events:
+each market event as the bus carried it, its decimals strings, for up to 50
+tickers of one venue and the datasets named (every one where `kinds` is
+absent).
+
+```sh
+# BTC's and ETH's quotes, live.
+curl -NsH "$T" "$M/v1/live?venue=hyperliquid&tickers=BTC,ETH&kinds=quotes"
+
+# Continue a history read: everything after its galata.bound.hyperliquid.
+curl -NsH "$T" "$M/v1/live?venue=hyperliquid&tickers=BTC&kinds=quotes&after=1795640818220259"
+
+# BTC's forming 5m bar, each time one of its minutes changes.
+curl -NsH "$T" "$M/v1/live?venue=hyperliquid&tickers=BTC&kinds=candles&period=5m"
+```
+
+- **Each event's id is its position in the market window.** A client that
+  reconnects with `Last-Event-ID` (as a browser's `EventSource` does by
+  itself) resumes after it: nothing missed, nothing repeated. A position the
+  window no longer holds is refused (`410`), naming the oldest it does: read
+  the rest from history.
+- **Where it starts**: after a history answer's tape bound (`after`), so the
+  two hold every envelope once — refused where the window begins after the
+  tape ends; from a moment in the window (`from`); or from now.
+- **A hole the bus declared is filled in place.** Where capture declared that
+  the bus missed a span, the stream sends, at the declaration's place, the
+  record's events for that span that the window does not hold, as
+  `event: fill`, with the same sequence and receipt time capture gave them;
+  the last carries the declaration's id. A client resuming from before it
+  receives the same fill. Where the record cannot be read in time, or the
+  span is too large, the declaration itself is sent (`event: declaration`),
+  naming the span to read from history.
+- **Bars**: with `period`, the stream carries candles as bars (`event: bar`),
+  built as `/v1/candles` builds them — the current period seeded from the
+  tape, the window's updates folded in, a bar each time one changes.
+- **A client that falls behind** is disconnected, with a final comment
+  saying so, rather than slowing the others or dropping events silently; it
+  resumes with `Last-Event-ID`, the window being its buffer.
 
 ---
 
@@ -600,11 +733,12 @@ rendered from one tracked template and restarted whenever they exit.
 | `capture:<venue>` | outbound only | its venue's configuration and credentials |
 | `tower` | `127.0.0.1:8777` | the `reader` broker password |
 | `flows` (cereyan) | `127.0.0.1:4200` | nothing |
+| `markets` | this Mac's tailnet name, port 8790 | the `markets` broker password and its clients' tokens |
 
 ```sh
 cargo build --release --workspace --bins           # every binary, never one: the lane runs them in place
 (cd ../galata-tower && cargo build --release)
-scripts/install-services.sh                        # nats, capture:hyperliquid, tower, flows
+scripts/install-services.sh                        # nats, capture:hyperliquid, tower, flows, markets
 scripts/install-services.sh capture:rh-chain       # add a venue
 scripts/install-services.sh --uninstall tower      # remove one
 scripts/install-services.sh --status               # every com.galata.* agent, whether it would restart, twins, token expiry, stale builds
@@ -691,6 +825,7 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
 | `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
 | `nats` | `galata-nats` | its server configuration, the generated authorization file and a volume of its own | this Mac's tailnet name, port 4222 |
 | `flows` | `galata-flows` | the archive, the tape and a volume of its own | nowhere |
+| `markets` | `galata-markets` | the archive and the tape, **read-only** | this Mac's tailnet name, port 8790 |
 
 - **The limits are stated, never defaulted.** A container given none gets
   4 CPUs and 1 GiB whatever it runs. A service's line states both, and a

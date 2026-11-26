@@ -65,11 +65,16 @@ required() {
         printf 'nats\t%s\n' "$name"
         case "$id" in
             reader) printf 'tower\t%s\n' "$name" ;;
+            markets) printf 'markets\t%s\n' "$name" ;;
             datawatch-*)
                 venue="${id#datawatch-}"
                 if grep -qx -- "$venue" <<< "$venues"; then printf 'capture:%s\t%s\n' "$venue" "$name"; fi ;;
         esac
     done < <(awk '$1 == "user:" { print $2 }' "$AUTH")
+    # galata-markets' clients' tokens (scripts/lib/markets-clients).
+    while read -r name; do
+        [[ "$name" == GALATA_MARKETS_TOKEN_* ]] && printf 'markets\t%s\n' "$name"
+    done < <(markets_secrets)
     while read -r venue; do
         [[ -n "$venue" ]] || continue
         if names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" "$venue" 2>/dev/null)"; then

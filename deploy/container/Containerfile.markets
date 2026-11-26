@@ -1,0 +1,43 @@
+# galata-markets: the one door for market data (add-galata-markets). Built
+# from the repository root:
+#
+#   scripts/build-images.sh markets
+#   container build -t galata-markets -f deploy/container/Containerfile.markets .
+#
+# **The package alone, `-p galata-markets`.** It takes galata-datawatch
+# without `capture`, and a build of this package alone is what keeps it so: a
+# whole-workspace build unifies features and would link the capture loop in
+# (scripts/check-markets-no-transport.sh asks cargo the same question of the
+# same build).
+#
+# **The binary and `with-secrets`, and nothing else.** Its clients' tokens and
+# its bus password arrive on standard input, as every service's secrets do
+# (scripts/run-service.sh). The tape and the archive are mounted read-only;
+# nothing in the image is either.
+#
+# **No entrypoint.** The launcher states the whole command, so what runs is
+# what `run-service.sh --check markets` prints.
+
+FROM rust:1.98.1-bookworm AS build
+WORKDIR /src
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release --locked -p galata-markets --bin galata-markets \
+ && mkdir /out \
+ && cp target/release/galata-markets /out/
+
+FROM debian:bookworm-slim
+RUN useradd --uid 10001 --create-home galata \
+ && mkdir -p /app/var /app/config && chown -R galata /app
+COPY --from=build /out/galata-markets /usr/local/bin/galata-markets
+# How a secret enters: over standard input, never `-e` (see the script).
+COPY --chmod=755 deploy/container/with-secrets /usr/local/bin/with-secrets
+# The tree this image was built from. `install-services.sh --status` reports
+# it beside a running container, so a deployed image is never anonymous.
+ARG SOURCE_TREE=unknown
+LABEL org.galata.source-tree=$SOURCE_TREE
+# /app stands where the checkout does: the configuration's relative `var/…`
+# paths mean in a container what they mean from a shell at the repo root.
+WORKDIR /app
+USER galata
+ENTRYPOINT []
