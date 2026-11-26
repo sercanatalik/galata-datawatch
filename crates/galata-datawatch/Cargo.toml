@@ -170,6 +170,8 @@ required-features = ["bin", "ledger"]
 galata-datawatch = { path = ".", default-features = false, features = ["testing"] }
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
 tempfile = "3"
+# Counting the lines a test makes the loop log: a run of failures is said once.
+tracing-subscriber = { workspace = true }
 
 # The examples that need a runtime say so, rather than failing a build that
 # turned the transport off.

@@ -545,13 +545,23 @@ pub async fn check_universe(
             use crate::venue::{Construct, universe};
             let adapter = hyperliquid::Hyperliquid::new(c.clone(), None)?;
             let client = adapter.client();
+            // **The answers are kept**: each dex's `meta` is the reference data
+            // of every captured coin on it, so the boot takes them through the
+            // one path (`normalise-instrument-reference`).
+            let mut pages = Vec::new();
             for dex in adapter.dexes() {
-                let listed = client
-                    .universe(&dex)
-                    .await
-                    .map_err(|e| ResolveError::Universe {
+                let page =
+                    client
+                        .meta(&dex, now_micros)
+                        .await
+                        .map_err(|e| ResolveError::Universe {
+                            detail: e.to_string(),
+                        })?;
+                let listed =
+                    hyperliquid::listed(&page.payload).map_err(|e| ResolveError::Universe {
                         detail: e.to_string(),
                     })?;
+                pages.push(page);
                 let declared: Vec<String> = adapter
                     .instruments()
                     .iter()
@@ -564,7 +574,10 @@ pub async fn check_universe(
                     }
                 })?;
             }
-            Ok(Universe::default())
+            Ok(Universe {
+                pages,
+                absent: Vec::new(),
+            })
         }
         // A chain has no instrument universe to check against: a contract
         // either emits logs or it does not, and asking produces an empty
@@ -720,6 +733,28 @@ impl ReferenceSource {
     #[allow(unreachable_patterns)]
     pub fn for_config(config: &AdapterConfig) -> Result<Option<ReferenceSource>, ResolveError> {
         match config {
+            // One `meta` request per captured dex, each the reference data of
+            // every captured coin on it. Two at most here: no pacing needed
+            // within the venue's weight budget.
+            #[cfg(feature = "hyperliquid")]
+            AdapterConfig::Hyperliquid(c) => {
+                use crate::venue::Construct;
+                let client = hyperliquid::Hyperliquid::new(c.clone(), None)?.client();
+                Ok(Some(ReferenceSource {
+                    ask: std::sync::Arc::new(move |dexes, now| {
+                        let client = client.clone();
+                        Box::pin(async move {
+                            let mut answers = Vec::with_capacity(dexes.len());
+                            for dex in &dexes {
+                                answers.push(client.meta(dex, now()).await.map_err(|e| {
+                                    crate::capture::FetchFailure::from(e.to_string())
+                                }));
+                            }
+                            answers
+                        })
+                    }),
+                }))
+            }
             // One request per declared option, paced by the venue's stated
             // budget.
             #[cfg(feature = "derive-xyz")]

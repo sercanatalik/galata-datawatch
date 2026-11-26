@@ -294,6 +294,15 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("strike", PRICE, true),
             Field::new("expiry_micros", DataType::Int64, true),
             Field::new("right", DataType::Utf8, true),
+            // The one format for every venue (`normalise-instrument-reference`),
+            // appended after the option terms for the same reason, and null
+            // wherever the venue states nothing.
+            Field::new("venue_symbol", DataType::Utf8, true),
+            Field::new("dex", DataType::Utf8, true),
+            Field::new("price_figures", DataType::UInt32, true),
+            Field::new("min_notional", PRICE, true),
+            Field::new("max_leverage", DataType::UInt32, true),
+            Field::new("isolated_only", DataType::Boolean, true),
         ]),
 
         // **The one absence that can be proved** rather than inferred: rows

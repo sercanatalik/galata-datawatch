@@ -10,11 +10,13 @@
 //! bytes.
 
 use galata_wire::{
-    Candle, Envelope, Event, Funding, Mark, Quote, Side, Ticker, Trade, Venue, millis_to_micros,
+    Candle, Envelope, Event, Funding, Instrument, Mark, Num, Quote, Side, Ticker, Trade, Venue,
+    millis_to_micros,
 };
 
 use super::wire::{
-    AssetCtx, FundingRow, Peek, WsActiveAssetCtx, WsBbo, WsCandle, WsTrade, is_control_frame,
+    AssetCtx, FundingRow, META, MIN_ORDER_VALUE, Meta, PERP_MAX_DECIMALS, PRICE_FIGURES, Peek,
+    WsActiveAssetCtx, WsBbo, WsCandle, WsTrade, collateral_name, is_control_frame,
 };
 use crate::normalise::NormaliseError;
 use crate::record::Payload;
@@ -103,8 +105,70 @@ pub fn normalise(
             let ctx: WsActiveAssetCtx = typed(data)?;
             asset_ctx(venue, symbols, raw, &ctx.coin, &ctx.ctx)
         }
+        META => {
+            let meta: Meta = typed(data)?;
+            Ok(instruments(venue, symbols, raw, &meta))
+        }
         other => Err(NormaliseError::UnknownChannel(other.to_string())),
     }
+}
+
+/// **One dex's universe, as reference data for the captured coins on it**
+/// (`normalise-instrument-reference`).
+///
+/// A coin nobody declared is in the answer and not in the result: reference
+/// data is for what capture follows. Each row states the venue's rules in the
+/// one format — the grid `10^-(6 - szDecimals)` with five significant figures,
+/// a lot and size minimum of `10^-szDecimals`, and a minimum value of 10 in
+/// the dex's collateral. The receipt time is `observed_at`: the venue states
+/// no time for it.
+fn instruments(venue: &Venue, symbols: &Symbols, raw: &Payload, meta: &Meta) -> Vec<Envelope> {
+    let quote = collateral_name(meta.collateral_token).unwrap_or_default();
+    meta.universe
+        .iter()
+        .enumerate()
+        .filter_map(|(position, asset)| {
+            let ticker = symbols.resolve(META, &asset.name)?.clone();
+            let (dex, coin) = match asset.name.split_once(':') {
+                Some((dex, coin)) => (Some(dex.to_string()), coin),
+                None => (None, asset.name.as_str()),
+            };
+            let decimals = PERP_MAX_DECIMALS.saturating_sub(asset.sz_decimals);
+            let lot = Num::new(1, asset.sz_decimals);
+            Some(Envelope::new(
+                venue.clone(),
+                ticker,
+                None,
+                raw.recv_micros,
+                Event::Instrument(Instrument {
+                    tick_size: Num::new(1, decimals),
+                    lot_size: lot,
+                    min_size: lot,
+                    contract_type: "perp".to_string(),
+                    base: coin.to_string(),
+                    quote: quote.to_string(),
+                    // Measured 2026-09-20: the `xyz` coins trade every hour of
+                    // a weekend, like the main dex's.
+                    hours: "continuous".to_string(),
+                    active: !asset.is_delisted.unwrap_or(false),
+                    venue_index: u32::try_from(position).ok(),
+                    ui_multiplier: None,
+                    observed_at: raw.recv_micros,
+                    strike: None,
+                    expiry_micros: None,
+                    right: None,
+                    venue_symbol: Some(asset.name.clone()),
+                    dex,
+                    price_figures: Some(PRICE_FIGURES),
+                    min_notional: Some(Num::from(MIN_ORDER_VALUE)),
+                    max_leverage: asset.max_leverage,
+                    // The venue answers this for every coin, by omitting it
+                    // where it is false.
+                    isolated_only: Some(asset.only_isolated.unwrap_or(false)),
+                }),
+            ))
+        })
+        .collect()
 }
 
 fn resolve(symbols: &Symbols, channel: &str, venue_symbol: &str) -> Result<Ticker, NormaliseError> {

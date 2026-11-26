@@ -282,6 +282,31 @@ Hyperliquid captures `bbo`, trades, candles and `activeAssetCtx`. Its `bbo`
 and rh-crypto's `best_bid_ask` share one `quotes` dataset, so a cross-venue
 quote comparison is a single-table query.
 
+**Every venue's reference data is in one format** (`instruments`): galata's
+ticker beside the venue's own symbol and dex, the contract, base and quote,
+and the venue's price, size and margin rules, each stated as the venue states
+it and absent where it states nothing. `Instrument::price_is_valid` tells
+whether a price is one the venue takes, from the row alone. A row carries the
+moment it was read, so the tape answers what an instrument's terms were then.
+
+- **Hyperliquid** reads each captured dex's `meta` at capture's start and
+  every five minutes, one request per dex, and records a row per captured
+  coin. Its prices have no fixed tick: `tick_size` is the finest grid its
+  decimal places allow, `10^-(6 - szDecimals)`, and `price_figures` (5) caps
+  a price's significant figures, a whole number excepted. Its minimum order is
+  a value, `min_notional` (10 in the dex's collateral), with `min_size` the lot
+  size. `max_leverage` and `isolated_only` are the venue's own. The two rules
+  the venue documents and serves nowhere, the five figures and the minimum
+  value, are named constants in the adapter. The quote is the dex's collateral
+  token, named through the venue's canonical tokens (`USDC`); one not known
+  here is left empty. A coin the venue has delisted is recorded inactive and
+  leaves the set.
+- **Derive** reads each instrument's reference data every five minutes, with
+  a fixed `tick_size`, a size minimum, and its venue symbol; it states no
+  significant-figure cap, value minimum or leverage, so those are absent.
+- A reference read that fails is said once, capture goes on, and it is asked
+  again at the next interval; its return is said once too.
+
 **A venue can live in your own crate.** `Adapter`'s documentation carries a
 worked example that compiles.
 [`tests/out_of_tree_venue.rs`](crates/galata-datawatch/tests/out_of_tree_venue.rs)

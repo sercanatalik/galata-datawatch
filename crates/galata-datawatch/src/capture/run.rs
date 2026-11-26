@@ -149,6 +149,9 @@ pub struct Capture {
     /// The reference refresh, where the venue has reference data it will only
     /// answer when asked and the binary supplied a way to ask.
     referencer: Option<Referencer>,
+    /// Whether the last reference refresh failed, so a run of failures is said
+    /// once and its end once, as the sink's refusals are.
+    reference_failing: bool,
 }
 
 /// A historical fetch the live loop can start without waiting for it.
@@ -368,6 +371,7 @@ impl Capture {
             filler: None,
             expiries: BTreeMap::new(),
             referencer: None,
+            reference_failing: false,
         }
     }
 
@@ -622,6 +626,7 @@ impl Capture {
                 answers.extend(batch);
             }
         }
+        let answered = !answers.is_empty();
         let mut failed = 0usize;
         for answer in answers {
             match answer {
@@ -629,11 +634,17 @@ impl Capture {
                 Err(_) => failed += 1,
             }
         }
-        if failed > 0 {
+        // **On the edge, not per refresh.** A venue that stays unreadable for
+        // an hour is one line, and its return another.
+        if failed > 0 && !self.reference_failing {
             tracing::warn!(
                 failed,
-                "reference data could not be read for some instruments; asked again next refresh"
+                "reference data could not be read; capture goes on, and asks again each refresh"
             );
+            self.reference_failing = true;
+        } else if answered && failed == 0 && self.reference_failing {
+            tracing::info!("reference data read again");
+            self.reference_failing = false;
         }
         let symbols = self.reference_symbols();
         if let Some(referencer) = &mut self.referencer
@@ -4263,5 +4274,137 @@ mod tests {
         assert_eq!(btc, cap as usize, "no page past the cap");
         // And the loop is unharmed: a turn after the stop is still Ok.
         f.capture.fill_step(f.clock.now_micros()).unwrap();
+    }
+
+    // ---- reference data (`normalise-instrument-reference`) ----------------
+
+    /// The main dex's `meta`, recorded 2026-11-26.
+    fn meta_main() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hyperliquid/meta_main.json");
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// Every instrument row the sink was handed, by ticker, in order.
+    fn instruments_emitted(f: &Fixture) -> Vec<String> {
+        f.sink
+            .emitted()
+            .into_iter()
+            .filter(|e| matches!(e.event, Event::Instrument(_)))
+            .filter_map(|e| e.ticker().map(|t| t.as_str().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_start_records_every_captured_instruments_reference_data() {
+        // What the boot does with the universe check's answers: each crosses
+        // the one path, archived before it is believed.
+        let mut f = fixture(1_000 * SEC);
+        let page = crate::adapters::hyperliquid::meta_page(meta_main(), f.clock.now_micros());
+        f.capture.take(page).unwrap();
+        assert_eq!(instruments_emitted(&f), ["BTC", "ETH"]);
+        f.capture.shutdown().unwrap();
+
+        let record = crate::replay::read_all(&f._root.path().join("archive")).unwrap();
+        let meta: Vec<_> = record
+            .iter()
+            .map(|r| r.payload())
+            .filter(|p| p.channel == "meta")
+            .collect();
+        assert_eq!(meta.len(), 1, "the answer itself is in the record");
+        assert_eq!(meta[0].kind, "instruments");
+    }
+
+    /// Whatever a test makes the loop log, as text.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Lines {
+        type Writer = Lines;
+        fn make_writer(&'a self) -> Lines {
+            self.clone()
+        }
+    }
+
+    impl Lines {
+        fn count(&self, needle: &str) -> usize {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .lines()
+                .filter(|l| l.contains(needle))
+                .count()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_reference_read_is_said_once_and_capture_goes_on() {
+        let lines = Lines::default();
+        let _logging = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(lines.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let mut f = fixture(1_000 * SEC);
+        let every = crate::adapters::hyperliquid::REFERENCE_INTERVAL_MICROS;
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (count, clock) = (asked.clone(), f.clock.clone());
+        // Three reads the venue does not answer, then one it does.
+        f.capture.refresh_reference_with(every, move |dexes| {
+            let call = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let now = clock.now_micros();
+            async move {
+                dexes
+                    .into_iter()
+                    .map(|_| {
+                        if call < 3 {
+                            Err(FetchFailure::from("the venue did not answer".to_string()))
+                        } else {
+                            Ok(crate::adapters::hyperliquid::meta_page(meta_main(), now))
+                        }
+                    })
+                    .collect()
+            }
+        });
+
+        let mut quotes = 0;
+        for round in 0..5 {
+            f.clock.advance(every);
+            // Takes the last round's answers, and asks again.
+            f.capture.reference_step(f.clock.now_micros()).unwrap();
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            // Archiving does not wait on it, failing or not.
+            f.capture
+                .take_frame(&bbo("BTC", 1_000_000 + round * 300_000))
+                .unwrap();
+            quotes += 1;
+        }
+
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(
+            lines.count("reference data could not be read"),
+            1,
+            "three failures in a row are one line"
+        );
+        assert_eq!(lines.count("reference data read again"), 1);
+        assert_eq!(instruments_emitted(&f), ["BTC", "ETH"], "recorded again");
+        let emitted_quotes = f
+            .sink
+            .emitted()
+            .iter()
+            .filter(|e| matches!(e.event, Event::Quote(_)))
+            .count();
+        assert_eq!(emitted_quotes, quotes);
     }
 }

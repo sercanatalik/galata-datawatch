@@ -298,6 +298,15 @@ fn reference(
             right: details
                 .map(|d| right_of(&d.option_type).map(str::to_string))
                 .transpose()?,
+            // The venue's own name, as its answer spells it.
+            venue_symbol: Some(spec.instrument_name.clone()),
+            // A fixed tick and a size minimum, one market: nothing more to
+            // state (`normalise-instrument-reference`).
+            dex: None,
+            price_figures: None,
+            min_notional: None,
+            max_leverage: None,
+            isolated_only: None,
         }),
     )])
 }

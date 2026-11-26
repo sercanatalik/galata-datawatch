@@ -96,6 +96,34 @@ const _: () = assert!(
     "a handover waiting for the old connection's answer would outlive the venue's lifetime"
 );
 
+/// **How often the venue's universe is read again for reference data**: at
+/// capture's start, then this often, as Derive's is
+/// (`normalise-instrument-reference`, design D4). One request per captured dex.
+pub const REFERENCE_INTERVAL_MICROS: i64 = 5 * 60 * 1_000_000;
+
+/// A dex's `meta` answer, as a payload: recorded under `instruments`, on the
+/// venue's own request name, naming no one symbol because it answers for every
+/// coin on the dex.
+pub fn meta_page(bytes: Vec<u8>, recv_micros: i64) -> Payload {
+    Payload {
+        seq: 0,
+        recv_micros,
+        address: PayloadAddress::Venue(VENUE.into()),
+        channel: wire::META.to_string(),
+        kind: galata_wire::Kind::Instruments.as_str().to_string(),
+        symbol: None,
+        origin: Origin::Fetched,
+        payload: bytes,
+    }
+}
+
+/// The coins a `meta` answer lists, for the universe check.
+pub fn listed(bytes: &[u8]) -> Result<Vec<String>, NormaliseError> {
+    let meta: wire::Meta =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    Ok(meta.universe.into_iter().map(|a| a.name).collect())
+}
+
 /// The venue's label as a bar width. The inverse of
 /// [`Hyperliquid::interval_label`], kept beside it so the two cannot drift.
 fn interval_micros_of(label: &str) -> Option<i64> {
@@ -455,6 +483,16 @@ impl Adapter for Hyperliquid {
         self.symbols.resolve(channel, venue_symbol).cloned()
     }
 
+    /// **Each captured dex's universe, every five minutes**, for reference
+    /// data. The symbols asked about are the dexes, the main one as `""`;
+    /// one answer covers every captured coin on its dex.
+    fn reference(&self) -> Option<crate::venue::Reference> {
+        Some(crate::venue::Reference {
+            interval_micros: REFERENCE_INTERVAL_MICROS,
+            symbols: self.dexes(),
+        })
+    }
+
     fn classify(&self, bytes: &[u8], recv_micros: i64) -> Payload {
         let (channel, symbol) = wire::envelope_of(bytes);
         Payload {
@@ -807,5 +845,188 @@ mod tests {
     fn an_unknown_market_is_refused_by_listing_the_known() {
         let err = Market::parse("devnet").unwrap_err().to_string();
         assert!(err.contains("mainnet") && err.contains("testnet"), "{err}");
+    }
+
+    // ---- reference data (`normalise-instrument-reference`) ----------------
+
+    /// A recorded reply, 2026-11-26: `meta` for the main dex and for `xyz` in
+    /// full, and `spotMeta` cut to its first three tokens.
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hyperliquid")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The deployment's nine, as `var/datawatch.local.toml` declares them.
+    fn deployed() -> Hyperliquid {
+        let mut instruments: Vec<Instrument> = ["BTC", "ETH", "HYPE"]
+            .into_iter()
+            .map(Instrument::main)
+            .collect();
+        for coin in ["CL", "XYZ100", "GOLD", "NVDA", "SILVER", "ANT"] {
+            instruments.push(Instrument::on_dex(coin, "xyz"));
+        }
+        Hyperliquid::new(config(instruments), None).unwrap()
+    }
+
+    /// The reference rows a `meta` reply normalises into, by ticker.
+    fn reference(
+        adapter: &Hyperliquid,
+        bytes: Vec<u8>,
+    ) -> BTreeMap<String, galata_wire::Instrument> {
+        let page = meta_page(bytes, 7_000);
+        assert_eq!(page.kind, "instruments");
+        assert_eq!(page.channel, wire::META);
+        adapter
+            .normalise(&page)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                assert_eq!(e.at_micros, None, "the venue states no time for it");
+                assert_eq!(e.recv_micros, 7_000);
+                let ticker = e.ticker().unwrap().as_str().to_string();
+                match e.event {
+                    galata_wire::Event::Instrument(i) => (ticker, i),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    fn num(s: &str) -> galata_wire::Num {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_meta_reply_states_what_reference_data_is_built_from() {
+        let main: wire::Meta = serde_json::from_slice(&fixture("meta_main.json")).unwrap();
+        assert_eq!(main.collateral_token, Some(0));
+        let btc = main.universe.iter().find(|a| a.name == "BTC").unwrap();
+        assert_eq!(btc.sz_decimals, 5);
+        assert_eq!(btc.max_leverage, Some(40));
+        assert_eq!(btc.only_isolated, None, "omitted where false");
+        let matic = main.universe.iter().find(|a| a.name == "MATIC").unwrap();
+        assert_eq!(matic.is_delisted, Some(true));
+
+        let xyz: wire::Meta = serde_json::from_slice(&fixture("meta_xyz.json")).unwrap();
+        assert_eq!(xyz.collateral_token, Some(0));
+        let uranium = xyz
+            .universe
+            .iter()
+            .find(|a| a.name == "xyz:URANIUM")
+            .unwrap();
+        assert_eq!(uranium.only_isolated, Some(true));
+        assert_eq!(uranium.is_delisted, Some(true));
+        assert!(
+            listed(&fixture("meta_xyz.json"))
+                .unwrap()
+                .contains(&"xyz:GOLD".into())
+        );
+        assert!(listed(b"{\"not\":\"a universe\"}").is_err());
+    }
+
+    #[test]
+    fn the_collateral_table_agrees_with_the_venues_tokens() {
+        // `meta` names its collateral by index; the name is `spotMeta`'s.
+        let spot: serde_json::Value =
+            serde_json::from_slice(&fixture("spot_meta_tokens.json")).unwrap();
+        for (index, name) in wire::COLLATERAL {
+            let token = spot["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["index"] == *index)
+                .unwrap();
+            assert_eq!(token["name"], *name);
+        }
+        assert_eq!(wire::collateral_name(Some(0)), Some("USDC"));
+        assert_eq!(wire::collateral_name(Some(999)), None);
+        assert_eq!(wire::collateral_name(None), None);
+    }
+
+    #[test]
+    fn each_dexs_reply_becomes_one_row_per_captured_coin_on_it() {
+        let adapter = deployed();
+        let main = reference(&adapter, fixture("meta_main.json"));
+        assert_eq!(
+            main.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["BTC", "ETH", "HYPE"],
+            "the 232 coins nobody declared yield nothing"
+        );
+        let xyz = reference(&adapter, fixture("meta_xyz.json"));
+        assert_eq!(
+            xyz.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["ANT", "CL", "GOLD", "NVDA", "SILVER", "XYZ100"]
+        );
+    }
+
+    #[test]
+    fn a_main_dex_perp_states_the_venues_rules_in_the_one_format() {
+        let btc = reference(&deployed(), fixture("meta_main.json"))
+            .remove("BTC")
+            .unwrap();
+        // szDecimals 5: one decimal place for a price, five for a size.
+        assert_eq!(btc.tick_size, num("0.1"));
+        assert_eq!(btc.price_figures, Some(5));
+        assert_eq!(btc.lot_size, num("0.00001"));
+        assert_eq!(btc.min_size, num("0.00001"));
+        assert_eq!(btc.min_notional, Some(num("10")));
+        assert_eq!(btc.max_leverage, Some(40));
+        assert_eq!(btc.isolated_only, Some(false));
+        assert_eq!(btc.contract_type, "perp");
+        assert_eq!((btc.base.as_str(), btc.quote.as_str()), ("BTC", "USDC"));
+        assert_eq!(btc.hours, "continuous");
+        assert!(btc.active);
+        assert_eq!(btc.venue_symbol.as_deref(), Some("BTC"));
+        assert_eq!(btc.dex, None);
+        assert_eq!(btc.venue_index, Some(0), "its place in the main dex's list");
+        assert_eq!(btc.observed_at, 7_000);
+        // The spec's scenario, on the row itself.
+        assert!(btc.price_is_valid(num("60710")));
+        assert!(!btc.price_is_valid(num("60710.5")));
+    }
+
+    #[test]
+    fn a_hip3_perp_names_its_dex_and_the_venues_symbol() {
+        let gold = reference(&deployed(), fixture("meta_xyz.json"))
+            .remove("GOLD")
+            .unwrap();
+        assert_eq!(gold.venue_symbol.as_deref(), Some("xyz:GOLD"));
+        assert_eq!(gold.dex.as_deref(), Some("xyz"));
+        assert_eq!(gold.base, "GOLD");
+        // szDecimals 4: two decimal places for a price.
+        assert_eq!(gold.tick_size, num("0.01"));
+        assert_eq!(gold.lot_size, num("0.0001"));
+        assert_eq!(gold.max_leverage, Some(25));
+    }
+
+    #[test]
+    fn a_delisted_isolated_only_coin_is_stated_inactive_and_isolated() {
+        let mut instruments = deployed().instruments().to_vec();
+        instruments.push(Instrument::on_dex("URANIUM", "xyz"));
+        let adapter = Hyperliquid::new(config(instruments), None).unwrap();
+        let uranium = reference(&adapter, fixture("meta_xyz.json"))
+            .remove("URANIUM")
+            .unwrap();
+        assert!(!uranium.active);
+        assert_eq!(uranium.isolated_only, Some(true));
+    }
+
+    #[test]
+    fn a_collateral_not_held_here_leaves_the_quote_empty() {
+        let bytes = String::from_utf8(fixture("meta_main.json"))
+            .unwrap()
+            .replace("\"collateralToken\":0", "\"collateralToken\":360")
+            .into_bytes();
+        let btc = reference(&deployed(), bytes).remove("BTC").unwrap();
+        assert_eq!(btc.quote, "", "absent rather than guessed");
+    }
+
+    #[test]
+    fn the_universe_is_read_again_per_dex_every_five_minutes() {
+        let reference = deployed().reference().unwrap();
+        assert_eq!(reference.interval_micros, 5 * 60 * 1_000_000);
+        assert_eq!(reference.symbols, ["", "xyz"]);
     }
 }

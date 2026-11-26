@@ -1175,6 +1175,27 @@ fn a_perpetuals_reference_data_states_a_perpetual_and_no_option_terms() {
 }
 
 #[test]
+fn derives_reference_data_names_itself_and_states_no_more_than_the_venue_does() {
+    // `normalise-instrument-reference`: the venue's own name beside the
+    // ticker; a fixed tick and a size minimum, so no figure limit, no value
+    // minimum, no leverage and no dex.
+    let adapter = shipped();
+    for (name, file) in [
+        ("BTC-PERP", "get_instrument_perp.json"),
+        (LIVE, "get_instrument_live.json"),
+    ] {
+        let row = instrument(&adapter, name, file);
+        assert_eq!(row.venue_symbol.as_deref(), Some(name));
+        assert_eq!(row.dex, None, "{name}");
+        assert_eq!(row.price_figures, None, "{name}");
+        assert_eq!(row.min_notional, None, "{name}");
+        assert_eq!(row.max_leverage, None, "{name}");
+        assert_eq!(row.isolated_only, None, "{name}");
+        assert!(row.price_is_valid(row.tick_size * Num::from(7)), "{name}");
+    }
+}
+
+#[test]
 fn a_perpetual_is_not_a_name_an_operator_may_declare() {
     // It follows from the set. Declared, it is refused as any name that is
     // not an option is, at load and at construction.
@@ -1360,6 +1381,42 @@ mod one_path {
                 "kind=quotes"
             ]
         );
+
+        // The one format reaches the tape through the rebuild: every
+        // instrument row names the venue's own symbol, which is its ticker
+        // here (`normalise-instrument-reference`).
+        {
+            use arrow::array::{Array, StringArray};
+            let reader =
+                crate::tape::Reader::open(dir.path().join("tape"), &["kind=instruments"]).unwrap();
+            let batches = reader
+                .view(crate::tape::Window {
+                    kind: galata_wire::Kind::Instruments,
+                    from_micros: i64::MIN,
+                    to_micros: i64::MAX,
+                    ticker: None,
+                })
+                .unwrap();
+            let mut rows = 0;
+            for batch in &batches {
+                let text = |name: &str| {
+                    batch
+                        .column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap()
+                        .clone()
+                };
+                let (tickers, symbols) = (text("ticker"), text("venue_symbol"));
+                for i in 0..batch.num_rows() {
+                    assert!(!symbols.is_null(i));
+                    assert_eq!(symbols.value(i), tickers.value(i));
+                    rows += 1;
+                }
+            }
+            assert!(rows > 0, "the rebuild wrote no instrument row");
+        }
 
         // The tape is a cache: a second rebuild from the same record, into an
         // empty tape, is the same files with the same bytes.

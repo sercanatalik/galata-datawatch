@@ -11,7 +11,7 @@
 
 use galata_wire::Origin;
 
-use super::VENUE;
+use super::{VENUE, meta_page, wire};
 use crate::record::{Payload, PayloadAddress};
 
 /// The one path this client asks for.
@@ -147,30 +147,22 @@ impl Client {
         })
     }
 
-    /// Every coin a dex lists.
+    /// A dex's `meta`, **as the venue's bytes**: every coin it lists, with the
+    /// rules reference data is normalised from.
     ///
     /// **One request answers for a whole dex.** `dex` is empty for the main
-    /// perp dex.
-    pub async fn universe(&self, dex: &str) -> Result<Vec<String>, FetchError> {
-        let body = serde_json::json!({ "type": "meta", "dex": dex });
+    /// perp dex. The answer is a payload rather than a list, so that what the
+    /// universe check and the reference data were decided on is what the
+    /// record holds (`normalise-instrument-reference`). A reply that is not a
+    /// universe is refused here, before anything is archived as one.
+    pub async fn meta(&self, dex: &str, now_micros: i64) -> Result<Payload, FetchError> {
+        let body = serde_json::json!({ "type": wire::META, "dex": dex });
         let bytes = self.post(&body).await?;
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| FetchError::Universe {
-                venue: VENUE,
-                detail: e.to_string(),
-            })?;
-        let universe = value
-            .get("universe")
-            .and_then(|u| u.as_array())
-            .ok_or_else(|| FetchError::Universe {
-                venue: VENUE,
-                detail: "no `universe` array".into(),
-            })?;
-        Ok(universe
-            .iter()
-            .filter_map(|a| a.get("name").and_then(|n| n.as_str()))
-            .map(str::to_string)
-            .collect())
+        serde_json::from_slice::<wire::Meta>(&bytes).map_err(|e| FetchError::Universe {
+            venue: VENUE,
+            detail: e.to_string(),
+        })?;
+        Ok(meta_page(bytes, now_micros))
     }
 
     /// One account's perp state on one dex, raw. `dex` is empty for the main one.

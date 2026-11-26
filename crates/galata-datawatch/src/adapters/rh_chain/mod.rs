@@ -213,8 +213,10 @@ impl RhChain {
             return Ok(Vec::new());
         };
         let declared = self.decimals.get(&contract).copied().unwrap_or(18);
-        let instrument =
+        let mut instrument =
             erc8056::instrument(&answers, ticker.as_str(), declared, payload.recv_micros);
+        // The chain names a token by its contract, as the payload spells it.
+        instrument.venue_symbol = payload.symbol.clone();
         Ok(vec![galata_wire::Envelope::new(
             self.venue().clone(),
             ticker.clone(),

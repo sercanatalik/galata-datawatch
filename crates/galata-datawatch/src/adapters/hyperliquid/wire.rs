@@ -283,6 +283,79 @@ pub struct FundingRow {
     pub time: i64,
 }
 
+/// The request type that reads one dex's universe, and the channel its answer
+/// is recorded under.
+pub const META: &str = "meta";
+
+/// One dex's `meta` answer: every coin it lists, and the token it margins in.
+///
+/// **One request answers for a whole dex**, so the reference data of every
+/// captured instrument on it comes from one answer
+/// (`normalise-instrument-reference`, design D4).
+#[derive(Debug, Deserialize)]
+pub struct Meta {
+    /// Every coin the dex lists, in the venue's own order — the position is
+    /// the asset's index on this dex.
+    pub universe: Vec<AssetMeta>,
+    /// The spot token the dex is margined in, by its index in `spotMeta`.
+    /// Recorded 2026-11-26: `0` for the main dex and for `xyz`.
+    #[serde(default, rename = "collateralToken")]
+    pub collateral_token: Option<u32>,
+}
+
+/// One coin of a dex's universe, as `meta` states it.
+#[derive(Debug, Deserialize)]
+pub struct AssetMeta {
+    /// The venue's own symbol: `BTC`, `xyz:GOLD`.
+    pub name: String,
+    /// How many decimal places a size may have; it also bounds a price's.
+    #[serde(rename = "szDecimals")]
+    pub sz_decimals: u32,
+    /// The most leverage the venue allows on it.
+    #[serde(default, rename = "maxLeverage")]
+    pub max_leverage: Option<u32>,
+    /// Present, and `true`, only where the coin allows isolated margin alone;
+    /// the venue omits it otherwise (`xyz:URANIUM`, recorded 2026-11-26).
+    #[serde(default, rename = "onlyIsolated")]
+    pub only_isolated: Option<bool>,
+    /// Present, and `true`, only where the venue has delisted the coin.
+    #[serde(default, rename = "isDelisted")]
+    pub is_delisted: Option<bool>,
+}
+
+/// **The decimal places a perp price may have, at most, is this less
+/// `szDecimals`.** The venue documents it (*Tick and lot size*) and serves
+/// nothing that states it; held here, named, and checked against every
+/// recorded quote (`normalise-instrument-reference`, task 5.3).
+pub const PERP_MAX_DECIMALS: u32 = 6;
+
+/// **The significant figures a price may have, at most**, unless it is a
+/// whole number. Documented beside [`PERP_MAX_DECIMALS`], served by nothing.
+pub const PRICE_FIGURES: u8 = 5;
+
+/// **The smallest order, as a value in the dex's collateral.** The venue
+/// documents it and refuses a smaller order with its own words ("Order must
+/// have minimum value of $10"); `meta` states no size minimum at all.
+pub const MIN_ORDER_VALUE: i64 = 10;
+
+/// The spot tokens a dex may be margined in, **by the index `meta` states**.
+///
+/// `meta` names its collateral only by index, and the name lives in another
+/// answer (`spotMeta`), which a normaliser of one answer cannot read: so the
+/// venue's canonical tokens are held here, each checked against a recorded
+/// `spotMeta` (2026-11-26: index 0 is `USDC`, canonical). A dex margined in a
+/// token not here has its quote left empty rather than guessed.
+pub const COLLATERAL: &[(u32, &str)] = &[(0, "USDC")];
+
+/// The name of the token a dex is margined in, where it is one held here.
+pub fn collateral_name(index: Option<u32>) -> Option<&'static str> {
+    let index = index?;
+    COLLATERAL
+        .iter()
+        .find(|(held, _)| *held == index)
+        .map(|(_, name)| *name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

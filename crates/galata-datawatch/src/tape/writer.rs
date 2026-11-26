@@ -377,6 +377,15 @@ fn flag<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Envelope) -> bool) -> ArrayRef {
     std::sync::Arc::new(builder.finish())
 }
 
+/// A flag the source may not state: null, not `false`, where it is silent.
+fn maybe_flag<R: Borrow<Row>>(rows: &[R], f: impl Fn(&Envelope) -> Option<bool>) -> ArrayRef {
+    let mut builder = BooleanBuilder::with_capacity(rows.len());
+    for row in rows {
+        builder.append_option(f(&row.borrow().envelope));
+    }
+    std::sync::Arc::new(builder.finish())
+}
+
 /// The five every dataset carries.
 fn common<R: Borrow<Row>>(rows: &[R]) -> Vec<ArrayRef> {
     vec![
@@ -498,6 +507,18 @@ fn batch_for(kind: Kind, rows: &[Row]) -> Result<RecordBatch, TapeError> {
             columns.push(int(rows, |e| instrument(e).and_then(|i| i.expiry_micros)));
             columns.push(text(rows, |e| {
                 instrument(e).and_then(|i| i.right.as_deref())
+            }));
+            columns.push(text(rows, |e| {
+                instrument(e).and_then(|i| i.venue_symbol.as_deref())
+            }));
+            columns.push(text(rows, |e| instrument(e).and_then(|i| i.dex.as_deref())));
+            columns.push(u32s(rows, |e| {
+                instrument(e).and_then(|i| i.price_figures.map(u32::from))
+            }));
+            columns.push(dec(rows, |e| instrument(e).and_then(|i| i.min_notional))?);
+            columns.push(u32s(rows, |e| instrument(e).and_then(|i| i.max_leverage)));
+            columns.push(maybe_flag(rows, |e| {
+                instrument(e).and_then(|i| i.isolated_only)
             }));
         }
         Kind::OptionPricing => {
@@ -1026,11 +1047,27 @@ mod tests {
             strike: strike.map(|s| Num::from_str(s).unwrap()),
             expiry_micros: strike.map(|_| 1_798_185_600_000_000),
             right: right.map(str::to_string),
+            venue_symbol: None,
+            dex: None,
+            price_figures: None,
+            min_notional: None,
+            max_leverage: None,
+            isolated_only: None,
         })
     }
 
+    /// The columns `normalise-instrument-reference` appended, last of all.
+    const ONE_FORMAT: [&str; 6] = [
+        "venue_symbol",
+        "dex",
+        "price_figures",
+        "min_notional",
+        "max_leverage",
+        "isolated_only",
+    ];
+
     #[test]
-    fn the_instrument_columns_end_with_an_options_terms() {
+    fn the_instrument_columns_end_with_an_options_terms_then_the_one_format() {
         let root = tempfile::tempdir().unwrap();
         let mut tape = Tape::open(root.path());
         tape.take(an_option(
@@ -1042,10 +1079,19 @@ mod tests {
         let schema = batch.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         // Appended: every column an older reader knows keeps its place.
+        let options = names.len() - ONE_FORMAT.len() - 4;
         assert_eq!(
-            &names[names.len() - 4..],
+            &names[options..options + 4],
             ["observed_at", "strike", "expiry_micros", "right"]
         );
+        assert_eq!(&names[names.len() - ONE_FORMAT.len()..], ONE_FORMAT);
+        for column in ONE_FORMAT {
+            assert_eq!(
+                batch.column_by_name(column).unwrap().null_count(),
+                1,
+                "{column}: a venue that states nothing writes null"
+            );
+        }
         assert_eq!(
             decimals(&batch, "strike"),
             vec![Some(60_000_000_000_000_000_000_000)]
@@ -1063,7 +1109,7 @@ mod tests {
         tape.take(an_option("BTC", an_instrument(None, None)));
         let written = tape.commit().unwrap();
         let new = read(&written[0]);
-        let old_width = new.num_columns() - 3;
+        let old_width = new.num_columns() - 3 - ONE_FORMAT.len();
         let old = new.project(&(0..old_width).collect::<Vec<_>>()).unwrap();
         std::fs::remove_file(&written[0]).unwrap();
         galata_segments::write_segment_labelled(
@@ -1091,5 +1137,86 @@ mod tests {
         assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
         assert_eq!(rows[0].num_columns(), old_width);
         assert!(rows[0].column_by_name("strike").is_none());
+    }
+
+    #[test]
+    fn an_instruments_segment_written_before_the_one_format_is_still_read() {
+        // Derive's rows on disk from before `normalise-instrument-reference`
+        // hold the option terms and none of the six: still a segment, read
+        // with those columns absent.
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        tape.take(an_option("BTC-PERP", an_instrument(None, None)));
+        let written = tape.commit().unwrap();
+        let new = read(&written[0]);
+        let old_width = new.num_columns() - ONE_FORMAT.len();
+        let old = new.project(&(0..old_width).collect::<Vec<_>>()).unwrap();
+        std::fs::remove_file(&written[0]).unwrap();
+        galata_segments::write_segment_labelled(
+            written[0].parent().unwrap(),
+            Cursor::Seq { first: 4, last: 4 },
+            &old,
+            Codec::Zstd,
+            &PRUNE_ON,
+            &[
+                (VENUE_LABEL, "derive-xyz"),
+                (SOURCE_DAY_LABEL, "1970-01-02"),
+            ],
+        )
+        .unwrap();
+
+        let reader = crate::tape::Reader::open(root.path(), &["kind=instruments"]).unwrap();
+        let rows = reader
+            .view(crate::tape::Window {
+                kind: Kind::Instruments,
+                from_micros: 0,
+                to_micros: 3 * DAY,
+                ticker: None,
+            })
+            .unwrap();
+        assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        assert!(rows[0].column_by_name("right").is_some());
+        for column in ONE_FORMAT {
+            assert!(rows[0].column_by_name(column).is_none(), "{column}");
+        }
+    }
+
+    #[test]
+    fn a_venue_stating_the_one_format_writes_every_column() {
+        use arrow::array::{Array, BooleanArray, UInt32Array};
+        let root = tempfile::tempdir().unwrap();
+        let mut tape = Tape::open(root.path());
+        let Event::Instrument(mut perp) = an_instrument(None, None) else {
+            unreachable!()
+        };
+        perp.contract_type = "perp".into();
+        perp.venue_symbol = Some("xyz:GOLD".into());
+        perp.dex = Some("xyz".into());
+        perp.price_figures = Some(5);
+        perp.min_notional = Some(Num::from_str("10").unwrap());
+        perp.max_leverage = Some(20);
+        perp.isolated_only = Some(false);
+        tape.take(an_option("GOLD", Event::Instrument(perp)));
+        let written = tape.commit().unwrap();
+        let batch = read(&written[0]);
+        assert_eq!(strings(&batch, "venue_symbol"), vec!["xyz:GOLD"]);
+        assert_eq!(strings(&batch, "dex"), vec!["xyz"]);
+        assert_eq!(
+            decimals(&batch, "min_notional"),
+            vec![Some(10_000_000_000_000_000_000)]
+        );
+        let u32s = |name: &str| {
+            let column = batch.column_by_name(name).unwrap();
+            column
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap()
+                .value(0)
+        };
+        assert_eq!(u32s("price_figures"), 5);
+        assert_eq!(u32s("max_leverage"), 20);
+        let isolated = batch.column_by_name("isolated_only").unwrap();
+        let isolated = isolated.as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert!(!isolated.is_null(0) && !isolated.value(0));
     }
 }

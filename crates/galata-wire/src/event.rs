@@ -703,13 +703,28 @@ pub struct Session {
 }
 
 /// Reference data for one instrument. Slowly changing.
+///
+/// **One format for every venue**, stating each venue's rules without loss
+/// (`normalise-instrument-reference`). A field the venue does not state is
+/// absent, never a guess: Derive states a fixed tick and a size minimum, and
+/// leaves `price_figures`, `min_notional` and the leverage fields empty;
+/// Hyperliquid states a significant-figure rule and a value minimum, and
+/// fills them. [`Instrument::price_is_valid`] applies the price rule.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Instrument {
-    /// The smallest price increment.
+    /// The grid every valid price lies on.
+    ///
+    /// Derive's fixed tick. Hyperliquid has no fixed tick: its grid is the
+    /// finest its decimal places allow, `10^-(6 - szDecimals)` for a perp, and
+    /// [`Instrument::price_figures`] limits a price further.
     pub tick_size: Num,
     /// The contract or lot size.
     pub lot_size: Num,
-    /// The smallest order.
+    /// The smallest order, as a size.
+    ///
+    /// Hyperliquid sets its minimum as a value, not a size: there it is the
+    /// lot size, the smallest size the grid can state, and
+    /// [`Instrument::min_notional`] carries the value.
     pub min_size: Num,
     /// `perp` | `spot` | `stock` | `future` | `option` | `token`.
     pub contract_type: String,
@@ -752,6 +767,66 @@ pub struct Instrument {
     /// `call` or `put`. Absent for anything that is not an option.
     #[serde(default)]
     pub right: Option<String>,
+    /// **The venue's own name** for the instrument, as its wire spells it:
+    /// `xyz:GOLD`, `BTC-PERP`.
+    ///
+    /// Recorded, never recomposed by a reader: the ticker is galata's, and on a
+    /// venue with several dexes the ticker alone does not say which. The fields
+    /// below are defaulted, so a row written before them still reads.
+    #[serde(default)]
+    pub venue_symbol: Option<String>,
+    /// The dex the instrument is listed on, where the venue has more than one
+    /// (Hyperliquid's HIP-3 dexes: `xyz`). Absent for a venue's main or only
+    /// market.
+    #[serde(default)]
+    pub dex: Option<String>,
+    /// The most significant figures a price may have, where the venue limits
+    /// them: 5 for a Hyperliquid perp. A whole-number price is valid whatever
+    /// its figures. Absent where the grid alone decides, as on Derive.
+    #[serde(default)]
+    pub price_figures: Option<u8>,
+    /// The smallest order **as a value** in the quote asset, where the venue
+    /// sets its minimum that way: Hyperliquid's 10. Never converted into a
+    /// size, which would need a price and change with it.
+    #[serde(default)]
+    pub min_notional: Option<Num>,
+    /// The most leverage the venue allows on it, where the venue states it per
+    /// instrument.
+    #[serde(default)]
+    pub max_leverage: Option<u32>,
+    /// Whether the venue allows only isolated margin on it, where it says.
+    #[serde(default)]
+    pub isolated_only: Option<bool>,
+}
+
+impl Instrument {
+    /// **Whether a price is one the venue accepts**, by this row alone.
+    ///
+    /// On the [`tick_size`](Instrument::tick_size) grid, and, where
+    /// [`price_figures`](Instrument::price_figures) is stated, either a whole
+    /// number or within that many significant figures. Hyperliquid documents
+    /// the whole-number exception: an integer price is valid whatever its
+    /// figures. A price of zero or below is never valid.
+    pub fn price_is_valid(&self, price: Num) -> bool {
+        if price <= Num::ZERO || self.tick_size <= Num::ZERO {
+            return false;
+        }
+        if !(price % self.tick_size).is_zero() {
+            return false;
+        }
+        match self.price_figures {
+            None => true,
+            Some(_) if price.fract().is_zero() => true,
+            Some(figures) => significant_figures(price) <= u32::from(figures),
+        }
+    }
+}
+
+/// The significant figures of a positive decimal, trailing zeros after the
+/// point not counted: `60710.5` has 6, `0.00012` has 2, `1.50` has 2.
+fn significant_figures(value: Num) -> u32 {
+    let digits = value.normalize().mantissa().unsigned_abs().to_string();
+    digits.trim_start_matches('0').len() as u32
 }
 
 /// A chain reorganisation: rows previously written that the chain no longer
@@ -1368,6 +1443,102 @@ mod tests {
         assert_eq!(instrument.strike, None);
         assert_eq!(instrument.expiry_micros, None);
         assert_eq!(instrument.right, None);
+    }
+
+    /// A Hyperliquid perp on its `xyz` dex, every new field stated.
+    fn a_hyperliquid_perp() -> Instrument {
+        Instrument {
+            tick_size: Decimal::from_str("0.1").unwrap(),
+            lot_size: Decimal::from_str("0.00001").unwrap(),
+            min_size: Decimal::from_str("0.00001").unwrap(),
+            contract_type: "perp".into(),
+            base: "GOLD".into(),
+            quote: "USDC".into(),
+            hours: "continuous".into(),
+            active: true,
+            venue_index: Some(3),
+            ui_multiplier: None,
+            observed_at: 5,
+            strike: None,
+            expiry_micros: None,
+            right: None,
+            venue_symbol: Some("xyz:GOLD".into()),
+            dex: Some("xyz".into()),
+            price_figures: Some(5),
+            min_notional: num("10"),
+            max_leverage: Some(20),
+            isolated_only: Some(false),
+        }
+    }
+
+    #[test]
+    fn an_instrument_written_before_the_one_format_still_decodes() {
+        // The six fields of `normalise-instrument-reference` are defaulted: a
+        // Derive row on disk from before them reads, each one absent.
+        let old = r#"{"tick_size":"0.5","lot_size":"0.01","min_size":"0.01","contract_type":"perp","base":"BTC","quote":"USDC","hours":"continuous","active":true,"venue_index":null,"ui_multiplier":null,"observed_at":5,"strike":null,"expiry_micros":null,"right":null}"#;
+        let instrument: Instrument = serde_json::from_str(old).unwrap();
+        assert_eq!(instrument.venue_symbol, None);
+        assert_eq!(instrument.dex, None);
+        assert_eq!(instrument.price_figures, None);
+        assert_eq!(instrument.min_notional, None);
+        assert_eq!(instrument.max_leverage, None);
+        assert_eq!(instrument.isolated_only, None);
+    }
+
+    #[test]
+    fn an_instrument_in_the_one_format_round_trips_with_no_float() {
+        let perp = a_hyperliquid_perp();
+        let json = serde_json::to_string(&perp).unwrap();
+        assert_eq!(serde_json::from_str::<Instrument>(&json).unwrap(), perp);
+        // The value minimum is a decimal and travels as text; the figure limit
+        // and the leverage are counts. None of them is a float.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["min_notional"], serde_json::json!("10"));
+        assert!(value["price_figures"].is_u64(), "{json}");
+        assert!(value["max_leverage"].is_u64(), "{json}");
+        assert_eq!(value["venue_symbol"], serde_json::json!("xyz:GOLD"));
+    }
+
+    #[test]
+    fn a_price_is_valid_on_the_grid_and_within_the_figures() {
+        // The spec's scenarios: BTC on Hyperliquid, szDecimals 5, so a grid of
+        // 0.1 and at most five significant figures.
+        let btc = Instrument {
+            tick_size: Decimal::from_str("0.1").unwrap(),
+            ..a_hyperliquid_perp()
+        };
+        let valid = |p: &str| btc.price_is_valid(Decimal::from_str(p).unwrap());
+        assert!(valid("60710"));
+        assert!(!valid("60710.5"), "six figures");
+        assert!(valid("6071.5"), "five figures, on the grid");
+        assert!(!valid("6071.55"), "off the grid");
+        assert!(valid("1234567"), "a whole number, whatever its figures");
+        assert!(valid("60710.0"), "a whole number written with a point");
+        assert!(!valid("0"));
+        assert!(!valid("-1"));
+    }
+
+    #[test]
+    fn a_price_with_no_figure_limit_needs_only_the_grid() {
+        // Derive: a fixed tick of 0.5 and nothing else.
+        let derive = Instrument {
+            tick_size: Decimal::from_str("0.5").unwrap(),
+            price_figures: None,
+            ..a_hyperliquid_perp()
+        };
+        let valid = |p: &str| derive.price_is_valid(Decimal::from_str(p).unwrap());
+        assert!(valid("60710.5"));
+        assert!(valid("123456789.5"), "any multiple of the tick");
+        assert!(!valid("60710.25"));
+    }
+
+    #[test]
+    fn significant_figures_ignore_trailing_zeros_after_the_point() {
+        let figures = |s: &str| significant_figures(Decimal::from_str(s).unwrap());
+        assert_eq!(figures("60710.5"), 6);
+        assert_eq!(figures("0.00012"), 2);
+        assert_eq!(figures("1.50"), 2);
+        assert_eq!(figures("6071.5"), 5);
     }
 
     #[test]

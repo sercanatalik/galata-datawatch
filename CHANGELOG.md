@@ -18,7 +18,7 @@ exists so the four above take no vault dependency.
 ## [Unreleased]
 
 **The next release is 0.2.0, not 0.1.1.** `galata_wire::Instrument` and
-`galata_datawatch::venue::Declaration` each gain a public field, which breaks a
+`galata_datawatch::venue::Declaration` each gain public fields, which breaks a
 struct literal written against 0.1.0, `VenueConfig::candle` changes type, and
 both `ConnectionPolicy` variants gain `reply_secs`.
 
@@ -52,9 +52,28 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 - `Instrument::strike`, `Instrument::expiry_micros` and `Instrument::right`,
   for an option. Each is defaulted on deserialisation, so an envelope written
   before them still reads. **Breaking** for a struct literal.
+- **BREAKING: one reference format for every venue**
+  (`normalise-instrument-reference`). `Instrument` gains `venue_symbol`, `dex`,
+  `price_figures`, `min_notional`, `max_leverage` and `isolated_only`, so a
+  venue whose prices have no fixed tick, or whose minimum is a value, is
+  stated without loss; `Instrument::price_is_valid` applies the rule. Each is
+  defaulted on deserialisation, so a row written before them still reads. An
+  out-of-tree venue building an `Instrument` by struct literal adds the six as
+  `None`, which states nothing it did not state before.
 
 **`galata-datawatch`**
 
+- **Hyperliquid records reference data** (`normalise-instrument-reference`):
+  each captured dex's `meta`, at capture's start and every five minutes,
+  becomes a row per captured coin in the one format — the grid and five
+  significant figures, the lot and a minimum value of 10, the leverage, the
+  venue symbol and dex. The universe check now keeps the answers it was
+  decided on, through the one path. A coin the venue has delisted is recorded
+  inactive and leaves the set. `hyperliquid::meta_page` and
+  `hyperliquid::listed`; `Client::meta` replaces `Client::universe`.
+- Derive's reference rows state the venue symbol; rh-chain's, the contract.
+- The tape's `instruments` dataset gains the six columns, appended and
+  nullable; segments written before still read.
 - **Capture declares what the bus did not carry** (`add-bus-replay-window`).
   An event dropped from the bus — the queue to the broker full, or a publish
   refused — is noted by its receipt time; capture sends for every pair it
@@ -103,6 +122,8 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Changed
 
+- A reference refresh that fails is logged once for a run of failures, and
+  once when it reads again, rather than at every refresh.
 - **Breaking:** `VenueConfig::candle` is `Option<String>`. A venue that pushes
   no bars states none; Hyperliquid still requires it and refuses its absence
   by name.

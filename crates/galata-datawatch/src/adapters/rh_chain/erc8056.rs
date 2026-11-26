@@ -186,6 +186,15 @@ pub fn instrument(
         strike: None,
         expiry_micros: None,
         right: None,
+        // The contract is the chain's name for it, and the caller holds it
+        // (`RhChain::instrument`); a chain has no dex, no figure limit, no
+        // value minimum and no leverage.
+        venue_symbol: None,
+        dex: None,
+        price_figures: None,
+        min_notional: None,
+        max_leverage: None,
+        isolated_only: None,
     }
 }
 
