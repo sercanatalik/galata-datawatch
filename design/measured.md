@@ -4948,7 +4948,10 @@ host-service-addressing
                                                     restarted, capture connected at the tailnet name, same image
   A wrong credential from the host itself met       -ERR 'Authorization Violation', from the Mac and from a container
   A right credential from another
-    machine                               not seen  needs a second tailnet device (task 3.5)
+    machine                               met       on a throwaway broker published as the broker is, from a
+                                                    second device (task 3.5, 2026-11-26, "A second device, and an
+                                                    ACL on a published port", below); its one identity holds no
+                                                    grants, so the deployment's grants from afar are not seen
   The tailnet goes down while capture
     runs                                  met       since `capture-recovers-dead-connections`: the stream still dies
                                                     at the change, and capture finds it and archives again within
@@ -5672,3 +5675,55 @@ galata-markets                            183-185 MiB, 0.3% of a core, in the mi
 received in the first quarter-second of the asked window, with venue times
 before its start; a history read is windowed by venue time, the comparison
 by receipt time. Asked from five seconds earlier, the tape returns all six.
+
+## A second device, and an ACL on a published port — 2026-11-26
+
+`containerise-host-services` task 3.5, what its Risks left untested: whether
+a device elsewhere on the tailnet reaches a port the container tool
+publishes on the Mac's tailnet address, and whether a tailnet ACL filters
+such a port. A throwaway broker, so that the deployment's was never in
+question: `nats:2.15.3` in a container (1 CPU, 256M), published on this
+Mac's tailnet address at 4299, one identity with a stand-in password, up
+from 13:09:45 to 13:47. The second device is another Mac on the tailnet,
+where the maintainer ran the probe: `nc` sending CONNECT and PING to 4299,
+and asking the deployment's broker at 4222 for its greeting only, with no
+login. The exit shown is `nc`'s own.
+
+```text
+from this Mac, at the tailnet name    right password         INFO, PONG
+                                      wrong password         -ERR 'Authorization Violation'
+                                      loopback, local addr   no answer, no answer
+
+from the second device                4299, the throwaway    4222, the broker
+  the policy as it was: allow all     logged in: PONG        greeting
+  every port but TCP 4299             refused: nc exit 1     greeting, nc exit 0
+  allow all again                     logged in: +OK, PONG   greeting, nc exit 0
+```
+
+The policy in the middle row, one grant in place of the allow-all one,
+reached this Mac by 13:37:24 and was replaced by the original by 13:45:46:
+
+```text
+{"src": ["*"], "dst": ["*"], "ip": ["tcp:1-4298", "tcp:4300-65535", "udp:*", "icmp:*"]}
+```
+
+**An ACL filters a published port, port by port.** The refusal is made on
+this Mac: the filter its Tailscale received went from one rule for every
+port to TCP 1-4298 and 4300-65535, and back, and the second device's result
+followed it. The same device, against the same address, was refused at 4299
+and greeted at 4222, both ports published by the container tool. So the ACLs
+the design calls for can be written per port, and the broker's credentials
+stay the control inside what they allow.
+
+**Whether a policy has reached the Mac is read on the Mac.** A first edit
+left the file's allow-all grant in place: the second device was still
+admitted, and this Mac's filter (`PacketFilter` in `tailscale debug
+netmap`) still opened every port. Read the filter before reading a probe's
+result, a refusal or its absence.
+
+**The scenario.** "A right credential from another machine" is met on the
+throwaway broker, which is published as the broker is: a process on another
+tailnet machine with a valid identity and password was admitted. Its one
+identity holds no grants, so admission with the deployment's identities'
+grants from another machine is not seen; that needs one of the broker's
+passwords typed on a second device.
