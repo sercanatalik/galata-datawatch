@@ -94,6 +94,10 @@ EXPOSE_ALLOWED = {
     # Where two `Secret`s become a signing key (`Secret::expose`, not
     # `Endpoint::expose` — see the note below). Added with `poll-a-venue`.
     "crates/galata-datawatch/src/adapters/rh_crypto/sign.rs",
+    # Where a Derive session key's `Secret` becomes a signing key, and where a
+    # new key's private half is written once, into the pipe to the vault
+    # (`Secret::expose`). Added 2026-11-26 with `add-derive-account-ledger`.
+    "crates/galata-datawatch/src/adapters/derive_xyz/sign.rs",
     "crates/galata-datawatch/src/adapters/rh_chain/client.rs",
     "crates/galata-datawatch/src/venue/transport.rs",   # the accessor itself
     "crates/galata-datawatch/src/config/source.rs",     # Secret::expose lives here

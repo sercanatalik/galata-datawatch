@@ -2,7 +2,8 @@
 
     python3 scripts/lib/ledger_vars.py <config.toml> <venue>
 
-Each declared account's `address_var` on that venue, then the fingerprint key.
+Each declared account's `address_var` on that venue, and its `session_key_var`
+where it has one, then the fingerprint key.
 Read from the deployment's configuration so the token minted for the ledger
 (`mint-service-tokens.sh`) and the names the service asks for
 (`run-service.sh`) come from one place and cannot disagree. Names only: the
@@ -22,9 +23,11 @@ ledger = config.get("ledger")
 if not ledger:
     sys.exit(3)
 names = [
-    account["address_var"]
+    var
     for account in ledger.get("account", {}).values()
     if account.get("venue") == venue
+    for var in (account["address_var"], account.get("session_key_var"))
+    if var
 ]
 if not names:
     sys.exit(3)

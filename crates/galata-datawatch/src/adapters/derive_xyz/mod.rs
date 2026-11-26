@@ -49,6 +49,7 @@
 #[cfg(feature = "capture")]
 pub mod client;
 pub mod normalise;
+pub mod sign;
 pub mod wire;
 
 use std::collections::BTreeSet;

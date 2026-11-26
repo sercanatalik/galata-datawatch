@@ -562,6 +562,8 @@ mod tests {
                     address_var: "MAIN".into(),
                     dexes: vec![String::new(), "xyz".into()],
                     address: None,
+                    session_key_var: None,
+                    session_key_warn_days: None,
                 },
             )]
             .into(),

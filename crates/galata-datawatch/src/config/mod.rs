@@ -205,6 +205,21 @@ pub enum ConfigError {
         /// Which key held it. **Never the value.**
         field: &'static str,
     },
+    /// A field that names a variable holds something that cannot be one —
+    /// most likely the secret itself.
+    #[error(
+        "{origin}: [ledger.account.{alias}] {field} is not a variable name. A secret is never \
+         written in configuration, which every service reads: put it in the vault and name \
+         the variable here"
+    )]
+    SecretInConfiguration {
+        /// Where it came from.
+        origin: Origin,
+        /// Which account.
+        alias: String,
+        /// Which key held it. **Never the value.**
+        field: &'static str,
+    },
     /// An alias that cannot name an account.
     #[error("{origin}: [ledger.account.{alias}] is not a usable alias: {why}")]
     BadAlias {
@@ -566,7 +581,18 @@ pub struct LedgerAccount {
     pub address_var: String,
     /// The dexes to snapshot, where the venue has several. `""` is the main
     /// one. Each keeps its own margin (`design/measured.md`, 2026-09-25).
+    /// Required where the venue's ledger has dexes, refused where it has none.
+    #[serde(default)]
     pub dexes: Vec<String>,
+    /// The variable naming the session key the account is read with, on a
+    /// venue whose reads are signed. **A name, never the key.** Required there,
+    /// refused on a venue that reads by address alone.
+    #[serde(default)]
+    pub session_key_var: Option<String>,
+    /// Days before the session key expires from which the ledger's status
+    /// warns. Only where `session_key_var` is; 14 when absent. 1..=365.
+    #[serde(default)]
+    pub session_key_warn_days: Option<u32>,
     /// **Present only to be refused by name.** Without it, `address = "0x…"`
     /// would be an unknown key, refused with a parser's sentence that does not
     /// say where the address should go instead.
@@ -589,6 +615,11 @@ pub struct LedgerCost {
     /// One events request (fills, funding or ledger updates), before any
     /// per-item weight the answer adds.
     pub events: f64,
+    /// Whether the venue's ledger reads per dex, so an account names its dexes.
+    pub has_dexes: bool,
+    /// Whether the venue's ledger signs its reads, so an account names the
+    /// variable holding its session key.
+    pub reads_with_key: bool,
     /// One read of an account's spot balances, account-wide, each snapshot.
     pub balances: f64,
     /// One read of an account's borrow and lend state, account-wide, each
@@ -641,6 +672,16 @@ impl Ledger {
 pub const MAX_DECLARED_ALIAS: usize = galata_wire::MAX_TOKEN - 12;
 
 /// Whether a string is an EVM address: `0x` and forty hex digits.
+/// Whether a value could be handed to a process as an environment variable's
+/// name: what a `*_var` field must be, and a secret written in its place is not.
+fn is_variable_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn looks_like_an_address(value: &str) -> bool {
     let value = value.trim();
     value.len() == 42
@@ -1181,14 +1222,75 @@ impl Config {
                     },
                 });
             }
+            if let Some(var) = &account.session_key_var
+                && !is_variable_name(var)
+            {
+                return Err(ConfigError::SecretInConfiguration {
+                    origin: origin.clone(),
+                    alias: alias.clone(),
+                    field: "session_key_var",
+                });
+            }
+            if let Some(days) = account.session_key_warn_days
+                && !(1..=365).contains(&days)
+            {
+                return Err(ConfigError::OutOfBounds {
+                    origin: origin.clone(),
+                    field: "ledger.account.session_key_warn_days",
+                    value: format!("{days} for {alias}"),
+                    bound: "1..=365",
+                });
+            }
             let mut seen = std::collections::BTreeSet::new();
-            if account.dexes.is_empty() || !account.dexes.iter().all(|d| seen.insert(d)) {
+            if !account.dexes.iter().all(|d| seen.insert(d)) {
                 return Err(ConfigError::OutOfBounds {
                     origin: origin.clone(),
                     field: "ledger.account.dexes",
                     value: format!("{:?} for {alias}", account.dexes),
-                    bound: "one or more distinct dexes; \"\" is the main one",
+                    bound: "distinct dexes; \"\" is the main one",
                 });
+            }
+            // The venue's own shape, where this tool knows it: a ledger keeper.
+            if let Some(shape) = adapters.ledger_cost(&account.venue) {
+                let refuse = |field: &'static str, value: String, bound: &'static str| {
+                    Err(ConfigError::OutOfBounds {
+                        origin: origin.clone(),
+                        field,
+                        value,
+                        bound,
+                    })
+                };
+                if shape.has_dexes && account.dexes.is_empty() {
+                    return refuse(
+                        "ledger.account.dexes",
+                        format!("none for {alias}"),
+                        "one or more distinct dexes; \"\" is the main one",
+                    );
+                }
+                if !shape.has_dexes && !account.dexes.is_empty() {
+                    return refuse(
+                        "ledger.account.dexes",
+                        format!("{:?} for {alias}", account.dexes),
+                        "none: this venue's ledger reads a wallet whole",
+                    );
+                }
+                if shape.reads_with_key && account.session_key_var.is_none() {
+                    return refuse(
+                        "ledger.account.session_key_var",
+                        format!("absent for {alias}"),
+                        "required: this venue's ledger signs its reads with a session key",
+                    );
+                }
+                if !shape.reads_with_key
+                    && (account.session_key_var.is_some()
+                        || account.session_key_warn_days.is_some())
+                {
+                    return refuse(
+                        "ledger.account.session_key_var",
+                        format!("declared for {alias}"),
+                        "none: this venue's ledger reads by address alone, with no key",
+                    );
+                }
             }
             venues.insert(account.venue.as_str());
         }
@@ -1246,16 +1348,34 @@ mod tests {
             vec!["hyperliquid"]
         }
         fn ledger_cost(&self, venue: &str) -> Option<LedgerCost> {
-            (venue == "hyperliquid").then_some(LedgerCost {
-                budget_per_minute: 1_200.0,
-                snapshot: 2.0,
-                discovery: 20.0,
-                mode: 20.0,
-                events: 20.0,
-                balances: 2.0,
-                borrow_lend: 20.0,
-                reference: 20.0,
-            })
+            match venue {
+                "hyperliquid" => Some(LedgerCost {
+                    budget_per_minute: 1_200.0,
+                    snapshot: 2.0,
+                    discovery: 20.0,
+                    mode: 20.0,
+                    events: 20.0,
+                    balances: 2.0,
+                    borrow_lend: 20.0,
+                    reference: 20.0,
+                    has_dexes: true,
+                    reads_with_key: false,
+                }),
+                // A venue whose ledger signs its reads and reads a wallet whole.
+                "derive-xyz" => Some(LedgerCost {
+                    budget_per_minute: 300.0,
+                    snapshot: 1.0,
+                    discovery: 2.0,
+                    mode: 0.0,
+                    events: 0.0,
+                    balances: 0.0,
+                    borrow_lend: 0.0,
+                    reference: 0.0,
+                    has_dexes: false,
+                    reads_with_key: true,
+                }),
+                _ => None,
+            }
         }
         fn keeps_ledgers(&self) -> bool {
             true
@@ -1568,6 +1688,95 @@ dexes = ["", "xyz"]
         .to_string();
         assert!(err.contains("1578.0"), "the cost: {err}");
         assert!(err.contains("12.0"), "the allowance: {err}");
+    }
+
+    const DERIVE: &str = r#"
+[ledger.account.derive]
+venue = "derive-xyz"
+address_var = "GALATA_LEDGER_DERIVE_WALLET"
+session_key_var = "GALATA_LEDGER_DERIVE_SESSION_KEY"
+"#;
+
+    #[test]
+    fn a_signing_venue_names_its_key_and_no_dexes() {
+        let ok = with_ledger(&format!("{LEDGER}{DERIVE}")).unwrap();
+        let derive = &ok.ledger.as_ref().unwrap().account["derive"];
+        assert!(derive.dexes.is_empty());
+        assert_eq!(
+            derive.session_key_var.as_deref(),
+            Some("GALATA_LEDGER_DERIVE_SESSION_KEY")
+        );
+        // With the warning's days, inside their bounds.
+        assert!(with_ledger(&format!("{LEDGER}{DERIVE}session_key_warn_days = 14\n")).is_ok());
+
+        let err = |doc: String| with_ledger(&doc).unwrap_err().to_string();
+        let no_key = err(format!(
+            "{LEDGER}{}",
+            DERIVE.replace(
+                "session_key_var = \"GALATA_LEDGER_DERIVE_SESSION_KEY\"\n",
+                ""
+            )
+        ));
+        assert!(
+            no_key.contains("session_key_var") && no_key.contains("required"),
+            "{no_key}"
+        );
+        let dexes = err(format!("{LEDGER}{DERIVE}dexes = [\"\"]\n"));
+        assert!(
+            dexes.contains("ledger.account.dexes") && dexes.contains("none"),
+            "{dexes}"
+        );
+        for days in ["0", "366"] {
+            let e = err(format!("{LEDGER}{DERIVE}session_key_warn_days = {days}\n"));
+            assert!(
+                e.contains("session_key_warn_days") && e.contains("1..=365"),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_venue_names_dexes_and_no_key() {
+        let err = |doc: String| with_ledger(&doc).unwrap_err().to_string();
+        let key = err(LEDGER.replace(
+            "dexes = [\"\", \"xyz\"]",
+            "dexes = [\"\", \"xyz\"]\nsession_key_var = \"SOME_KEY\"",
+        ));
+        assert!(
+            key.contains("session_key_var") && key.contains("address alone"),
+            "{key}"
+        );
+        let days = err(LEDGER.replace(
+            "dexes = [\"\", \"xyz\"]",
+            "dexes = [\"\", \"xyz\"]\nsession_key_warn_days = 14",
+        ));
+        assert!(days.contains("address alone"), "{days}");
+        let none = err(LEDGER.replace("dexes = [\"\", \"xyz\"]\n", ""));
+        assert!(
+            none.contains("ledger.account.dexes") && none.contains("one or more"),
+            "{none}"
+        );
+        let twice = err(LEDGER.replace("dexes = [\"\", \"xyz\"]", "dexes = [\"xyz\", \"xyz\"]"));
+        assert!(twice.contains("distinct"), "{twice}");
+    }
+
+    #[test]
+    fn a_key_written_where_its_variable_belongs_is_refused_unrepeated() {
+        let key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let err = with_ledger(&format!(
+            "{LEDGER}{}",
+            DERIVE.replace("GALATA_LEDGER_DERIVE_SESSION_KEY", key)
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("session_key_var is not a variable name"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("4c0883a6"),
+            "the refusal must not repeat it: {err}"
+        );
     }
 
     #[test]

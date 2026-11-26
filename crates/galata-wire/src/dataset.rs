@@ -55,6 +55,9 @@ pub enum Series {
     /// An account's borrowed and supplied amounts, one read per account,
     /// polled by the ledger. Its health rides along.
     BorrowLend,
+    /// A wallet's subaccounts, read whole each snapshot by the ledger: their
+    /// margin, with their positions and collateral riding along.
+    MarginState,
 }
 
 /// A dataset a store writes, and the last token of a market-data subject.
@@ -134,6 +137,12 @@ pub enum Kind {
     PortfolioMargin,
     /// One token's margin figures for an account, riding a balances read.
     TokenMargin,
+    /// [`Series::MarginState`]: a subaccount's margin figures and type.
+    MarginState,
+    /// One open position of a subaccount, riding a margin-state read.
+    PositionState,
+    /// One collateral asset of a subaccount, riding a margin-state read.
+    Collateral,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -166,7 +175,7 @@ impl Addressing {
 impl Series {
     /// Every series, for a loader that must refuse an unknown one by listing
     /// the known ones.
-    pub const ALL: [Series; 13] = [
+    pub const ALL: [Series; 14] = [
         Series::Trades,
         Series::Book,
         Series::Candles,
@@ -180,6 +189,7 @@ impl Series {
         Series::LedgerUpdates,
         Series::Balances,
         Series::BorrowLend,
+        Series::MarginState,
     ];
 
     /// The discriminator written to disk and to a subject.
@@ -198,6 +208,7 @@ impl Series {
             Series::LedgerUpdates => "ledger_updates",
             Series::Balances => "balances",
             Series::BorrowLend => "borrow_lend",
+            Series::MarginState => "margin_state",
         }
     }
 
@@ -217,6 +228,7 @@ impl Series {
             Series::LedgerUpdates => Kind::LedgerUpdates,
             Series::Balances => Kind::Balances,
             Series::BorrowLend => Kind::BorrowLend,
+            Series::MarginState => Kind::MarginState,
         }
     }
 }
@@ -252,7 +264,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 26] = [
+    pub const ALL: [Kind; 29] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -279,6 +291,9 @@ impl Kind {
         Kind::LendHealth,
         Kind::PortfolioMargin,
         Kind::TokenMargin,
+        Kind::MarginState,
+        Kind::PositionState,
+        Kind::Collateral,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -311,7 +326,10 @@ impl Kind {
             | Kind::BorrowLend
             | Kind::LendHealth
             | Kind::PortfolioMargin
-            | Kind::TokenMargin => Addressing::Account,
+            | Kind::TokenMargin
+            | Kind::MarginState
+            | Kind::PositionState
+            | Kind::Collateral => Addressing::Account,
             Kind::Signals => Addressing::Market,
         }
     }
@@ -345,6 +363,9 @@ impl Kind {
             Kind::LendHealth => "lend_health",
             Kind::PortfolioMargin => "portfolio_margin",
             Kind::TokenMargin => "token_margin",
+            Kind::MarginState => "margin_state",
+            Kind::PositionState => "position_state",
+            Kind::Collateral => "collateral",
         }
     }
 }
@@ -381,7 +402,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 26);
+        assert_eq!(Kind::ALL.len(), 29);
     }
 
     #[test]
@@ -411,6 +432,8 @@ mod tests {
             Kind::LendHealth,
             Kind::PortfolioMargin,
             Kind::TokenMargin,
+            Kind::PositionState,
+            Kind::Collateral,
         ] {
             assert!(!declarable.contains(&kind), "{kind} must not be declarable");
         }
@@ -460,6 +483,9 @@ mod tests {
             Kind::LendHealth,
             Kind::PortfolioMargin,
             Kind::TokenMargin,
+            Kind::MarginState,
+            Kind::PositionState,
+            Kind::Collateral,
         ] {
             assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
         }

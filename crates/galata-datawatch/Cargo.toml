@@ -65,6 +65,8 @@ base64 = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+k256 = { workspace = true, optional = true }
+sha3 = { workspace = true, optional = true }
 
 [features]
 default = ["capture", "hyperliquid", "rh-crypto", "ledger", "bin"]
@@ -97,9 +99,10 @@ rh-chain = []
 # **Options, whose instruments expire.** Off by default, as `rh-chain` is: a
 # venue of named, dated instruments is a different shape from a perp venue, and
 # a consumer who wants perp quotes should not link an option-name grammar and a
-# reference-data client to get them. Public data only, so it carries no signing
-# dependency.
-derive-xyz = []
+# reference-data client to get them. Its market data is public; its account
+# reads are signed by a session key that can only read, so secp256k1 and
+# keccak-256 come with it and with nothing else.
+derive-xyz = ["dep:k256", "dep:sha3"]
 # **The signing venue.** Ed25519 and base64 are here rather than unconditional
 # so a tape reader links neither: a signature is a pure function, but it is a
 # pure function nothing reading parquet has any use for.
@@ -156,6 +159,10 @@ required-features = ["bin"]
 [[bin]]
 name = "galata-ledger"
 required-features = ["bin", "ledger"]
+
+[[bin]]
+name = "galata-session-key"
+required-features = ["bin", "derive-xyz"]
 
 # The out-of-tree venue test needs the helpers it is checking the visibility of.
 [dev-dependencies]

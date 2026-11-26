@@ -69,6 +69,11 @@ base64 = "0.23"
 # the lockfile at these versions, through galata-vault's `age`.
 hmac = "0.12"
 sha2 = "0.10"
+# Derive's signed reads: an EIP-191 signature over the request's time, by a
+# session key that can only read. secp256k1 and keccak-256; `sha3` was in the
+# lockfile at this version, through galata-vault's `age`.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+sha3 = "0.10"
 serde = { version = "1", features = ["derive"] }
 # `raw_value` is load-bearing, not a convenience: a normaliser peeks at a
 # frame's channel and takes its `data` as a borrowed span, then types that span

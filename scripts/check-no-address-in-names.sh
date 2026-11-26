@@ -51,6 +51,7 @@ allowed() {
         galata-datawatch/src/ledger/accounts.rs)              ;; # into the HMAC, never out of it
         galata-datawatch/src/adapters/hyperliquid/client.rs)  ;; # into an info request's body, to the venue
         galata-datawatch/src/adapters/rh_crypto/sign.rs)      ;; # into the signature
+        galata-datawatch/src/adapters/derive_xyz/sign.rs)     ;; # a session key, into the signature; a new one, into the pipe to the vault
         galata-datawatch/src/adapters/rh_chain/client.rs)     ;; # the keyed RPC endpoint, to the client
         galata-datawatch/src/source/stream.rs)                ;; # the websocket endpoint, to the connector
         galata-datawatch/src/source/poll.rs)                  ;; # the poll endpoint, to the client

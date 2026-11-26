@@ -57,6 +57,12 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 **`galata-wire`**
 
+- **A subaccount's margin, positions and collateral, as stated**
+  (`add-derive-account-ledger`), additive: `Event::MarginState`,
+  `PositionState` (options and perpetuals, with the venue's greeks) and
+  `Collateral`, with `Kind::MarginState`, `PositionState` and `Collateral`
+  addressed by account and `Series::MarginState` for the read a gap is about.
+  Every figure optional.
 - **An account's spot and borrowing, as stated**
   (`add-hyperliquid-portfolio-margin-state`), additive: `Event::Balance`,
   `BorrowLend`, `LendHealth`, `PortfolioMargin` and `TokenMargin`, with
@@ -87,6 +93,17 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 **`galata-datawatch`**
 
+- **A Derive session key, made and signed with** (`add-derive-account-ledger`,
+  behind `derive-xyz`): `adapters::derive_xyz::sign` signs a request's time
+  with EIP-191 and says a key's address; `galata-session-key` makes a key and
+  writes its private half to a pipe only, which
+  `scripts/make-derive-session-key.sh` hands to `gv set`, printing only the
+  address. `k256` and `sha3` come with `derive-xyz` and nothing else.
+- **A ledger account names its session key's variable** where the venue signs
+  its reads, and no dexes where it reads a wallet whole
+  (`session_key_var`, `session_key_warn_days`); `LedgerCost` says which
+  (`has_dexes`, `reads_with_key`). A secret written where its variable
+  belongs is refused without being repeated.
 - **The ledger reads an account's spot and borrowing**
   (`add-hyperliquid-portfolio-margin-state`): each snapshot asks every polled
   Hyperliquid account's `spotClearinghouseState` and `borrowLendUserState`
@@ -185,6 +202,10 @@ both `ConnectionPolicy` variants gain `reply_secs`.
   an out-of-tree venue with none returns `&[]` from the first and is never
   asked the others. `config::LedgerCost` gains `balances`, `borrow_lend` and
   `reference`, which a struct literal must name.
+- **BREAKING:** `config::LedgerCost` gains `has_dexes` and `reads_with_key`,
+  and `config::LedgerAccount` gains `session_key_var` and
+  `session_key_warn_days`, which a struct literal must name; `dexes` may be
+  absent (`add-derive-account-ledger`).
 - `AccountMode::equity_not_held` says a unified or portfolio-margin account's
   collateral is "recorded as balances", where it said "out of scope".
 

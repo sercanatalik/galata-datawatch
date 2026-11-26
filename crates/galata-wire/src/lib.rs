@@ -34,10 +34,10 @@ pub mod token;
 pub use dataset::{Addressing, Kind, Series};
 pub use event::{
     AccountMode, AccountSeen, Address, Balance, Book, BookLevel, BorrowLend, Candle, Clipped,
-    Counterparty, DexEffect, Effect, Envelope, Event, EventsReach, Fill, Funding, FundingPayment,
-    Gap, GapCause, Instrument, LedgerUpdate, LendHealth, Margin, Mark, Mint, OptionPricing, Origin,
-    PortfolioMargin, Position, Quote, Reach, Reorg, Session, SessionKind, Side, TokenMargin, Trade,
-    Transfer, Unparsed,
+    Collateral, Counterparty, DexEffect, Effect, Envelope, Event, EventsReach, Fill, Funding,
+    FundingPayment, Gap, GapCause, Instrument, LedgerUpdate, LendHealth, Margin, MarginState, Mark,
+    Mint, OptionPricing, Origin, PortfolioMargin, Position, PositionState, Quote, Reach, Reorg,
+    Session, SessionKind, Side, TokenMargin, Trade, Transfer, Unparsed,
 };
 pub use identity::{Account, MAX_TOKEN, Market, Ticker, TokenError, Venue};
 pub use token::{Num, NumError, Token, require};

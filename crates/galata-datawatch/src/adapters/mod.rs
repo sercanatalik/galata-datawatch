@@ -214,6 +214,9 @@ pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
             balances: 2.0,
             borrow_lend: 20.0,
             reference: 20.0,
+            // Per dex, by address alone, unauthenticated.
+            has_dexes: true,
+            reads_with_key: false,
         }),
         _ => None,
     }

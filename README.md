@@ -243,6 +243,7 @@ published crates link none of it.
 | `galata-datawatch` | capture one venue, with configuration from a file |
 | `galata-datawatch-vault` | the same, with configuration and secrets fetched from galata-vault at boot |
 | `galata-ledger` | record one venue's declared accounts: margin, positions, balances, borrowing and history ([The account ledger](#the-account-ledger)) |
+| `galata-session-key` | make a Derive session key, its private half to a pipe only (`scripts/make-derive-session-key.sh` hands it to the vault); behind `derive-xyz` |
 | `galata-tape-rebuild` | project the archive into the tape; `--replace` rebuilds a venue's range |
 | `galata-compact` | merge the small segments of closed days, and with `--closed-hours` of today's closed hours (never the open hour) |
 | `galata-watch` | judge the record's freshness and completeness, per venue |

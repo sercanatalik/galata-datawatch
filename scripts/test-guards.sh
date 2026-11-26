@@ -396,6 +396,13 @@ prove "check-secret-reach (a tool that does not connect names a secret source)" 
       'use galata_datawatch::config::{Adapters, Config, FileSource};' \
       'use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource};'
 
+# A session key's private half shown on the way to the vault.
+prove "check-session-key-script (the key is shown as it is stored)" \
+      ./scripts/check-session-key-script.sh \
+      scripts/make-derive-session-key.sh replace \
+      'if ! "$bin" | "$gv" set "$name" --env "$env" >/dev/null; then' \
+      'if ! "$bin" | tee /dev/stderr | "$gv" set "$name" --env "$env" >/dev/null; then'
+
 # The floor that keeps an older gv, which reads through the owner key, away
 # from a service's token.
 prove "check-service-secrets (the version floor is lowered)" \

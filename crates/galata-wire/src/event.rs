@@ -252,6 +252,12 @@ pub enum Event {
     PortfolioMargin(PortfolioMargin),
     /// One token's margin figures for an account, as stated.
     TokenMargin(TokenMargin),
+    /// A subaccount's margin figures and margin type, as the venue states them.
+    MarginState(MarginState),
+    /// One open position of a subaccount, options and perpetuals alike.
+    PositionState(PositionState),
+    /// One collateral asset of a subaccount, with its margin contributions.
+    Collateral(Collateral),
 }
 
 impl Event {
@@ -283,6 +289,9 @@ impl Event {
             Event::LendHealth(_) => Kind::LendHealth,
             Event::PortfolioMargin(_) => Kind::PortfolioMargin,
             Event::TokenMargin(_) => Kind::TokenMargin,
+            Event::MarginState(_) => Kind::MarginState,
+            Event::PositionState(_) => Kind::PositionState,
+            Event::Collateral(_) => Kind::Collateral,
         }
     }
 }
@@ -1220,6 +1229,95 @@ pub struct TokenMargin {
     pub available_after_maintenance: Option<Num>,
 }
 
+/// A subaccount's margin, **as the venue states it**: Derive's per-subaccount
+/// figures, shaped by neither [`Margin`] (per dex, Hyperliquid's) nor any
+/// computation here. Every figure is optional — absent where the venue stated
+/// none, never zero. Whether the margins are net of the subaccount's value or
+/// gross requirements is the venue's, recorded as stated.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MarginState {
+    /// The venue's margin type for the subaccount, such as `PM2` or `SM`.
+    pub margin_type: Option<String>,
+    /// The manager the subaccount was opened under, as the venue names it.
+    pub manager: Option<String>,
+    /// The risk universe it margins in, as the venue names it.
+    pub risk_universe: Option<String>,
+    /// The subaccount's value.
+    pub value: Option<Num>,
+    /// Its initial margin.
+    pub initial_margin: Option<Num>,
+    /// Its maintenance margin.
+    pub maintenance_margin: Option<Num>,
+    /// The value of its positions.
+    pub positions_value: Option<Num>,
+    /// The value of its collateral.
+    pub collateral_value: Option<Num>,
+    /// The margin its open orders hold.
+    pub open_orders_margin: Option<Num>,
+    /// Whether the venue says it is under liquidation.
+    pub under_liquidation: Option<bool>,
+}
+
+/// One open position of a subaccount, options and perpetuals alike, **as the
+/// venue states it**: the greeks are the venue's, never computed here.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PositionState {
+    /// The instrument, as the venue names it (`BTC-20261225-60000-P`).
+    pub instrument: String,
+    /// The venue's type for it: `option`, `perp`, `erc20`.
+    pub instrument_type: Option<String>,
+    /// Signed: positive is long.
+    pub amount: Option<Num>,
+    /// The average entry price.
+    pub average_price: Option<Num>,
+    /// The venue's mark.
+    pub mark_price: Option<Num>,
+    /// The position at the mark.
+    pub mark_value: Option<Num>,
+    /// Unrealised profit.
+    pub unrealised_pnl: Option<Num>,
+    /// Delta.
+    pub delta: Option<Num>,
+    /// Gamma.
+    pub gamma: Option<Num>,
+    /// Theta.
+    pub theta: Option<Num>,
+    /// Vega.
+    pub vega: Option<Num>,
+    /// The position's initial margin.
+    pub initial_margin: Option<Num>,
+    /// The position's maintenance margin.
+    pub maintenance_margin: Option<Num>,
+    /// Where the venue would liquidate it, where it states one.
+    pub liquidation_price: Option<Num>,
+    /// Funding paid or received since opened, for a perpetual.
+    pub cumulative_funding: Option<Num>,
+}
+
+/// One collateral asset of a subaccount, with what it contributes to the
+/// subaccount's margin, **as the venue states it**.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Collateral {
+    /// The asset, as the venue names it.
+    pub asset: String,
+    /// The venue's type for it.
+    pub asset_type: Option<String>,
+    /// The amount held.
+    pub amount: Option<Num>,
+    /// The venue's mark.
+    pub mark_price: Option<Num>,
+    /// The amount at the mark.
+    pub mark_value: Option<Num>,
+    /// Its contribution to initial margin.
+    pub initial_margin: Option<Num>,
+    /// Its contribution to maintenance margin.
+    pub maintenance_margin: Option<Num>,
+    /// Interest accrued since held.
+    pub cumulative_interest: Option<Num>,
+    /// Interest not yet settled.
+    pub pending_interest: Option<Num>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1407,6 +1505,131 @@ mod tests {
                 matches!(kind.addressing(), crate::dataset::Addressing::Account),
                 "{kind} sits under the account"
             );
+            let back: Envelope = serde_json::from_value(json).unwrap();
+            assert_eq!(back, envelope, "{kind} round-trips exactly");
+        }
+    }
+
+    #[test]
+    fn a_subaccounts_margin_rows_carry_no_float_and_every_figure_is_optional() {
+        // The figures of design.md's measured trade (2026-11-24, Derive's
+        // public simulation): a short put and its perpetual hedge on USDC.
+        let account = Account::new("derive_s1").unwrap();
+        let full = [
+            Event::MarginState(MarginState {
+                margin_type: Some("PM2".into()),
+                manager: Some("1".into()),
+                risk_universe: Some("prime".into()),
+                value: num("100000"),
+                initial_margin: num("93635.12"),
+                maintenance_margin: num("95210.4"),
+                positions_value: num("-2145.61"),
+                collateral_value: num("100000"),
+                open_orders_margin: num("0"),
+                under_liquidation: Some(false),
+            }),
+            Event::PositionState(PositionState {
+                instrument: "BTC-20261225-60000-P".into(),
+                instrument_type: Some("option".into()),
+                amount: num("-1"),
+                average_price: num("2145.61"),
+                mark_price: num("2151.3"),
+                mark_value: num("-2151.3"),
+                unrealised_pnl: num("-5.69"),
+                delta: num("-0.46"),
+                gamma: num("0.000041"),
+                theta: num("-31.2"),
+                vega: num("82.4"),
+                initial_margin: num("9819"),
+                maintenance_margin: num("7364.25"),
+                liquidation_price: None,
+                cumulative_funding: None,
+            }),
+            Event::Collateral(Collateral {
+                asset: "USDC".into(),
+                asset_type: Some("erc20".into()),
+                amount: num("100000"),
+                mark_price: num("1"),
+                mark_value: num("100000"),
+                initial_margin: num("0"),
+                maintenance_margin: num("0"),
+                cumulative_interest: num("0"),
+                pending_interest: num("0"),
+            }),
+        ];
+        // Every figure absent: what a venue that states nothing yields.
+        let bare = [
+            Event::MarginState(MarginState {
+                margin_type: None,
+                manager: None,
+                risk_universe: None,
+                value: None,
+                initial_margin: None,
+                maintenance_margin: None,
+                positions_value: None,
+                collateral_value: None,
+                open_orders_margin: None,
+                under_liquidation: None,
+            }),
+            Event::PositionState(PositionState {
+                instrument: "BTC-PERP".into(),
+                instrument_type: None,
+                amount: None,
+                average_price: None,
+                mark_price: None,
+                mark_value: None,
+                unrealised_pnl: None,
+                delta: None,
+                gamma: None,
+                theta: None,
+                vega: None,
+                initial_margin: None,
+                maintenance_margin: None,
+                liquidation_price: None,
+                cumulative_funding: None,
+            }),
+            Event::Collateral(Collateral {
+                asset: "USDC".into(),
+                asset_type: None,
+                amount: None,
+                mark_price: None,
+                mark_value: None,
+                initial_margin: None,
+                maintenance_margin: None,
+                cumulative_interest: None,
+                pending_interest: None,
+            }),
+        ];
+        let integers = ["seq", "at_micros", "recv_micros"];
+        fn walk(value: &serde_json::Value, key: &str, integers: &[&str], bad: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Number(_) if !integers.contains(&key) => {
+                    bad.push(format!("{key} = {value}"))
+                }
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        walk(v, k, integers, bad);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, key, integers, bad);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for event in full.into_iter().chain(bare) {
+            let kind = event.kind();
+            assert!(
+                matches!(kind.addressing(), crate::dataset::Addressing::Account),
+                "{kind} sits under the account"
+            );
+            let envelope = Envelope::for_account(venue(), account.clone(), None, 20, event);
+            let json = serde_json::to_value(&envelope).unwrap();
+            let mut bad = Vec::new();
+            walk(&json, "", &integers, &mut bad);
+            assert!(bad.is_empty(), "{kind}: numbers on the wire: {bad:?}");
             let back: Envelope = serde_json::from_value(json).unwrap();
             assert_eq!(back, envelope, "{kind} round-trips exactly");
         }
