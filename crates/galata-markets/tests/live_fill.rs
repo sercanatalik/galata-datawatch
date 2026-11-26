@@ -194,15 +194,22 @@ impl Harness {
     }
 
     async fn open(&self, last: Option<u64>) -> (StatusCode, Body) {
+        self.open_at("from=0", last).await
+    }
+
+    /// A client starting where `start` says: `from=…` or `after=…`.
+    async fn open_at(&self, start: &str, last: Option<u64>) -> (StatusCode, Body) {
         let app = app(
             Tokens::from_source(&Stand).unwrap(),
             routes(self.markets.clone()),
         );
-        let mut request =
-            Request::get("/v1/live?venue=hyperliquid&tickers=BTC&kinds=quotes&from=0").header(
-                "Authorization",
-                format!("Bearer stand-in-{}", token_var(CLIENTS[2])),
-            );
+        let mut request = Request::get(format!(
+            "/v1/live?venue=hyperliquid&tickers=BTC&kinds=quotes&{start}"
+        ))
+        .header(
+            "Authorization",
+            format!("Bearer stand-in-{}", token_var(CLIENTS[2])),
+        );
         if let Some(last) = last {
             request = request.header("Last-Event-ID", last.to_string());
         }
@@ -302,6 +309,55 @@ async fn a_client_resuming_across_a_fill_receives_the_same_fill() {
     // From the declaration itself: no fill again.
     let after = read(h.open(Some(declared_at)).await.1, 2).await;
     assert_eq!(after, first[8..].to_vec());
+}
+
+/// A client joining after a history answer's bound: capture publishes a
+/// declaration with no record sequence (0), which the bound must not hide.
+/// Found on the deployment by task 6.5, where a client started after a bound
+/// received neither the fill nor the declaration.
+#[tokio::test]
+async fn a_client_after_a_tape_bound_receives_the_fill() {
+    let h = Harness::start(true).await;
+    h.outage().await;
+    let got = read(h.open_at(&format!("after={}", h.seq(2)), None).await.1, 8).await;
+    let order: Vec<(&str, u64)> = got.iter().map(|r| (r.event.as_str(), r.seq)).collect();
+    assert_eq!(
+        order,
+        [
+            ("message", h.seq(3)),
+            ("message", h.seq(5)),
+            ("fill", h.seq(4)),
+            ("fill", h.seq(6)),
+            ("fill", h.seq(7)),
+            ("fill", h.seq(8)),
+            ("message", h.seq(9)),
+            ("message", h.seq(10)),
+        ],
+        "everything after the bound once, the missed ones in the declaration's place"
+    );
+}
+
+/// A bound inside the hole: the tape already holds the start of the span, so
+/// the fill sends only what lies after the bound.
+#[tokio::test]
+async fn a_fill_sends_nothing_the_tape_bound_already_covers() {
+    let h = Harness::start(true).await;
+    h.outage().await;
+    let got = read(h.open_at(&format!("after={}", h.seq(6)), None).await.1, 4).await;
+    let order: Vec<(&str, u64)> = got.iter().map(|r| (r.event.as_str(), r.seq)).collect();
+    assert_eq!(
+        order,
+        [
+            ("fill", h.seq(7)),
+            ("fill", h.seq(8)),
+            ("message", h.seq(9)),
+            ("message", h.seq(10)),
+        ]
+    );
+    assert!(
+        got[1].id.is_some(),
+        "the last fill sent still names the declaration"
+    );
 }
 
 #[tokio::test]

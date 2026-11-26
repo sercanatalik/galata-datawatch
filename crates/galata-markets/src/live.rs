@@ -348,20 +348,31 @@ fn bus(error: impl std::fmt::Display) -> Refused {
 /// What a connection does with one window message: send it, send it as a
 /// declaration, or skip it.
 pub fn judge(sub: &Subscription, envelope: &Envelope, id: u64, raw: &[u8]) -> Option<Sent> {
-    if let Start::After(after) = sub.start
-        && envelope.seq <= after
-    {
-        return None;
-    }
-    let data = String::from_utf8_lossy(raw).into_owned();
+    // A declaration first: it is the bus's alone and carries no record
+    // sequence (capture publishes it with 0), so the tape bound says nothing
+    // about it. What it stands for is judged by the bound once filled.
     if let Event::Gap(gap) = &envelope.event
         && gap.cause == GapCause::Unpublished
     {
+        let data = String::from_utf8_lossy(raw).into_owned();
         return Some(Sent::Declaration { id, data });
     }
+    if !after_the_bound(sub, envelope.seq) {
+        return None;
+    }
+    let data = String::from_utf8_lossy(raw).into_owned();
     sub.kinds
         .contains(&envelope.kind())
         .then_some(Sent::Event { id, data })
+}
+
+/// Whether a record sequence is one a client started after a tape bound has
+/// not already read from history; every one is, for any other start.
+fn after_the_bound(sub: &Subscription, seq: u64) -> bool {
+    match sub.start {
+        Start::After(after) => seq > after,
+        _ => true,
+    }
 }
 
 /// **Pump the window into a connection's queue** until the client leaves or
@@ -415,7 +426,9 @@ async fn pump(
                         let mut events: Vec<Sent> = fill
                             .iter()
                             .filter(|e| {
-                                sub.tickers.contains(&e.ticker) && sub.kinds.contains(&e.kind)
+                                sub.tickers.contains(&e.ticker)
+                                    && sub.kinds.contains(&e.kind)
+                                    && after_the_bound(&sub, e.seq)
                             })
                             .map(|e| Sent::Fill {
                                 id: None,
