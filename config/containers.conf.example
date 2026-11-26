@@ -28,8 +28,9 @@
 #           full").
 #   capture 210 MiB in use for nine instruments; 2G leaves room for the cap of
 #           fifty, if what it holds grows with the instruments.
-#   ledger  not measured: no ledger is declared here. Measure it before it is
-#           relied on, and before this line is copied.
+#   ledger  measured 2026-11-26 (add-hyperliquid-portfolio-margin-state): 24 MiB
+#           steady on one account and 59 MiB walking a long history, 0.5 s of
+#           cpu an hour; 512M holds the history the fold keeps as it grows.
 #   markets galata-markets. An answer is held whole before it is sent: the
 #           largest the limits allow (1.9 million rows, 167 MB) took the
 #           container to 536 MiB, idle is 30 MiB, and ten live clients on
@@ -44,4 +45,4 @@ flows                  4     12G
 nats                   1     1G
 capture:hyperliquid    2     2G
 markets                2     2G
-# ledger:hyperliquid   2     2G
+ledger:hyperliquid     1     512M

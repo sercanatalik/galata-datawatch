@@ -4923,7 +4923,9 @@ host-service-containers
   The broker cannot see the record        met       the broker mounts /etc/galata only
   A native reader sees what a container
     wrote                                 met       the archive's newest files, listed natively, seconds old
-  The ledger's record is not owner-only   not seen  no ledger is declared here (task 7.5)
+  The ledger's record is not owner-only   met       2026-11-26 (add-hyperliquid-portfolio-margin-state 6.5):
+                                                    made 750, the ledger stopped and was refused at each
+                                                    start, naming var/ledger and 750; restored, it ran
   Capture is stopped                      met       one SIGTERM: a clean stop, .clean-shutdown in the same second
   The container is gone after a stop      met       0.2 s after the signal
   A stated limit is applied               met       for the three running services, as stated; the ledger has no line
@@ -5786,3 +5788,103 @@ indices in `tokenToState` or the three lists went unnamed.
 **Weight**: the three accounts' `userAbstraction`, spot and borrow reads,
 `spotMeta` and the search through recent trades cost 424 and about 200
 more for the unified sample.
+
+## The ledger reading balances, natively — 2026-11-26
+
+`add-hyperliquid-portfolio-margin-state` task 5.1, on `4ad4ccb`. The release
+`galata-ledger hyperliquid`, natively, each run into a scratch root with a
+throwaway fingerprint key, at the deployment's cadences (`snapshot_secs =
+300`, `discover_secs = 600`, `events_secs = 300`, `ledger_share = 0.25`) and
+on the main dex and `xyz`. The operator's master, alias `main`, for an hour
+(14:50:29 to 15:50:29 UTC); beside it for ten minutes a public
+portfolio-margin account taken from `recentTrades`, alias `pm`. No address is
+recorded, and of the master only counts.
+
+```text
+                                        main, an hour         pm, ten minutes
+mode                                    portfolioMargin       portfolioMargin
+snapshot passes                         12                    1
+  clearinghouseState (two dexes)        24                    2
+  spotClearinghouseState                12                    1
+  borrowLendUserState                   12                    1
+  a pass with neither answer nor gap    0                     0
+gaps                                    0                     0
+history pages (fills, funding, updates) 12, 14, 12            14, 6, 1
+discovery runs                          6                     1
+weight a minute                         25.3                  50.1, a catch-up
+  declared for the set                  23.2                  23.2
+  the share allows                      300                   300
+projected rows per read                 balances 1, portfolio_margin 1, token_margin 5,
+                                        borrow_lend 1, lend_health 1, margin 1 per dex
+peak memory (RSS)                       24 MiB                59 MiB
+cpu time                                0.50 s in the hour    0.31 s
+```
+
+**Every pass read both, and the record says what was stated.** On both
+accounts the newest projected read is the last spot answer's, and its
+figures are the answer's digit for digit, the venue's portfolio-margin ratio
+included (the public account's `0.2405425503`, a hold of `93477.86691466`).
+A read is told from the next by its receipt, so twelve reads that stated the
+same balance are twelve rows.
+
+**The declared cost is the spent cost.** 23.2 a minute declared for one
+account on two dexes (0.8 snapshots, 4.4 spot and borrow, 4 discovery and
+mode, 12 history, 2 `spotMeta`); 25.3 spent over the hour, the difference
+being the start's role (60) and its first discovery. Eight percent of the
+ledger's share.
+
+**A long history delays the first snapshots.** The public account has a
+trading history the operator's does not: its run spent most of its ten
+minutes walking 14 pages of fills, paced within the share, and took one
+snapshot pass where two were due. The loop walks history and takes
+snapshots in turn, as it did before this change, so a catch-up postpones
+snapshots rather than gapping them. The operator's account walked its
+history in the first minute and missed no pass.
+
+## The ledger in its container — 2026-11-26
+
+`add-hyperliquid-portfolio-margin-state` tasks 6.4 to 6.6. `ledger:hyperliquid`
+installed at 15:51 UTC from `galata-datawatch:latest`, built from `4ad4ccb`, at
+1 CPU and 512M (5.1's figures): the operator's master, alias `main`, on the
+main dex and `xyz`, at `snapshot_secs = 300`, its address and a new
+fingerprint key read from the vault by the `ledger-hyperliquid` token.
+
+```text
+--status                     running, tree 4ad4ccb, 1 CPUs, 512M; token to 2027-11-26
+published ports              none
+mounts                       /app/var/ledger, /app/var/status, /app/var/ledger-tape (rw);
+                             its configuration (ro); nothing else of var/
+environment, by name         GALATA_CONFIG, PATH, NO_COLOR: no secret
+the roots, seen inside       700 /app/var/ledger, 700 /app/var/ledger-tape
+```
+
+**A record others can read is refused, in a container too.** At 15:52:27 the
+record was made `750` and the service restarted through launchd: the running
+ledger stopped cleanly ("asked to terminate; stopping cleanly"), and every
+start after it was refused with *"the ledger root var/ledger has mode 750. Its
+raw answers carry sub-account addresses, so it must be readable by its owner
+only: chmod 700"*, exit 1, launchd scheduling the next attempt. Restored to
+`700` at 15:53:03, it started on the next attempt (15:53:15) and recorded
+again. `host-service-containers`' scenario "The ledger's record is not
+owner-only", left unseen by `containerise-host-services`, is met.
+
+**An hour in its container** (15:51:44 to 16:54:15), read from the
+deployment's own record and projection:
+
+```text
+snapshot passes                  14, the start after the refusal test included
+  clearinghouseState             28 (two dexes)
+  spotClearinghouseState         14
+  borrowLendUserState            14
+gaps                             0
+history pages                    13 fills, 15 funding, 13 updates; 8 discovery runs
+weight a minute                  27.5, against 300 the share allows
+projected reads                  balances 14, portfolio_margin 14 (token_margin 5 a read),
+                                 borrow_lend 14, lend_health 14
+the newest read                  the last spot answer's, the venue's ratio equal to it
+the container                    30 MiB, 0.36 s of cpu; nothing logged at WARN or above
+```
+
+The restart the refusal test made is the record's only interruption, and no
+gap stands for it: the ledger asks at each start, and the next snapshot was
+taken on the cadence.
