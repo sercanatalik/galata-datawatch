@@ -5437,8 +5437,66 @@ repeated on that build (task 6.6).
 - Capture's "the sink is refusing events" and "taking events again" alternate
   while the broker is down, a pair every 20 s, and ten pairs in 0.4 s as it
   came back: the queue gains a few places and loses them again.
-- The broker stamps a message about 0.17 s behind capture's clock: each
-  container is a VM with its own. The declarations were stored at 03:40:05.961
-  by the broker's clock, after capture's 03:40:06.046 by its own.
+- The broker's clock ran at least 0.17 s behind capture's on that start:
+  each container is a VM with its own. The declarations were stored at
+  03:40:05.961 by the broker's clock, after capture's 03:40:06.046 by its own.
 - The broker's container came back at 118 MiB and was at 310 MiB 90 s later,
   the guest's cache filling again.
+
+## The broker stopped again, on the build that declares where the hole is — 2026-11-26
+
+`add-bus-replay-window`, task 6.6, with the maintainer's go-ahead: capture
+reinstalled on the image built from `483da42` (task 4.3), the broker still on
+`3f025e2`'s, whose `galata-bus` did not change; then 6.5's stop, by the same
+script, and the same comparison. **Capture had started 12 s before the stop**,
+so its start-up walks and history pages ran through the outage: a harder
+case than the first, since a page of history is hundreds of candles at once.
+
+```text
+07:14:58    capture reinstalled      published the window it was not covering: a downtime
+                                     gap for each of its 27 pairs
+07:15:09.9  bootout                  unloaded in 0.13 s; the container gone
+07:15:39    capture                  its start-up walks; then queued history as fills, and
+                                     published the time the stream was not yet asked (9)
+07:16:03.5  capture                  "the sink is refusing events": 53 s held, the queue
+                                     filled by pages of history
+07:19:10.5  bootstrap                launchd started it
+07:19:11.9  galata-bus               stream applied: MARKETS 537,080 messages, 176,586,738 bytes
+07:19:13.5  capture                  connected, 3 s after the server; declared
+                                     07:16:02.724 -> 07:19:13.461, pairs=27
+```
+
+```text
+the window kept what it held     529,320 of copy P's 529,320 messages in range are in B,
+                                 unchanged; 75 aged out between the copies; B's oldest
+                                 is from 05:21
+the declarations                 27, one span of 190.7 s, cause "unpublished"; beside them on
+                                 each `.gaps` subject, capture's own downtime gaps from its
+                                 restart, told apart by their cause
+where a consumer meets them      each instrument's three stored together, between the last
+                                 message before the hole and the first after it (BTC:
+                                 received 07:16:03.437, then 07:19:13.625)
+    after them, received before the span       0      (8,081 on the first build)
+    before them, received after it             0
+    between one instrument's declarations      0
+the holes                        35 of 36 data subjects silent from within 5 s of the span's
+                                 start to its end or later; the other, GOLD's candles, quiet
+                                 from 07:15:50.7, as its candles are (up to 30 s apart in the
+                                 five minutes before)
+against the archive              07:10:00 -> 07:20:38, 37,105 market payloads carrying events
+    not in the window            12,510 (quotes 9,895, funding 1,674, candles 941)
+    inside the declared span     12,510
+    outside it, or before the stop   0
+    set aside                    9 funding pages from capture's start-up walk, each `[]`:
+                                 asked a minute of hourly funding, they carry no event. The
+                                 only `fundingHistory` payloads archived that day
+archived while it was down       13,503; 1,174 of them reached the window late
+```
+
+**The span starts 0.7 s before the first payload missing whole.** A page of
+ETH's hourly candles, received at 07:16:02.724, was cut by the queue filling:
+some of its candles reached the window and the rest were dropped. Compared by
+payload, it reads as present; the declaration names it, by its receipt time.
+
+The broker's container came back at 132 MiB and was at 326 MiB 90 s later, as
+on the first stop.
