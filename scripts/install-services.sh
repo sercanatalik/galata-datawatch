@@ -193,7 +193,7 @@ vet_programs() {  # the programs a service's start would exec
     if [[ "$said" == ready:* ]]; then set -- $said; echo "$2"; fi
     case "$spec" in
         # The two a secret-holding start runs before the service itself.
-        nats|tower|capture:*|ledger:*)
+        nats|tower|markets|capture:*|ledger:*)
             echo "$ROOT/target/release/galata-token-expiry"
             echo "$VAULT_BIN/gv" ;;
     esac
@@ -208,7 +208,7 @@ if [[ "${1:-}" == --status ]]; then
     printf '%-34s %-10s %s\n' LABEL "PID/EXIT" MANAGED
     launchctl list | awk '$3 ~ /^com\.galata\./ {print $1, $2, $3}' | sort -k3 | while read -r pid status label; do
         case "$label" in
-            com.galata.nats|com.galata.tower|com.galata.flows|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
+            com.galata.nats|com.galata.tower|com.galata.flows|com.galata.markets|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
             com.galata.vault) managed="NO — the vault is no longer a service here; --uninstall vault removes it" ;;
             *) managed="NO — not rendered by this installer" ;;
         esac
