@@ -57,12 +57,14 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 - **Capture declares what the bus did not carry** (`add-bus-replay-window`).
   An event dropped from the bus — the queue to the broker full, or a publish
-  refused — is noted by its receipt time; once a publish succeeds again,
-  capture sends for every pair it covers a gap with the cause `unpublished`
-  over the dropped span, on the bus only. The record is unaffected and holds
-  no declaration. A declaration that cannot be sent stays pending, merged with
-  the next span. `NatsSink::unpublished` hands the pending span to the publish
-  task.
+  refused — is noted by its receipt time; capture sends for every pair it
+  covers a gap with the cause `unpublished` over the dropped span, on the bus
+  only, just before the first event received after the span (or once a
+  publish succeeds with the queue empty), so it is stored where the hole is.
+  The record is unaffected and holds no declaration. A declaration that cannot
+  be sent stays pending, merged with the next span. `NatsSink::unpublished`
+  hands the pending span to the publish task; `Unpublished::ends_before` says
+  whether an event is the first after it.
 - `galata-bus`, the broker's process (`add-bus-replay-window`): it starts a
   helper of itself that waits for the server, applies the stream table as
   `bus-admin` and logs what each stream holds, then becomes `nats-server`

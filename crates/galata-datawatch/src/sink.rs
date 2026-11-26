@@ -183,9 +183,10 @@ pub struct NatsSink {
 /// One span, not a list: a declaration covers every pair for the whole span,
 /// which overstates the loss where only some pairs dropped — the safe
 /// direction. Shared between the sink, which drops when its queue is full, and
-/// the publish task, which notes a refused publish and declares once one
-/// succeeds (`boot`). A span that could not be declared is put back and merged
-/// with the next, so a declaration is never lost to make room for data.
+/// the publish task, which notes a refused publish and declares the span where
+/// the hole is (`boot::drain`). A span that could not be declared is put back
+/// and merged with the next, so a declaration is never lost to make room for
+/// data.
 #[cfg(feature = "capture")]
 #[derive(Debug, Clone, Default)]
 pub struct Unpublished(std::sync::Arc<std::sync::Mutex<Option<(i64, i64)>>>);
@@ -197,6 +198,16 @@ impl Unpublished {
         self.merge((recv_micros, recv_micros));
     }
 
+    /// Whether a span is pending that ended before this receipt time: an event
+    /// received then is the first after the hole, and the declaration goes
+    /// ahead of it.
+    pub fn ends_before(&self, recv_micros: i64) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|span| *span)
+            .is_some_and(|(_, to)| to < recv_micros)
+    }
     /// The span to declare, leaving nothing pending.
     pub fn take(&self) -> Option<(i64, i64)> {
         self.0.lock().ok().and_then(|mut span| span.take())
@@ -231,7 +242,7 @@ impl NatsSink {
     }
 
     /// What this sink could not hand over, shared with the task that declares
-    /// it once publishing succeeds again.
+    /// it on the bus.
     pub fn unpublished(&self) -> Unpublished {
         self.unpublished.clone()
     }

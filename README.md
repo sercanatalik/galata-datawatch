@@ -194,12 +194,17 @@ streams are declared beside the grants and applied by the broker's own start
 **The market window is lossy, and every hole in it is declared.** Capture
 drops an event from the bus, never from the record, when its queue to the
 broker is full or a publish is refused. It keeps the earliest and latest
-receipt time dropped, and once a publish succeeds again it sends, for every
-pair it covers, a gap with the cause `unpublished` over that span:
+receipt time dropped, and sends, for every pair it covers, a gap with the
+cause `unpublished` over that span:
 
 - **`unpublished` means the record holds what the bus did not carry.** A
   consumer that meets one fetches the span from history. Every other gap cause
   says the data exists nowhere.
+- **Where the hole is.** Sent just before the first event received after the
+  span, or, if none comes, once a publish succeeds with the queue empty: what
+  the queue still held from before the span is published first, so a
+  consumer reading in order meets the declaration between the last event
+  before the hole and the first after it.
 - **Sent on the bus and never archived**, so the tape never holds one.
 - **Every pair, over the whole span.** A consumer of one instrument meets the
   hole on that instrument's own subject; where only some pairs dropped, the
@@ -686,9 +691,10 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
   container runs `galata-bus`, which applies the stream table once the server
   answers and is the server meanwhile.
 - **The broker's memory limit follows what it keeps.** 256M was measured
-  serving capture and the status subjects, before it kept a window. It runs
-  at a provisional 1G while the window's figure is measured on the
-  deployment and recorded in `design/measured.md`, which then sets the line.
+  serving capture and the status subjects, before it kept a window. With two
+  hours of nine instruments kept it uses 329 MiB, most of it the guest's
+  cache of the store; the server itself is under 80 MiB. 1G leaves room for
+  fifty instruments' window (`design/measured.md`, "The bus's window, full").
 - **A container is given its own roots**, where `[paths]` and `[ledger]` put
   them, and a copy of the configuration taken at each start. A root that
   does not exist is refused, never created.

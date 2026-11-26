@@ -38,9 +38,10 @@ use async_nats::jetstream::stream::{Config, DiscardPolicy, RetentionPolicy, Stor
 pub const MARKET_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// The market window's byte cap: age, not size, is what should remove a
-/// message. **A placeholder until measured** — twice the two hours expected at
-/// fifty instruments, from an assumed 300-byte envelope — and set from the
-/// measured figure in `add-bus-replay-window` task 6.4.
+/// message. **Twice the two hours expected at fifty instruments**, as measured
+/// on the deployment with nine (`design/measured.md`, "The bus's window,
+/// full"): a message stored is about 330 bytes and an instrument about nine
+/// messages a second, so two hours of fifty is about 1.04 GB.
 pub const MARKET_WINDOW_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
 /// How long account data is kept.

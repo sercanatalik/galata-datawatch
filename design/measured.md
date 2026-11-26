@@ -5327,3 +5327,118 @@ above, on the build with the perpetuals, 396 s, no broker:
 
 **Not exercised live:** an underlying whose perpetual the venue does not list.
 All eighteen have one, so the path is covered by tests only.
+
+## The bus's window, full — 2026-11-26
+
+`add-bus-replay-window`, task 6.4. The broker and capture in their containers
+on the images built from `3f025e2`; the window kept since 2026-11-25 21:06:22,
+measured at 03:33, with two hours of nine instruments in it. **No identity was
+added and no password read:** the store was copied out of the running broker
+(`tar` through `container exec`, 1.5 s, nothing stopped) and served by a
+scratch `nats-server` 2.15.3 on this Mac's loopback, with no authorization,
+and replayed whole from there. Memory is `container stats` and the guest's
+own `/proc`.
+
+```text
+MARKETS, 01:33:34 -> 03:33:08
+    messages                     565,101       78.8 a second, 36 subjects
+    bytes, as the stream counts  185.8 MB      329 a message: envelope, subject, record
+    on the volume                183 MiB
+    envelope                     268 B mean, 272 median, 302 p99, 305 at most
+      Quote   404,928   272 B        Mark    63,111   273 B
+      Funding  63,111   219 B        Candle  33,617   299 B
+STATUS                           1 message, 6,195 B
+ACCOUNTS                         empty: no ledger publishes yet
+
+the broker's container, window full
+    in use (container stats)     329 MiB of 1 GiB
+      nats-server                67 MiB resident, 78 MiB at most (54 MiB anonymous)
+      the guest's file cache     273 MiB, given back when wanted
+    the copy, replayed whole     the scratch server's resident memory 92.4 -> 92.9 MB
+capture's container              246 MiB of 2 GiB
+```
+
+**Fifty instruments, from nine.** 78.8 a second is 8.8 an instrument; fifty
+at that rate is 438 a second, 3.15 million messages in two hours, **1.04 GB**
+at 329 bytes. Twice that is 1.93 GiB: the 2 GiB cap set before the
+measurement stands, and the file store's 4 GB still exceeds it. (The design
+assumed 300 a second at fifty and a 300-byte envelope; scaling the measured
+rate per instrument is the larger figure, so the cap holds for either.)
+
+**The memory limit stays at 1G.** The server itself is under 80 MiB with the
+window full, and a whole replay did not move it; the rest of what
+`container stats` counts is the guest's cache of the store. Fifty
+instruments' window is about five times the bytes, which 1G holds the newest
+part of in cache and the server's own memory with room. The containers'
+total is unchanged: 18G, and 30G with the builder, against 64 GiB.
+
+**`galata-bus`'s helper stays a zombie.** Once it has applied the table it
+exits, and its parent is `nats-server`, which `exec` made PID 1 in the
+container and which does not reap it: one process entry, no memory, until the
+broker stops.
+
+## The broker stopped for four minutes, capture publishing — 2026-11-26
+
+`add-bus-replay-window`, task 6.5, with the maintainer's go-ahead. The store
+copied (P) just before the stop; the agent booted out, held down for 240 s
+— longer than capture's queue of 8,192 holds at 79 a second, about 104 s —
+and bootstrapped, so launchd started it; the store copied again (B) 90 s
+after. Both copies replayed from scratch servers as above, and compared with
+capture's archive.
+
+```text
+03:36:02.6  bootout              unloaded in 0.13 s; the container gone
+            capture              "disconnected"; then "timed out" every 5 s, later 9 s
+03:38:27.3  capture              "the sink is refusing events": 145 s held, by the
+                                 client's buffer and the queue
+03:40:02.1  bootstrap            launchd started it
+03:40:02.7  nats-server          restored MARKETS, 544,366 messages, in 10 ms
+03:40:03.0  galata-bus           stream applied: MARKETS 544,361 messages, 178,976,326 bytes;
+                                 ACCOUNTS 0; STATUS 1
+03:40:06.1  capture              connected, 3.4 s after the server (its backoff);
+                                 "declared on the bus what it did not carry"
+                                 03:38:27.257 -> 03:40:06.046, pairs=27
+```
+
+```text
+the window kept what it held     534,417 of copy P's messages still in range are in B,
+                                 unchanged; 70 older ones aged out between the copies;
+                                 B's oldest is from 01:42, not the restart
+the declarations                 27, one span: 9 instruments x 3 series, each on the
+                                 instrument's `.gaps` subject; cause "unpublished",
+                                 told apart from a record gap by it
+the holes                        every one of the 36 data subjects is silent across
+                                 the span (BTC quotes 03:38:27.256 -> 03:40:06.167);
+                                 `.marks` is covered by the funding series' declaration,
+                                 whose payload it comes from
+against the archive              03:26:00 -> 03:41:30, 57,746 market payloads
+    not in the window            6,196 (quotes 5,010, funding 882, candles 304)
+    inside the declared span     6,196, receipts 03:38:27.256 -> 03:40:06.046: the span's
+                                 own ends
+    outside it, or before the stop   0
+archived while it was down       14,847; 8,895 of them reached the window late, from the
+                                 client's buffer and the queue
+```
+
+**The declarations are stored ahead of the backlog.** Each instrument's three
+declarations were stored at 03:40:05.961, before 8,081 envelopes received
+03:36:30.4 to 03:38:27.256, which the queue then drained; the client's own
+buffer, received 03:36:02.6 to 03:36:30.4, went first. Nothing received after
+the span precedes them. A consumer replaying in stream order meets the
+declaration, then older data, then the data after the span: the span is
+named exactly, but the declaration is not where the hole is. It is sent as
+soon as one publish succeeds again (design D7 as first built), while the
+queue still holds what was received before the span. It is now sent just
+before the first event received after the span (task 4.3), and the stop is
+repeated on that build (task 6.6).
+
+**Seen beside it.**
+
+- Capture's "the sink is refusing events" and "taking events again" alternate
+  while the broker is down, a pair every 20 s, and ten pairs in 0.4 s as it
+  came back: the queue gains a few places and loses them again.
+- The broker stamps a message about 0.17 s behind capture's clock: each
+  container is a VM with its own. The declarations were stored at 03:40:05.961
+  by the broker's clock, after capture's 03:40:06.046 by its own.
+- The broker's container came back at 118 MiB and was at 310 MiB 90 s later,
+  the guest's cache filling again.

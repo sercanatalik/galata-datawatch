@@ -20,10 +20,12 @@
 #           container, the hourly projection's three-day shape at 8.2 GiB, and
 #           a lane given 4G was killed, not slowed. The limit follows the largest day
 #           in the window, not the window's length.
-#   nats    27 MiB in use, serving capture and the status subjects, before
-#           it kept a window of the bus. 1G is provisional, four times that
-#           line, while the window's figure is measured on the deployment
-#           (add-bus-replay-window, task 6.4); the measurement replaces it.
+#   nats    27 MiB in use before it kept a window of the bus; 329 MiB with
+#           two hours of nine instruments kept, of which the server is under
+#           80 MiB and the rest the guest's cache of the store, given back
+#           when wanted. 1G leaves room for fifty instruments' window, about
+#           five times as many bytes (design/measured.md, "The bus's window,
+#           full").
 #   capture 210 MiB in use for nine instruments; 2G leaves room for the cap of
 #           fifty, if what it holds grows with the instruments.
 #   ledger  not measured: no ledger is declared here. Measure it before it is

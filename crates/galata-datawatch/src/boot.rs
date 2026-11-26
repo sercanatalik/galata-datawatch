@@ -861,8 +861,16 @@ async fn declare<P: Publisher + ?Sized>(publisher: &P, declarer: &Declarer) {
 ///
 /// **The only place that awaits a publish.** `NatsSink::emit` is synchronous
 /// and hands over through a bounded channel, so a broker that is slow costs
-/// dropped events and a counter — never a stalled capture loop. What it drops,
-/// and what a publish refuses, is declared once a publish succeeds again.
+/// dropped events and a counter — never a stalled capture loop.
+///
+/// **What it drops, and what a publish refuses, is declared where the hole
+/// is**: just before the first event received after the span, or, if none
+/// comes, once a publish succeeds with the queue empty. The queue's backlog
+/// was received before the span, so it is published before the declaration,
+/// and a consumer reading in order meets the declaration between the last
+/// event before the hole and the first after it. Declared as soon as one
+/// publish succeeded, it was stored ahead of that backlog (`design/measured.md`,
+/// "The broker stopped for four minutes, capture publishing").
 async fn drain<P: Publisher + ?Sized>(
     publisher: &P,
     rx: &mut tokio::sync::mpsc::Receiver<Outbound>,
@@ -870,6 +878,14 @@ async fn drain<P: Publisher + ?Sized>(
 ) {
     let mut reachable = true;
     while let Some(outbound) = rx.recv().await {
+        // Tried even while the broker refuses: a declaration that does not go
+        // out stays pending, and one that does is never behind an event newer
+        // than its span.
+        if let Outbound::Event(envelope) = &outbound
+            && declarer.unpublished.ends_before(envelope.recv_micros)
+        {
+            declare(publisher, declarer).await;
+        }
         let sent = match &outbound {
             Outbound::Event(envelope) => {
                 let Some(subject) = Subject::of(envelope) else {
@@ -899,7 +915,11 @@ async fn drain<P: Publisher + ?Sized>(
                     tracing::info!("the broker is taking events again");
                     reachable = true;
                 }
-                declare(publisher, declarer).await;
+                // Nothing queued behind it: nothing received before the span
+                // is still to come, and no later event may arrive soon.
+                if rx.is_empty() {
+                    declare(publisher, declarer).await;
+                }
             }
             Err(error) => {
                 if let Outbound::Event(envelope) = &outbound {
@@ -1139,6 +1159,24 @@ mod tests {
                 .filter(|(_, e)| !matches!(e.event, Event::Gap(_)))
                 .count()
         }
+        /// What was sent, in order: an event by its receipt time, a
+        /// declaration as `None`.
+        fn sequence(&self) -> Vec<Option<i64>> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, e)| match e.event {
+                    Event::Gap(_) => None,
+                    _ => Some(e.recv_micros),
+                })
+                .collect()
+        }
+        /// A broker that refuses refuses everything, declarations included.
+        fn refuse(&self, refused: bool) {
+            *self.refuse_events.lock().unwrap() = refused;
+            *self.refuse_gaps.lock().unwrap() = refused;
+        }
     }
 
     impl Publisher for Recording {
@@ -1326,12 +1364,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_publish_is_declared_once_one_succeeds() {
+    async fn the_declaration_is_stored_between_the_backlog_and_what_came_after() {
+        // What stopping the broker for four minutes showed: when it answers
+        // again, the queue still holds what was received before the span. The
+        // declaration goes after that backlog, and before the first event
+        // received after the span.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(16);
+        let sink = NatsSink::new(tx);
+        let unpublished = sink.unpublished();
+        let declarer = Declarer::for_capture(&venue(), &declared(), unpublished.clone());
+        for recv in [1, 2] {
+            sink.emit(&quote(recv)).unwrap();
+        }
+        unpublished.note(3);
+        unpublished.note(5);
+        for recv in [6, 7] {
+            sink.emit(&quote(recv)).unwrap();
+        }
+        drop(sink);
+        let broker = Recording::default();
+        drain(&broker, &mut rx, &declarer).await;
+
+        assert_eq!(
+            broker.sequence(),
+            [Some(1), Some(2), None, None, Some(6), Some(7)],
+            "the backlog, the declaration for each pair, then what came after"
+        );
+        let spans: Vec<(i64, i64)> = broker
+            .gaps()
+            .iter()
+            .map(|(_, g)| (g.from_micros, g.to_micros))
+            .collect();
+        assert_eq!(spans, [(3, 5), (3, 5)]);
+    }
+
+    #[tokio::test]
+    async fn a_span_with_nothing_after_it_is_declared_once_the_queue_is_empty() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(16);
+        let sink = NatsSink::new(tx);
+        let unpublished = sink.unpublished();
+        let declarer = Declarer::for_capture(&venue(), &declared(), unpublished.clone());
+        for recv in [1, 2] {
+            sink.emit(&quote(recv)).unwrap();
+        }
+        unpublished.note(3);
+        unpublished.note(4);
+        drop(sink);
+        let broker = Recording::default();
+        drain(&broker, &mut rx, &declarer).await;
+        assert_eq!(
+            broker.sequence(),
+            [Some(1), Some(2), None, None],
+            "declared after the backlog, with no later event to wait for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_publish_is_declared_before_the_first_event_taken_again() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Outbound>(16);
         let sink = NatsSink::new(tx);
         let declarer = Declarer::for_capture(&venue(), &declared(), sink.unpublished());
         let broker = Recording::default();
-        *broker.refuse_events.lock().unwrap() = true;
+        broker.refuse(true);
         for recv in [7, 8] {
             sink.emit(&quote(recv)).unwrap();
         }
@@ -1344,13 +1438,18 @@ mod tests {
         drop(tx2);
         drain(&broker, &mut rx2, &declarer).await;
         assert!(
-            broker.gaps().is_empty(),
-            "nothing succeeded, so nothing is declared yet"
+            broker.sequence().is_empty(),
+            "nothing went out, so nothing is declared yet"
         );
-        *broker.refuse_events.lock().unwrap() = false;
+        broker.refuse(false);
         sink.emit(&quote(9)).unwrap();
         drop(sink);
         drain(&broker, &mut rx, &declarer).await;
+        assert_eq!(
+            broker.sequence(),
+            [None, None, Some(9)],
+            "declared ahead of the first event taken again"
+        );
         let spans: Vec<(i64, i64)> = broker
             .gaps()
             .iter()
