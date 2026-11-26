@@ -733,7 +733,7 @@ rendered from one tracked template and restarted whenever they exit.
 | `capture:<venue>` | outbound only | its venue's configuration and credentials |
 | `tower` | `127.0.0.1:8777` | the `reader` broker password |
 | `flows` (cereyan) | `127.0.0.1:4200` | nothing |
-| `markets` | this Mac's tailnet name, port 8790 | the `markets` broker password and its clients' tokens |
+| `markets` | this Mac's tailnet name, port 8780 | the `markets` broker password and its clients' tokens |
 
 ```sh
 cargo build --release --workspace --bins           # every binary, never one: the lane runs them in place
@@ -825,7 +825,7 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
 | `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
 | `nats` | `galata-nats` | its server configuration, the generated authorization file and a volume of its own | this Mac's tailnet name, port 4222 |
 | `flows` | `galata-flows` | the archive, the tape and a volume of its own | nowhere |
-| `markets` | `galata-markets` | the archive and the tape, **read-only** | this Mac's tailnet name, port 8790 |
+| `markets` | `galata-markets` | the archive and the tape, **read-only** | this Mac's tailnet name, port 8780 |
 
 - **The limits are stated, never defaulted.** A container given none gets
   4 CPUs and 1 GiB whatever it runs. A service's line states both, and a

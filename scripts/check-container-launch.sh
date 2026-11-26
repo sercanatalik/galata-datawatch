@@ -421,7 +421,7 @@ else
     has " run --rm --name galata-markets --cpus 2 --memory 2G " "it runs under its own name with the limits its line states"
     has "source=$scratch/var/archive,target=/app/var/archive,readonly" "it is given the archive read-only: it serves the record and must not be able to change it"
     has "source=$scratch/var/tape,target=/app/var/tape,readonly" "it is given the tape read-only"
-    has " --publish 100.64.0.7:8790:8790 " "its port is published on the tailnet address"
+    has " --publish 100.64.0.7:8780:8780 " "its port is published on the tailnet address"
     has "hand-secrets.sh $markets_names -- " "its bus password and its clients' tokens are handed over standard input, by name"
     has " with-secrets $markets_names -- galata-markets" "the entrypoint receives every name, then becomes galata-markets"
     [[ "$line" == *" -v $scratch/var/archive"* || "$line" == *" -v $scratch/var/tape"* ]] \

@@ -201,7 +201,7 @@ NATS_IMAGE="$(service_image nats)"
 FLOWS_IMAGE="$(service_image flows)"
 MARKETS_IMAGE="$(service_image markets)"
 # Where galata-markets is published on the tailnet address.
-MARKETS_PORT="${GALATA_MARKETS_PORT:-8790}"
+MARKETS_PORT="${GALATA_MARKETS_PORT:-8780}"
 CONTAINER_RUN=()
 in_container() {
     local spec="$1" image="$2"; shift 2
@@ -445,7 +445,7 @@ case "$service" in
         while read -r name; do secrets+=("$name"); only+=(--only "$name"); done < <(markets_secrets)
         tailnet="$(tailnet_address 2>&1)" || refuse "$tailnet"
         in_container markets "$MARKETS_IMAGE" -i "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}" \
-            --publish "$tailnet:$MARKETS_PORT:8790"
+            --publish "$tailnet:$MARKETS_PORT:8780"
         from_vault markets "${only[@]}" -- \
             /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
             "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- galata-markets

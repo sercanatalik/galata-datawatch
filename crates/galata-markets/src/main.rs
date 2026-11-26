@@ -4,7 +4,7 @@
 //! door secrets are read by; then serve until SIGTERM.
 //!
 //! ```text
-//!   galata-markets [--listen ADDR]          ADDR defaults to 0.0.0.0:8790
+//!   galata-markets [--listen ADDR]          ADDR defaults to 0.0.0.0:8780
 //! ```
 //!
 //! **A broker that is away is not a reason not to serve.** History and
@@ -26,7 +26,7 @@ const USAGE: &str = "usage: galata-markets [--listen ADDR]";
 
 /// Where the service listens inside its container; the launcher publishes it
 /// on the Mac's tailnet address.
-const DEFAULT_LISTEN: &str = "0.0.0.0:8790";
+const DEFAULT_LISTEN: &str = "0.0.0.0:8780";
 
 /// The configuration's venues, judged by the adapters this build carries.
 struct Resolver;
