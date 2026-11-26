@@ -5557,3 +5557,9 @@ exactly at five significant figures and are not whole, so a cap of four
 would have refused 4.2 million of them; CL's prices use the grid's last
 decimal place, so a coarser grid would have refused 370,699. BTC and XYZ100
 trade at whole-number prices, which the rule accepts whatever their figures.
+
+**In the tape after the next projection.** The lane's 09:40 run, the first
+on the new image, took 30.83 s (29.28 s an hour before) and wrote the tape's
+first `instruments` partition, `date=2026-11-26`: six rows for each of the
+nine, one per read from 09:10 to 09:35, each with its venue symbol and dex.
+No payload was unparsed: the tape has no `unparsed` dataset.
