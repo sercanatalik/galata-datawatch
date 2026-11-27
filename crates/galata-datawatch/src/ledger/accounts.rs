@@ -660,6 +660,7 @@ mod tests {
                     address: None,
                     session_key_var: None,
                     session_key_warn_days: None,
+                    market: None,
                 },
             )]
             .into(),

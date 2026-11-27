@@ -576,17 +576,24 @@ pub fn boot_ledger(
         .ledger
         .as_ref()
         .ok_or("the configuration declares no [ledger] block")?;
-    // The network comes from the venue's own declaration, so the ledger and
-    // capture cannot disagree about which one the accounts are on.
-    let market = config
-        .venue
-        .get(&venue_name)
-        .map(|v| v.market.clone())
-        .ok_or_else(|| {
-            format!(
-                "[venue.{venue_name}] is not declared, and it names the network the ledger reads"
-            )
-        })?;
+    // The network: the venue's own, where it is declared, so the ledger and
+    // capture cannot disagree about which one the accounts are on; otherwise
+    // the one its accounts name, which the load has checked is one and
+    // present (design D7 of `add-derive-account-ledger`).
+    let market = match config.venue.get(&venue_name) {
+        Some(venue) => venue.market.clone(),
+        None => ledger
+            .account
+            .values()
+            .filter(|a| a.venue == venue_name)
+            .find_map(|a| a.market.clone())
+            .ok_or_else(|| {
+                format!(
+                    "[venue.{venue_name}] is not declared, and no [ledger.account.*] of it names \
+                     its network (`market`)"
+                )
+            })?,
+    };
 
     crate::ledger::check_root(&ledger.root)?;
     let (key, masters) = crate::ledger::resolve(ledger, &venue_name, secrets)?;

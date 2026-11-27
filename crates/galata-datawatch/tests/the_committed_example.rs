@@ -135,6 +135,7 @@ venue = \"derive-xyz\"
 address_var = \"GALATA_LEDGER_DERIVE_WALLET\"
 session_key_var = \"GALATA_LEDGER_DERIVE_SESSION_KEY\"
 session_key_warn_days = 14
+market = \"mainnet\"
 "
     )
 }

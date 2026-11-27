@@ -593,6 +593,12 @@ pub struct LedgerAccount {
     /// warns. Only where `session_key_var` is; 14 when absent. 1..=365.
     #[serde(default)]
     pub session_key_warn_days: Option<u32>,
+    /// The network the account is on, as a `[venue.<v>]` block names it for
+    /// capture. Required where the venue is not declared, and refused where it
+    /// names another network than the declared venue's
+    /// (`add-derive-account-ledger`, design D7).
+    #[serde(default)]
+    pub market: Option<String>,
     /// **Present only to be refused by name.** Without it, `address = "0x…"`
     /// would be an unknown key, refused with a parser's sentence that does not
     /// say where the address should go instead.
@@ -1071,6 +1077,56 @@ impl Config {
         Ok(())
     }
 
+    /// Each ledger venue's network, named once (design D7 of
+    /// `add-derive-account-ledger`): the declared venue's, which an account
+    /// may repeat and not contradict; or, where the venue is not declared —
+    /// so as not to declare a venue nothing captures, which every service
+    /// would then build — the one every account of it names.
+    fn check_ledger_networks(&self, ledger: &Ledger, origin: &Origin) -> Result<(), ConfigError> {
+        let refuse = |value: String, bound: &'static str| -> Result<(), ConfigError> {
+            Err(ConfigError::OutOfBounds {
+                origin: origin.clone(),
+                field: "ledger.account.market",
+                value,
+                bound,
+            })
+        };
+        let mut named: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+        for (alias, account) in &ledger.account {
+            match (self.venue.get(&account.venue), account.market.as_deref()) {
+                (Some(venue), Some(market)) if market != venue.market => {
+                    return refuse(
+                        format!(
+                            "{market:?} for {alias}, where [venue.{}] names {:?}",
+                            account.venue, venue.market
+                        ),
+                        "the network its declared venue names: the ledger and capture read one",
+                    );
+                }
+                (Some(_), _) => {}
+                (None, None) => {
+                    return refuse(
+                        format!("absent for {alias}"),
+                        "required where the venue is not declared: the network the ledger reads",
+                    );
+                }
+                (None, Some(market)) => match named.get(account.venue.as_str()) {
+                    Some((other, theirs)) if *theirs != market => {
+                        return refuse(
+                            format!("{market:?} for {alias} and {theirs:?} for {other}"),
+                            "one network for every account of a venue",
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        named.insert(account.venue.as_str(), (alias.as_str(), market));
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
     fn validate_ledger(
         &self,
         ledger: &Ledger,
@@ -1293,6 +1349,9 @@ impl Config {
                 }
             }
             venues.insert(account.venue.as_str());
+        }
+        if adapters.keeps_ledgers() {
+            self.check_ledger_networks(ledger, origin)?;
         }
         for venue in venues.into_iter().filter(|_| adapters.keeps_ledgers()) {
             let Some(cost) = adapters.ledger_cost(venue) else {
@@ -1695,7 +1754,49 @@ dexes = ["", "xyz"]
 venue = "derive-xyz"
 address_var = "GALATA_LEDGER_DERIVE_WALLET"
 session_key_var = "GALATA_LEDGER_DERIVE_SESSION_KEY"
+market = "mainnet"
 "#;
+
+    #[test]
+    fn a_ledger_account_names_its_network_where_its_venue_is_not_declared() {
+        // Derive is not declared here: the account's own network stands.
+        assert!(with_ledger(&format!("{LEDGER}{DERIVE}")).is_ok());
+
+        let err = |doc: String| with_ledger(&doc).unwrap_err().to_string();
+        let absent = err(format!(
+            "{LEDGER}{}",
+            DERIVE.replace("market = \"mainnet\"\n", "")
+        ));
+        assert!(
+            absent.contains("ledger.account.market") && absent.contains("absent for derive"),
+            "{absent}"
+        );
+        let two = err(format!(
+            "{LEDGER}{DERIVE}{}",
+            DERIVE
+                .replace("[ledger.account.derive]", "[ledger.account.second]")
+                .replace("\"mainnet\"", "\"testnet\"")
+        ));
+        assert!(
+            two.contains("\"testnet\" for second") && two.contains("one network"),
+            "{two}"
+        );
+
+        // Hyperliquid is declared mainnet here: an account may say so, and
+        // may not say otherwise.
+        let hyperliquid = |market: &str| {
+            LEDGER.replace(
+                "venue = \"hyperliquid\"\n",
+                &format!("venue = \"hyperliquid\"\nmarket = \"{market}\"\n"),
+            )
+        };
+        assert!(with_ledger(&hyperliquid("mainnet")).is_ok());
+        let other = err(hyperliquid("testnet"));
+        assert!(
+            other.contains("\"testnet\" for main") && other.contains("[venue.hyperliquid]"),
+            "{other}"
+        );
+    }
 
     #[test]
     fn a_signing_venue_names_its_key_and_no_dexes() {

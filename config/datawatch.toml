@@ -356,3 +356,20 @@ instruments = [
 #   address_var = "GALATA_LEDGER_HL_MAIN"
 #   # The dexes to read margin and positions on; "" is the main one.
 #   dexes = ["", "xyz"]
+#
+#   # A Derive wallet, behind the `derive-xyz` feature (README, "Derive: a
+#   # wallet, read with a session key"): every subaccount in one request a
+#   # snapshot, each read signed by a session key that may trade and may not
+#   # move funds.
+#   [ledger.account.owner]
+#   venue = "derive-xyz"
+#   # The Derive wallet the key is registered to, NOT the address its owner
+#   # signs in with: never the address.
+#   address_var = "GALATA_LEDGER_DERIVE_WALLET"
+#   session_key_var = "GALATA_LEDGER_DERIVE_SESSION_KEY"
+#   # Days before the key expires from which the status warns. 14 if absent.
+#   session_key_warn_days = 14
+#   # The network, since [venue.derive-xyz] is declared only where Derive is
+#   # captured. Where it is declared, its network is the ledger's and this
+#   # may repeat it, not contradict it.
+#   market = "mainnet"

@@ -304,6 +304,7 @@ mod tests {
                     dexes: vec![],
                     session_key_var: key.map(|_| "KEY".to_string()),
                     session_key_warn_days: None,
+                    market: None,
                     address: None,
                 },
             )]
@@ -605,6 +606,7 @@ mod tests {
                         dexes: vec![],
                         session_key_var: Some("KEY".into()),
                         session_key_warn_days: None,
+                        market: None,
                         address: None,
                     },
                 )]
