@@ -320,6 +320,14 @@ fn ledger(
     let reported = reports.status.as_ref().and(view.at_micros);
     let mut judged = Judged::at(reported);
     let snapshot = snapshot_secs as i64;
+    // The latest report while it is within its allowance. What a report says
+    // of the accounts and the fold is judged against that report's own time,
+    // and only while the ledger still reports: a stopped ledger is one fact,
+    // not one more per account and one for its fold. Measured: a ledger
+    // stopped by an uninstall at 14:30 read as four silent accounts and a
+    // silent fold at 14:37, and as not reporting only at 14:42 (its clean
+    // stop wrote its status once more).
+    let live = reported.filter(|at| now - at <= (2 * snapshot + 60) * SECOND);
 
     // Stopped is the fact; that it no longer reports follows from it.
     if let Some(reason) = &view.stopped {
@@ -373,18 +381,20 @@ fn ledger(
         // Only an account that has answered and was still polled: one just
         // bound has not been asked yet.
         if account.polled
+            && let Some(at) = live
             && let Some(last) = account.answered_micros.values().max().copied()
             && view.stopped.is_none()
-            && now - last > 2 * snapshot * SECOND
+            && at - last > 2 * snapshot * SECOND
         {
             judged.say(
                 State::Warning,
                 format!("{service}/no-answer/{alias}"),
                 "no-answer",
                 format!(
-                    "{service} `{alias}` last answered at {}, {} s ago",
+                    "{service} `{alias}` last answered at {}, {} s before the ledger's report at {}",
                     time_of(last),
-                    (now - last) / SECOND
+                    (at - last) / SECOND,
+                    time_of(at)
                 ),
                 format!("an answer at least every {} s", 2 * snapshot),
                 Some(last),
@@ -392,20 +402,25 @@ fn ledger(
         }
     }
     if let Some(events) = events_secs
-        && reports.status.is_some()
+        && let Some(status_at) = live
         && view.stopped.is_none()
     {
         let fold: FoldView = reports.fold.as_ref().map(read).unwrap_or_default();
         let folded = reports.fold.as_ref().and(fold.at_micros);
         let allowance = 2 * events as i64;
         if let Some(at) = folded
-            && now - at > allowance * SECOND
+            && status_at - at > allowance * SECOND
         {
             judged.say(
                 State::Warning,
                 format!("{service}/fold-not-reporting"),
                 "fold-not-reporting",
-                format!("{service}'s fold last reported at {}", time_of(at)),
+                format!(
+                    "{service}'s fold last reported at {}, {} s before the ledger's report at {}",
+                    time_of(at),
+                    (status_at - at) / SECOND,
+                    time_of(status_at)
+                ),
                 format!("a fold report at least every {allowance} s"),
                 Some(at),
             );
@@ -782,14 +797,24 @@ mod tests {
 
     #[test]
     fn an_account_without_an_answer_is_named_by_its_alias() {
+        // The ledger reported at T - 100 s; owner_s2 had not answered for
+        // 700 s by then.
         let mut reports = well();
         reports.ledgers[0].status.as_mut().unwrap()["accounts"]["owner_s2"]["answered_micros"] =
-            json!({"": T - 700 * S});
+            json!({"": T - 800 * S});
         let judged = judge(&reports, T);
         let f = finding(&judged, "ledger:derive-xyz/no-answer/owner_s2");
         assert!(
             f.observed.contains("`owner_s2`") && f.observed.contains("700 s"),
             "{f:?}"
+        );
+        // 600 s before the report is within twice the cadence.
+        reports.ledgers[0].status.as_mut().unwrap()["accounts"]["owner_s2"]["answered_micros"] =
+            json!({"": T - 700 * S});
+        assert!(
+            !ids(&judge(&reports, T))
+                .iter()
+                .any(|id| id.contains("no-answer"))
         );
     }
 
@@ -797,14 +822,49 @@ mod tests {
     fn the_folds_unread_accounts_and_its_silence_are_findings() {
         let mut reports = well();
         reports.ledgers[0].fold =
-            Some(json!({"venue": "derive-xyz", "at_micros": T - 700 * S, "unread": ["owner_s1"]}));
+            Some(json!({"venue": "derive-xyz", "at_micros": T - 800 * S, "unread": ["owner_s1"]}));
         let judged = judge(&reports, T);
         assert!(
             finding(&judged, "ledger:derive-xyz/fold-unread/owner_s1")
                 .observed
                 .contains("`owner_s1`")
         );
-        assert!(ids(&judged).contains(&"ledger:derive-xyz/fold-not-reporting"));
+        let f = finding(&judged, "ledger:derive-xyz/fold-not-reporting");
+        assert!(f.observed.contains("700 s"), "{f:?}");
+    }
+
+    #[test]
+    fn a_stopped_ledger_is_one_finding_not_one_per_account() {
+        // As measured on 2026-11-27: the last pass at 14:26:21, the clean
+        // stop's status at 14:30:06.
+        let pass = T - 865 * S;
+        let stop = T - 640 * S;
+        let mut reports = well();
+        let mut status = ledger_status(pass);
+        status["at_micros"] = json!(stop);
+        reports.ledgers[0].status = Some(status);
+        reports.ledgers[0].fold =
+            Some(json!({"venue": "derive-xyz", "at_micros": pass, "accounts": {}, "unread": []}));
+        let ledger = |at| {
+            let judged = judge(&reports, at);
+            ids(&judged)
+                .into_iter()
+                .filter(|id| id.starts_with("ledger:"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        // Its accounts are not yet silent as of its last report, whatever the
+        // clock says now.
+        assert_eq!(ledger(T), Vec::<String>::new());
+        // Past the allowance from that report: one fact.
+        assert_eq!(
+            ledger(T + 30 * S),
+            vec!["ledger:derive-xyz/not-reporting".to_string()]
+        );
+        assert_eq!(
+            ledger(T + 3_600 * S),
+            vec!["ledger:derive-xyz/not-reporting".to_string()]
+        );
     }
 
     #[test]
