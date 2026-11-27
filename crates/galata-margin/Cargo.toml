@@ -1,0 +1,51 @@
+[package]
+name = "galata-margin"
+description = "Advice on where to place an option and its perpetual hedge, from each venue's margin against the owner's book."
+# **Never published, and this is the design** (add-cross-venue-margin-optimiser
+# D10). It holds the request that asks Derive to simulate the owner's
+# subaccount, and the session key that signs it. Kept in a member of its own,
+# the four published crates link none of it, and a tape reader inherits no
+# margin code; `scripts/check-margin-reach.sh` asserts that rather than this
+# comment claiming it.
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The ledger's record, its key rule and bindings (`ledger`: pure, with no
+# transport), Derive's signing, and the venues a configuration may declare
+# (`hyperliquid`, `derive-xyz`: pure). No capture loop.
+galata-datawatch = { version = "0.1.0", path = "../galata-datawatch", default-features = false, features = ["derive-xyz", "hyperliquid", "ledger"] }
+galata-wire = { version = "0.1.0", path = "../galata-wire" }
+# The ledger's projection, read back: one Parquet file per kind.
+arrow.workspace = true
+galata-segments = { version = "0.1.0", path = "../galata-segments" }
+# The one HTTP client that asks Derive's simulation (D10), on the TLS
+# provider galata-datawatch's binaries install.
+reqwest.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net"] }
+# Derive's book is a websocket channel only: one snapshot is read.
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+# Every figure is an exact decimal, as the venues state them.
+rust_decimal.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+# The `[margin]` block, which galata-datawatch holds as a table.
+toml.workspace = true
+
+[dev-dependencies]
+# A ledger projection root, written by the ledger's own writer.
+tempfile = "3"
+
+[[bin]]
+name = "galata-margin"
+path = "src/bin/galata-margin.rs"

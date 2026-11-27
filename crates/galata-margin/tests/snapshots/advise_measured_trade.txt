@@ -1,0 +1,17 @@
+galata-margin advise: sell 1 BTC-20261225-60000-P at 2100, hedged with -0.47 BTC-PERP
+asked at 2026-11-27 17:20:00 UTC; Derive `owner_s3`, Hyperliquid `main`
+advice only: nothing is ordered and no funds are moved
+
+placement           hedge D / H      Derive margin  HL margin      buffer  exec Derive  exec HL   funding      total     cap
+all on Derive       -0.47 / 0           6,364.82 v     0.00 c      0.00 c       0.02 c   0.00 c  -12.53 c   6,352.32  inside
+50% on Derive       -0.235 / -0.235     8,091.50 v  352.32 c*  1,973.00 c       0.01 c   0.12 c  -12.31 c  10,405.14  inside
+all on Hyperliquid  0 / -0.47           9,819.00 v  704.65 c*  3,946.00 c       0.00 c   0.24 c  -11.90 c  14,457.98  inside
+  v the venue's figure, c computed by galata, c* computed and labelled an estimate
+
+netting benefit: 4,158.82 c*
+proposal: all on Derive, total 6,352.32
+
+estimates
+  Derive `owner_s3` (PM2): net initial 100,000.00 then 93,635.18, net maintenance 120,000.00 then 115,501.32; the venue's simulation, 3 s old, account snapshot 2 min old
+  Hyperliquid `main` (portfolio_margin): initial 0.00 then 704.65, maintenance 0.00 then 352.32; computed by galata, account snapshot 3 min old
+note: `main` holds no BTC on Hyperliquid, so its hedge is taken at the market's maximum leverage, 40x

@@ -106,6 +106,11 @@ EXPOSE_ALLOWED = {
     # session key is registered to, and printed nowhere (`Secret::expose`).
     # Added 2026-11-27 with `add-derive-account-ledger`.
     "crates/galata-datawatch/src/adapters/derive_xyz/accounts.rs",
+    # A Derive wallet's address into the margin simulation's header, to the
+    # venue, and a listed subaccount's id into its fingerprint, compared and
+    # printed nowhere (`Secret::expose`). Added 2026-11-27 with
+    # `add-cross-venue-margin-optimiser`.
+    "crates/galata-margin/src/derive.rs",
     "crates/galata-datawatch/src/adapters/rh_chain/client.rs",
     "crates/galata-datawatch/src/venue/transport.rs",   # the accessor itself
     "crates/galata-datawatch/src/config/source.rs",     # Secret::expose lives here

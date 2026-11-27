@@ -47,11 +47,15 @@ failures=()
 while IFS= read -r file; do
     case "$file" in
         */capture/clock.rs) continue ;;   # the clock itself
+        */galata-margin/src/bin/galata-margin.rs) continue ;;   # galata-margin's clock: the binary
         */tests.rs)         continue ;;   # wholly a test module
     esac
     hits=$(non_test_lines "$file" | grep -E 'SystemTime::now|Instant::now|UNIX_EPOCH' || true)
     [[ -n "$hits" ]] && failures+=("$hits")
-done < <(find "$CRATE" -name '*.rs')
+# galata-margin too (add-cross-venue-margin-optimiser task 5.2): a snapshot's
+# age bound is asserted by a test that sets the time, which only holds while
+# the library reads no clock of its own.
+done < <(find "$CRATE" "$ROOT/crates/galata-margin/src" -name '*.rs')
 
 if (( ${#failures[@]} > 0 )); then
     echo "clock discipline: something below the loop reads a clock" >&2

@@ -1,0 +1,10 @@
+{
+ "simulated_position_changes": [
+  {
+   "amount": "-0.01",
+   "entry_price": "59574.5",
+   "instrument_name": "BTC-PERP"
+  }
+ ],
+ "subaccount_id": 1003
+}

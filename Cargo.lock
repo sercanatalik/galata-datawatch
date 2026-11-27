@@ -1459,6 +1459,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "galata-margin"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "futures-util",
+ "galata-datawatch",
+ "galata-segments",
+ "galata-wire",
+ "reqwest",
+ "rust_decimal",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
 name = "galata-markets"
 version = "0.1.0"
 dependencies = [

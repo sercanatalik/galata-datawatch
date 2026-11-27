@@ -1,0 +1,11 @@
+{
+ "id": "00000000-0000-4000-8000-000000000001",
+ "result": {
+  "subaccount_id": 1003,
+  "pre_initial_margin": "100000.123456789012",
+  "pre_maintenance_margin": "120000.123456789012",
+  "post_initial_margin": "99907.412814464023",
+  "post_maintenance_margin": "119928.573441920621",
+  "is_valid_trade": true
+ }
+}

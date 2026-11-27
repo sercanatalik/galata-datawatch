@@ -373,3 +373,32 @@ instruments = [
 #   # captured. Where it is declared, its network is the ledger's and this
 #   # may repeat it, not contradict it.
 #   market = "mainnet"
+
+# --- Margin advice (galata-margin) ---------------------------------------
+#
+# Where to place a Derive option's perpetual hedge, and what each placement
+# costs (README, "Margin advice"). Every key is required; none has a default,
+# since each decides a proposal. The tools that read this document must be
+# built from a tree that knows the block before it is written.
+#
+#   [margin]
+#   # The variable holding the Derive session key: the ledger's, since one key
+#   # serves both. Checked at start by the ledger's rule.
+#   session_key_var = "GALATA_LEDGER_DERIVE_SESSION_KEY"
+#   # How far galata's portfolio margin ratio may differ from Hyperliquid's
+#   # before its figures are labelled estimates. A decimal string.
+#   agreement_tolerance = "0.001"
+#   # The oldest account snapshot a figure may rest on, no shorter than the
+#   # ledger's snapshot_secs.
+#   snapshot_age_secs = 900
+#   # The hedge's splits, in percent on Derive, beside all on either venue.
+#   split_pct = [25, 50, 75]
+#   # The holding period funding is counted over, in hours.
+#   funding_hours = 168
+#   # The largest share of the hedge one venue may hold, in percent.
+#   venue_cap_pct = 100
+#
+#   [margin.accounts]
+#   # The accounts a placement may land in, by the ledger's aliases.
+#   derive-xyz = ["owner_s3"]
+#   hyperliquid = ["main"]

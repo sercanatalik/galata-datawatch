@@ -1,0 +1,89 @@
+[
+ {
+  "what": "usdc only, the first",
+  "at_micros": 1700000000000000,
+  "dex_maintenance": {
+   "": "128.519865",
+   "xyz": "339.820953"
+  },
+  "balances": {
+   "USDC": "15288.876106"
+  },
+  "ltv": {},
+  "borrowed": {},
+  "hyperliquid_prices": {},
+  "stated_ratio": "0.0306334322"
+ },
+ {
+  "what": "with hype collateral",
+  "at_micros": 1700000300000000,
+  "dex_maintenance": {
+   "": "131.200461",
+   "xyz": "340.999028"
+  },
+  "balances": {
+   "USDC": "6112.693098",
+   "HYPE": "149.269178",
+   "USDT0": "0.000000"
+  },
+  "ltv": {
+   "HYPE": "0.65"
+  },
+  "borrowed": {},
+  "hyperliquid_prices": {
+   "HYPE": {
+    "mark": "61.936000000000000000",
+    "oracle": "61.931000000000000000"
+   }
+  },
+  "stated_ratio": "0.0343688166"
+ },
+ {
+  "what": "the middle of the record",
+  "at_micros": 1700000600000000,
+  "dex_maintenance": {
+   "": "38.330418",
+   "xyz": "340.391017"
+  },
+  "balances": {
+   "USDC": "6082.782111",
+   "HYPE": "149.269178",
+   "USDT0": "0.000000"
+  },
+  "ltv": {
+   "HYPE": "0.65"
+  },
+  "borrowed": {},
+  "hyperliquid_prices": {
+   "HYPE": {
+    "mark": "62.974500000000000000",
+    "oracle": "62.958500000000000000"
+   }
+  },
+  "stated_ratio": "0.0274395853"
+ },
+ {
+  "what": "flat",
+  "at_micros": 1700000900000000,
+  "dex_maintenance": {
+   "": "0.000000",
+   "xyz": "0.000000"
+  },
+  "balances": {
+   "USDC": "3884.526191",
+   "HYPE": "147.019549",
+   "USDT0": "0.000000"
+  },
+  "ltv": {
+   "HYPE": "0.65"
+  },
+  "borrowed": {},
+  "hyperliquid_prices": {
+   "HYPE": {
+    "mark": "63.191000000000000000",
+    "oracle": "63.297500000000000000"
+   }
+  },
+  "stated_ratio": "0"
+ }
+]

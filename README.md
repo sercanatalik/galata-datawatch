@@ -250,6 +250,7 @@ published crates link none of it.
 | `galata-retain` | report, and optionally delete, what a retention horizon would expire |
 | `galata-signals-commit` | check one run of computed signals against the dataset's schema and write it to the tape |
 | `galata-bus` | the broker's process: applies the stream table once the server answers, and is `nats-server` meanwhile |
+| `galata-margin` | advise where to place an option on Derive and its perpetual hedge, and what each placement costs against the owner's book ([Margin advice](#margin-advice)); acts on nothing |
 
 ---
 
@@ -525,6 +526,64 @@ session_key_warn_days = 14
 - **Its cost**: Derive allows 300 reads a minute per wallet, shared with the
   owner's own use. A rate refusal's stated wait holds the venue, and a
   snapshot due inside it is a throttled gap.
+
+---
+
+## Margin advice
+
+`galata-margin advise` compares where to place a Derive option's perpetual
+hedge: all beside the option on Derive, all on Hyperliquid, or split. Each
+placement is costed against the owner's real book, and the cheapest inside
+the owner's cap is proposed (`add-cross-venue-margin-optimiser`).
+**It advises and does nothing else**: it names no request that places,
+amends or cancels an order or moves funds, which `tests/acts_on_nothing.rs`
+holds.
+
+```sh
+gv run --env galata-datawatch/mainnet \
+  --only GALATA_LEDGER_DERIVE_WALLET,GALATA_LEDGER_DERIVE_SESSION_KEY,GALATA_LEDGER_FINGERPRINT_KEY -- \
+  target/release/galata-margin advise --option BTC-20261225-60000-P --size -1 --price 2100 \
+    --hedge-size -0.47 --derive owner_s3 --hyperliquid main          # --json for the same figures, exactly
+```
+
+| Term | Where it comes from |
+|---|---|
+| Derive's margin | Derive's own simulation of the subaccount with the option and the hedge's part added (`private/get_margin`), the fall in net initial margin |
+| Hyperliquid's margin | computed: `size × mark / leverage`; under portfolio margin, maintenance from the venue's published ratio, checked against the ratio it states and labelled an estimate while they disagree |
+| Buffer | the notional held on Hyperliquid times Derive's largest spot shock for the underlying (BTC 14%) |
+| Execution | each venue's book, read when advice is asked for, walked at the part's size |
+| Funding | each venue's current hourly rate, read when advice is asked for, over the declared holding period |
+
+**Every figure says where it came from** (`v` the venue, `c` computed, `c*`
+an estimate) and how old its account snapshot is. A snapshot older than the
+declared bound gives no figure, and says so. A placement missing any term is
+shown incomplete and never proposed.
+
+**The key is the ledger's.** One Derive session key serves the ledger and
+the owner's trading, so it holds `trade:all`. At start the optimiser asks
+the venue for the key's scopes and applies the ledger's own rule: trading
+scopes, `account_info` and `block_trade` are accepted, and anything that can
+move funds is refused by name. Make the key as the ledger section above
+says. A key with no scopes at all is read-only, and serves too.
+
+**Its settings are the owner's**: a `[margin]` block, every key required and
+bounded, an unknown key refused. galata-datawatch holds it as written, so
+every tool reading the document must be built from a tree that knows the
+block before one is written (`config/datawatch.toml` shows it, commented):
+
+```toml
+[margin]
+session_key_var = "GALATA_LEDGER_DERIVE_SESSION_KEY"
+agreement_tolerance = "0.001"   # of the portfolio margin ratio; 310 snapshots agreed within it
+snapshot_age_secs = 900         # no shorter than the ledger's snapshot_secs
+split_pct = [25, 50, 75]        # the hedge's share on Derive, 1 to 5 of them
+funding_hours = 168             # the holding period funding is counted over
+venue_cap_pct = 100             # the largest share of the hedge one venue may hold
+
+[margin.accounts]
+derive-xyz = ["owner_s3"]       # subaccounts, by the ledger's aliases
+hyperliquid = ["main"]
+```
 
 ---
 

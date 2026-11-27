@@ -54,6 +54,7 @@ allowed() {
         galata-datawatch/src/adapters/derive_xyz/sign.rs)     ;; # a session key, into the signature; a new one, into the pipe to the vault
         galata-datawatch/src/adapters/derive_xyz/private.rs)  ;; # a wallet, into a signed request's header and body, to the venue
         galata-datawatch/src/adapters/derive_xyz/accounts.rs) ;; # a wallet, compared with the wallets the venue names for its key
+        galata-margin/src/derive.rs)                          ;; # a wallet, into the simulation's signed header and body, to the venue; a subaccount's id, into its fingerprint
         galata-datawatch/src/adapters/rh_chain/client.rs)     ;; # the keyed RPC endpoint, to the client
         galata-datawatch/src/source/stream.rs)                ;; # the websocket endpoint, to the connector
         galata-datawatch/src/source/poll.rs)                  ;; # the poll endpoint, to the client

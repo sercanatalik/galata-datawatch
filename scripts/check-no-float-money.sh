@@ -86,7 +86,11 @@ def shipped_only(text):
 # serde a double, and `visit_f64` renders it straight back to text. That is the
 # boundary where a float arrives from outside, not one this tree creates.
 FIELD = re.compile(r"^\s*(?:pub\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:\s*(?:Option<)?f(?:32|64)\b")
-for path in sorted((root / "crates" / "galata-wire" / "src").rglob("*.rs")):
+# galata-margin's advice is read by a person and by the machine-readable form
+# a client takes, and every figure in it is money (add-cross-venue-margin-optimiser
+# task 2.4), so it is held to the vocabulary's rule.
+for path in sorted([*(root / "crates" / "galata-wire" / "src").rglob("*.rs"),
+                    *(root / "crates" / "galata-margin" / "src").rglob("*.rs")]):
     shipped = shipped_only(path.read_text())
     for number, line in enumerate(shipped.split("\n"), 1):
         if FIELD.match(line):

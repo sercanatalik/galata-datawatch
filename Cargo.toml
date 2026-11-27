@@ -10,7 +10,10 @@ members = [
     "crates/galata-datawatch-vault",
     # Not published: the service that serves market data to clients
     # (`add-galata-markets`), in a container of its own.
-    "crates/galata-markets",
+    "crates/galata-markets",    # Not published: advice on where to place an option and its hedge, which
+    # holds the request that simulates the owner's Derive subaccount
+    # (`add-cross-venue-margin-optimiser`).
+    "crates/galata-margin",
 ]
 
 # Declared once, and taken once — every member says `license.workspace = true`.

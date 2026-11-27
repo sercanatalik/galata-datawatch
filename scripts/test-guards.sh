@@ -162,6 +162,13 @@ prove "check-vault-reach (a published crate reaches for the vault)" \
     "$ROOT/crates/galata-datawatch/Cargo.toml" \
     own
 
+# A published crate reaching for galata-margin, which holds the request that
+# simulates the owner's Derive subaccount (add-cross-venue-margin-optimiser D10).
+prove "check-margin-reach (a published crate reaches for galata-margin)" \
+    "$ROOT/scripts/check-margin-reach.sh" \
+    "$ROOT/crates/galata-broker/Cargo.toml" \
+    own
+
 prove "check-secret-reach (a secret read outside the one door)" \
     "$ROOT/scripts/check-secret-reach.sh" \
     "$ROOT/crates/galata-datawatch/src/capture/clock.rs" \
@@ -196,6 +203,14 @@ prove "check-deletion-paths (an unlisted deletion)" \
 prove "check-clock-discipline (a clock reading below the loop)" \
       ./scripts/check-clock-discipline.sh \
       crates/galata-datawatch/src/record/mod.rs own
+
+# The same in galata-margin's library, whose snapshot age bound is asserted by
+# a test that sets the time.
+prove "check-clock-discipline (a clock reading in galata-margin's library)" \
+      ./scripts/check-clock-discipline.sh \
+      crates/galata-margin/src/estimate.rs \
+      replace $'use rust_decimal::Decimal;\n' \
+      $'use rust_decimal::Decimal;\n\npub fn planted() -> u128 { std::time::SystemTime::now().elapsed().unwrap().as_micros() }\n'
 
 # What a publish would actually ship. Plants for itself: it drops the licence
 # from the include whitelist, which still builds and still publishes.
@@ -269,6 +284,13 @@ prove "check-scannable-roots (a binary that sweeps without checking)" \
 prove "check-no-float-money (a float field in the vocabulary)" \
       ./scripts/check-no-float-money.sh \
       crates/galata-wire/src/event.rs own
+
+# 1b. The same in galata-margin's advice, whose every figure is money.
+prove "check-no-float-money (a float field in galata-margin's advice)" \
+      ./scripts/check-no-float-money.sh \
+      crates/galata-margin/src/advice.rs \
+      replace $'/// The two venues a placement can use.\n' \
+      $'pub struct Planted {\n    pub price: f64,\n}\n\n/// The two venues a placement can use.\n'
 
 # 2. The serde feature that routes every Num through a double.
 prove "check-no-float-money (rust_decimal serialising as a float)" \

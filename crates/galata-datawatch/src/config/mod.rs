@@ -716,6 +716,14 @@ pub struct Config {
     /// The ledger, if one runs. Absent means no account is kept.
     #[serde(default)]
     pub ledger: Option<Ledger>,
+    /// The margin optimiser's settings, **held as written and read by
+    /// galata-margin alone** (`add-cross-venue-margin-optimiser` D10). That
+    /// crate does not publish, and the rules of its block, which keys it
+    /// takes, their bounds and the unknown keys it refuses, stay with it
+    /// rather than in a crate a tape reader links. Absent means no optimiser
+    /// runs.
+    #[serde(default)]
+    pub margin: Option<toml::Table>,
 }
 
 /// What a caller must answer about an adapter, so this module can refuse a
@@ -1608,6 +1616,26 @@ dexes = ["", "xyz"]
         assert!(
             load(GOOD).unwrap().ledger.is_none(),
             "absent means no account is kept"
+        );
+    }
+
+    #[test]
+    fn a_margin_block_is_held_as_written_and_judged_by_no_one_here() {
+        // galata-margin reads and bounds the block; every other tool loads a
+        // document that has one, whatever it says.
+        let text = format!(
+            "{GOOD}\n[margin]\nsession_key_var = \"X\"\nanything = [1, 2]\n\n[margin.accounts]\nhyperliquid = [\"main\"]\n"
+        );
+        let config = Config::load_from_str(&text, origin(), &NoLedger).expect("loads");
+        let margin = config.margin.expect("held");
+        assert_eq!(margin["session_key_var"].as_str(), Some("X"));
+        assert_eq!(margin["anything"].as_array().map(Vec::len), Some(2));
+        assert_eq!(margin["accounts"]["hyperliquid"][0].as_str(), Some("main"));
+        assert_eq!(
+            Config::load_from_str(GOOD, origin(), &NoLedger)
+                .unwrap()
+                .margin,
+            None
         );
     }
 

@@ -6110,3 +6110,190 @@ The watcher's side held from the first run on:
 - `services.json` emptied on recovery;
 - health stayed readable through both galata-markets reinstalls, with no
   `health-unreadable` alert.
+
+## Hyperliquid's margin, read from its pages — 2026-11-27
+
+`add-cross-venue-margin-optimiser` task 1.4. The pages were read directly on
+2026-11-27, as the Markdown GitBook serves when `.md` is appended to a page's
+URL:
+- `trading/portfolio-margin`;
+- `trading/margining`;
+- `support/faq/portfolio-margin`.
+
+**Initial margin is the same in both modes.** `trading/margining`:
+"The margin required to open a position is
+`position_size * mark_price / leverage`." Portfolio margin "is a
+generalization of cross margin". It changes how a position's margin is
+funded (insufficient balance "will automatically borrowed against eligible
+collateral up to `token_balance * borrow_oracle_price * ltv`"), not what
+opening it requires.
+
+**Portfolio margin defines maintenance.** Quoted from
+`trading/portfolio-margin`, "Liquidations":
+
+```text
+portfolio_margin_ratio = max_{borrowable_token} (portfolio_maintenance_requirement(borrowable_token) / portfolio_liquidation_value(borrowable_token))
+
+where
+
+portfolio_maintenance_requirement(token) = min_borrow_offset + sum_{dex} cross_maintenance_margin(dex) + borrowed_size_for_maintenance(token) * borrow_oracle_price(token)
+
+portfolio_liquidation_value(token) = portfolio_balance(token) + min(borrow_cap(token), min(portfolio_balance(token), supply_cap(token)) * borrow_oracle_price(token) * liquidation_threshold(token))
+
+liquidation_threshold(token) = 0.5 + 0.5 * LTV(token)
+
+borrow_oracle_price(token) = median(HL_spot_USDC_price, HL_perp_mark_price * USDT_USDC_oracle, HL_perp_oracle_price * USDT_USDC_oracle)
+
+USDT_USDC_oracle = 1 / HL_spot_oracle_price(USDC)
+
+min_borrow_offset = 20 USDC
+```
+
+"The account becomes liquidatable when portfolio\_margin\_ratio > 0.95. All
+notional values in the above definition are converted to USDC using
+`borrow_oracle_price(token)`."
+
+The inputs the calculation needs, and where each is stated:
+
+| Input | Stated by |
+|---|---|
+| `cross_maintenance_margin(dex)`, per dex | `clearinghouseState` for each dex |
+| `portfolio_balance(token)` | `spotClearinghouseState` balances |
+| `borrowed_size_for_maintenance(token)` | `borrowLendUserState`, per token; the page names it and no answer field |
+| `borrow_cap(token)`, `supply_cap(token)` | the page's user caps: USDC borrow 50M and supply 250M; USDT borrow 1M and supply 5M; BTC supply 200; HYPE supply 1M |
+| `LTV(token)` | the page: HYPE 0.65, BTC 0.5 |
+| the spot USDC price, perp mark and perp oracle per token | market data at the snapshot's time |
+| `HL_spot_oracle_price(USDC)` | market data |
+| `min_borrow_offset` | 20 USDC |
+| the threshold | 0.95 |
+
+What the pages leave open, for task 3.2 and its check (3.3, 3.5):
+- **Which tokens the outer `max` runs over.** "Borrowable token" is not
+  listed. The caps name USDC and USDT as borrowable, and BTC and HYPE as
+  supplied.
+- **The liquidation value's parentheses.** As written, the term's `min`
+  takes `borrow_cap` against a value in USDC. Whether it is summed over the
+  collateral tokens is not said.
+- **The venue states the ratio itself**, as `portfolioMarginRatio` in
+  `spotClearinghouseState` (`add-hyperliquid-portfolio-margin-state`), with
+  each token's available-after-maintenance. galata's figure is checked
+  against that ratio (design D4).
+
+**The pages disagree on one entry condition.** `trading/portfolio-margin`
+requires account value under $25M, and the FAQ "under $5,000,000". The FAQ
+also requires no open positions, orders or TWAPs when it is switched on.
+Neither condition changes how an account already on it is margined.
+
+## Each venue's perpetual, read live — 2026-11-27
+
+`add-cross-venue-margin-optimiser` task 1.3, revised the same day: no Derive
+capture is deployed, so the optimiser reads funding and books from the
+venues when advice is asked for. Read for BTC at about 17:24 UTC, with no
+credential.
+
+| | Derive | Hyperliquid |
+|---|---|---|
+| Funding | `public/get_ticker` `{"instrument_name": "BTC-PERP"}` (REST, 352 B): `f`, "current hourly funding rate" | `info` `{"type": "metaAndAssetCtxs"}` (REST, 72,680 B, every market): `funding` per market, hourly |
+| Funding read | 0.000012240 | 0.0000125 |
+| Best bid and ask | the same ticker: `b`/`B` and `a`/`A`, price and size | the book |
+| Book | websocket only: subscribe to `orderbook.BTC-PERP.1.10` at `wss://api.derive.xyz/v3/ws`; the first snapshot came 0.3 s after the acknowledgement | `info` `{"type": "l2Book", "coin": "BTC"}` (REST, 1,581 B) |
+| Book levels | 1, 10, 20 or 100 a side, by the channel's name; `[price, size]` pairs | 20 a side; `{px, sz, n}` |
+| Time stated | ticker `t`, book `timestamp`, in ms | `time`, in ms |
+
+Also stated, and needed elsewhere:
+- **Hyperliquid's context** gives the perp's `markPx` and `oraclePx`, two of
+  the three prices in portfolio margin's `borrow_oracle_price`.
+- **Hyperliquid's `maxLeverage` for BTC** is 40, from `meta`.
+
+## Derive's margin simulation, scopes and limits, read from its pages — 2026-11-27
+
+`add-cross-venue-margin-optimiser` task 1.5. Read directly, as the Markdown
+Derive's documentation serves (`docs.derive.xyz/llms.txt` lists the pages):
+- `api-reference/subaccounts/privateget_margin`;
+- `authentication/access-scopes` and `api-reference/session-keys/privatesession_keys`;
+- `rate-limits`.
+
+**`private/get_margin`**, signed with `X-DeriveWallet`, `X-DeriveTimestamp`
+and `X-DeriveSignature`, as the ledger's reads are:
+- **Request:** `subaccount_id` (required), and optionally
+  `simulated_position_changes` and `simulated_collateral_changes`.
+  - A position change is `{instrument_name, amount, entry_price}`.
+    `entry_price` is "perps only: entry price to simulate against; mark price
+    when omitted".
+  - A collateral change is `{asset_name, amount}`.
+  - `is_delayed_liquidation` defaults to false.
+- **Answer:** `pre_initial_margin`, `pre_maintenance_margin`,
+  `post_initial_margin` and `post_maintenance_margin`, as USD decimal
+  strings; `is_valid_trade`; and `subaccount_id`.
+- **The figures are net**, not requirements: "mark-to-market value minus the
+  requirement — so positive means healthy." So the margin a trade uses is
+  pre minus post, and for an option that change includes the option's mark,
+  since only a perp takes an entry price (design.md's measured trade: "the
+  simulation marked the put at its current value and credited no
+  premium").
+- **It ignores resting orders:** "Does not take open-order margin into
+  account."
+- **It uses the subaccount's own manager**, so its margin type: standard or
+  `PM2`.
+
+**A key's scopes are read with `private/session_keys`.** It lists every key
+registered to the wallet with its protocol and off-chain scopes, the
+ledger's existing check (`add-derive-account-ledger`, D4). Protocol scopes
+form a tree under `admin`: `trade`, `transfer`, `withdraw`, `liquidate`,
+`set_session_key`, `vault`. Off-chain scopes are exact: `account_info` and
+`block_trade`. "A session key with no scopes is a purely read-only session
+key."
+
+**Limits are per wallet, not per key.** `private/get_margin` is a read, so
+of the `non_matching` class.
+- **Mainnet reference:** "5 TPS → 25 points / 5s window", a fixed window,
+  one point a request. It is shared with the ledger's reads, since budgets
+  are "wallet-scoped, not per-subaccount or per-session-key".
+- **Without a credential:** 5 TPS per IP.
+- **Live budget:** `public/getRateLimits` states it.
+- **Rejection:** `-32000` with `data` "Retry after {ms} ms". Nothing is
+  queued.
+- **Five placements** are five simulations, inside one window.
+
+## galata's portfolio margin ratio against Hyperliquid's — 2026-11-27
+
+`add-cross-venue-margin-optimiser` task 3.5. `galata_margin::agreement`
+computed the ratio of every recorded snapshot of the owner's portfolio-margin
+account `main`, 310 of them from 2026-11-26 15:51 to 2026-11-27 17:42 UTC, and
+compared it with the `portfolioMarginRatio` the venue stated in the same
+pass.
+- **Inputs:** each dex's maintenance, the spot balances and their LTVs, and
+  the borrows, joined within 5 s of the ratio's receipt.
+- **HYPE's price:** the median of its mark and oracle from the tape, at most
+  148 s old. The spot price the venue's median also takes is not captured.
+- **The run:** a throwaway program in the scratchpad over an export of the
+  projection, both kept out of the repository. Every snapshot had a figure.
+
+```text
+snapshots                     n    largest disagreement   median |d|    p95 |d|      galata above/below
+flat (the venue states 0)     89   0                      0             0            0/0
+positions, USDC only          47   -0.0000030             0.00000065    0.0000013    2/45
+positions, HYPE collateral   174   -0.00013572            0.00006329    0.00011017   3/171
+
+within 0.0001: 89, 47, 137 of 174    within 0.001: all 310    within 0.005: all 310
+```
+
+**The formula, read as the record fits it** (`galata_margin::hyperliquid`):
+- **A token counts only the dexes it collateralises.** Read literally, USDT0
+  with no balance would set the maximum at about 0.049, against the venue's
+  0.027.
+- **The 20 USDC offset applies only while the token is borrowed.** Without
+  it, USDC-only snapshots agree to 3e-6, and a flat account is 0 as the
+  venue states. The record holds no borrow, so the borrowed path is
+  untested against the venue.
+
+**What the disagreement is.** USDC-only snapshots differ by the movement of
+marks between the dex answers and the spot answer, read moments apart. With
+HYPE, galata reads below the venue in 171 of 174, about 0.00006: galata's
+HYPE credit is a little high, as a median that lacks the spot price would
+make it.
+
+**The tolerance is the owner's to declare** (`[margin] agreement_tolerance`).
+- **At 0.001 or above,** every snapshot agrees and no Hyperliquid figure is
+  labelled.
+- **At 0.0001,** 37 of the 174 HYPE snapshots would be labelled estimates.
