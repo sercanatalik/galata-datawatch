@@ -10,7 +10,10 @@
 #
 #   1. **A refusal is recorded with its reason.** The launcher is run into a
 #      refusal here, a container tool that is not there, against a scratch
-#      status folder: nothing real is started or asked.
+#      status folder: nothing real is started or asked. The record must hold
+#      the reason the launcher printed, whichever precondition it refused on
+#      first: a fresh checkout has no var/archive and is refused for that
+#      before the tool is looked for (CI on 2026-11-27).
 #   2. **A check records nothing.** `--check` starts nothing, so a record of
 #      it would read as a start.
 #   3. **Ten are kept.** The eleventh start drops the oldest; the file does not
@@ -44,12 +47,15 @@ PY
 
 # --- 1. a refusal is recorded with its reason ------------------------------
 status="$scratch/status"
-GALATA_STATUS_DIR="$status" GALATA_CONTAINER_BIN="$scratch/absent/container" \
-    bash "$LAUNCHER" flows >/dev/null 2>&1 && say "the launcher started flows with no container tool"
-if [[ -f "$status/service-flows.json" ]]; then
+printed="$(GALATA_STATUS_DIR="$status" GALATA_CONTAINER_BIN="$scratch/absent/container" \
+    bash "$LAUNCHER" flows 2>&1 >/dev/null)" && say "the launcher started flows with no container tool"
+printed="$(sed -n 's/^run-service: REFUSED — //p' <<< "$printed" | head -1)"
+if [[ -z "$printed" ]]; then
+    say "the launcher refused flows without saying why"
+elif [[ -f "$status/service-flows.json" ]]; then
     said="$(outcomes "$status/service-flows.json")"
-    [[ "$said" == refused$'\t'*"no \`container\`"* ]] \
-        || say "a refused start is recorded without its reason: $said"
+    [[ "$said" == refused$'\t'"$printed" ]] \
+        || say "a refused start is not recorded with the reason it printed: recorded [$said], printed [$printed]"
 else
     say "a refused start left no record in the status folder"
 fi
