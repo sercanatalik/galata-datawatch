@@ -37,6 +37,7 @@ pub mod boot;
 pub mod capture;
 pub mod config;
 pub mod derive;
+pub mod health;
 pub mod ingest;
 #[cfg(feature = "ledger")]
 pub mod ledger;

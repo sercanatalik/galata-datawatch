@@ -572,6 +572,31 @@ pub fn boot_ledger(
         .nth(1)
         .ok_or("usage: galata-ledger <venue>. One process per venue.")?;
     let config = Config::load(source, adapters)?;
+    // From here every refusal is the ledger's to state in its status before
+    // it exits (`add-service-health-monitoring`, design D6): the venue and
+    // the status folder are known.
+    let status =
+        crate::capture::StatusFile::named(&config.paths.status, &format!("ledger-{venue_name}"));
+    let ran = run_ledger_for(&config, &venue_name, secrets);
+    if let Err(error) = &ran {
+        crate::ledger::run::record_stop(
+            &status,
+            &venue_name,
+            &error.to_string(),
+            SystemClock.now_micros(),
+        );
+    }
+    ran
+}
+
+/// The ledger for one venue, from a loaded configuration, until it stops.
+#[cfg(feature = "ledger")]
+fn run_ledger_for(
+    config: &Config,
+    venue_name: &str,
+    secrets: &dyn SecretSource,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let venue_name = venue_name.to_string();
     let ledger = config
         .ledger
         .as_ref()

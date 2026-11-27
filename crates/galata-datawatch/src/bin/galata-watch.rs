@@ -23,6 +23,12 @@
 //! and found nothing* and *had nothing to check* are different facts, and the
 //! second is what an empty archive looks like when capture has silently
 //! stopped.
+//!
+//! **Every run writes its report** to the status folder, `watch.json`: when it
+//! judged, how much it checked, and each finding, a run with nothing to check
+//! and one that could not judge included. The deployment's health reads it
+//! there (`add-service-health-monitoring`, design D7). The exit code is the
+//! same whether or not that write succeeds.
 
 use galata_datawatch::adapters;
 use galata_datawatch::config::{Adapters, Config, FileSource};
@@ -79,54 +85,28 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     }
 
     let config = Config::load(&FileSource::from_env("config/datawatch.toml")?, &Resolver)?;
-    let thresholds = Thresholds {
-        max_segments_in_closed_partition: config.watch.max_segments_in_closed_partition,
-        max_record_age_secs: config.watch.max_record_age_secs,
-        max_correlation_target_gap: config.watch.max_correlation_target_gap,
-        max_constancy_p: config.watch.max_constancy_p,
-        monitor_alarms: config.watch.monitor_alarms,
-    };
-
-    if thresholds.is_empty() {
-        tracing::info!(
-            "no [watch] thresholds are declared, so only structural problems are checked. \
-             Numbers are the measurer's and bounds are the operator's"
-        );
-    }
 
     // Today by OUR clock and the store's own calendar — the same pair the
     // partitions were named with, so "closed" means the same thing to both.
     let now = galata_datawatch::capture::SystemClock.now_micros();
-    let today = galata_datawatch::calendar::date_of(now);
+    let judged = judge(&config, now);
 
-    // **A root that cannot be read is a refusal, not an empty result.** No
-    // partitions means nothing to report, which is indistinguishable from a
-    // tidy store — so a mistyped path would look healthy for as long as
-    // nobody checked.
-    galata_segments::scannable(&config.paths.archive)?;
-    galata_segments::scannable(&config.paths.tape)?;
-
-    // **Both stores held shared, in the rebuild's order, before a listing.**
-    // The nesting and layout checks open and compare segments, and both
-    // writers leave a moment where a replacement sits beside what it
-    // replaces: compaction before its removals, a replacing rebuild before
-    // its own (`a-replacement-never-leaves-a-hole`). Judged in that moment,
-    // an unfinished run reads as an interrupted one. Hourly compaction made
-    // the moment hourly (`compact-closed-hours`), so the judge waits it out.
-    let _archive = hold_or_wait(&config.paths.archive)?;
-    let _tape = hold_or_wait(&config.paths.tape)?;
-
-    // Judged per declared venue: each is its own capture process, and one
-    // stopping must not hide behind another still writing.
-    let venues: Vec<&str> = config.venue.keys().map(String::as_str).collect();
-    let report = watch::watch(
-        &config.paths.archive,
-        &config.paths.tape,
-        &today,
-        &thresholds,
-        now,
-        &venues,
-    );
+    // The report, whatever happened: a judge that could not judge says so.
+    let written = match &judged {
+        Ok(report) => report.written(now, &config.paths.archive),
+        Err(error) => watch::Written::failed(now, &error.to_string(), &config.paths.archive),
+    };
+    let file =
+        galata_datawatch::capture::StatusFile::named(&config.paths.status, watch::REPORT_NAME);
+    match serde_json::to_string_pretty(&written) {
+        Ok(json) => {
+            if let Err(error) = file.write(&json) {
+                tracing::warn!(path = %file.path().display(), %error, "the report was not written");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "the report could not be written out"),
+    }
+    let report = judged?;
 
     for finding in &report.findings {
         // A finding, not an alert: the number, the bound and the path.
@@ -151,6 +131,55 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         "findings"
     );
     Ok(FINDINGS)
+}
+
+/// Read the record and judge it, at `now`.
+fn judge(config: &Config, now: i64) -> Result<watch::Report, Box<dyn std::error::Error>> {
+    let thresholds = Thresholds {
+        max_segments_in_closed_partition: config.watch.max_segments_in_closed_partition,
+        max_record_age_secs: config.watch.max_record_age_secs,
+        max_correlation_target_gap: config.watch.max_correlation_target_gap,
+        max_constancy_p: config.watch.max_constancy_p,
+        monitor_alarms: config.watch.monitor_alarms,
+    };
+
+    if thresholds.is_empty() {
+        tracing::info!(
+            "no [watch] thresholds are declared, so only structural problems are checked. \
+             Numbers are the measurer's and bounds are the operator's"
+        );
+    }
+
+    let today = galata_datawatch::calendar::date_of(now);
+
+    // **A root that cannot be read is a refusal, not an empty result.** No
+    // partitions means nothing to report, which is indistinguishable from a
+    // tidy store — so a mistyped path would look healthy for as long as
+    // nobody checked.
+    galata_segments::scannable(&config.paths.archive)?;
+    galata_segments::scannable(&config.paths.tape)?;
+
+    // **Both stores held shared, in the rebuild's order, before a listing.**
+    // The nesting and layout checks open and compare segments, and both
+    // writers leave a moment where a replacement sits beside what it
+    // replaces: compaction before its removals, a replacing rebuild before
+    // its own (`a-replacement-never-leaves-a-hole`). Judged in that moment,
+    // an unfinished run reads as an interrupted one. Hourly compaction made
+    // the moment hourly (`compact-closed-hours`), so the judge waits it out.
+    let _archive = hold_or_wait(&config.paths.archive)?;
+    let _tape = hold_or_wait(&config.paths.tape)?;
+
+    // Judged per declared venue: each is its own capture process, and one
+    // stopping must not hide behind another still writing.
+    let venues: Vec<&str> = config.venue.keys().map(String::as_str).collect();
+    Ok(watch::watch(
+        &config.paths.archive,
+        &config.paths.tape,
+        &today,
+        &thresholds,
+        now,
+        &venues,
+    ))
 }
 
 use galata_datawatch::capture::Clock;

@@ -293,6 +293,29 @@ pub struct LedgerStatus {
     /// a rate refusal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_until_micros: Option<i64>,
+    /// Why the ledger stopped, where it stopped because it refused to run: a
+    /// refused session key, an unknown dex, a sub-account declared as a
+    /// master. Written before it exits; absent while it runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
+}
+
+/// Say in a ledger's status file why it stopped, before it exits: what the
+/// file already says is kept, and `stopped` and the time are set. For a
+/// refusal before any run could write the file, it starts one.
+/// (`add-service-health-monitoring`, design D6.) Best effort, as every status
+/// write is.
+pub fn record_stop(file: &StatusFile, venue: &str, reason: &str, now_micros: i64) {
+    let mut status = std::fs::read_to_string(file.path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({ "venue": venue }));
+    status["stopped"] = reason.into();
+    status["at_micros"] = now_micros.into();
+    if let Ok(json) = serde_json::to_string_pretty(&status) {
+        let _ = file.write(&json);
+    }
 }
 
 /// The ledger for one venue.
@@ -531,8 +554,9 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         &self.status
     }
 
-    /// The clock, for a test that moves it.
-    #[cfg(test)]
+    /// The clock, for a test that moves it (the Derive venue's, over its
+    /// local server).
+    #[cfg(all(test, feature = "derive-xyz"))]
     pub(crate) fn clock(&self) -> &C {
         &self.clock
     }
@@ -1389,8 +1413,21 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     }
 
     /// Run until cancelled: boot, then a snapshot pass every cadence and a
-    /// discovery run every discovery cadence.
+    /// discovery run every discovery cadence. A run that stops on an error
+    /// writes why to its status before it returns.
     pub async fn run(
+        &mut self,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Result<(), LedgerError> {
+        let ran = self.run_until(shutdown).await;
+        if let Err(error) = &ran {
+            self.status.stopped = Some(error.to_string());
+            self.write_status();
+        }
+        ran
+    }
+
+    async fn run_until(
         &mut self,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<(), LedgerError> {
@@ -2516,6 +2553,82 @@ mod tests {
         let pass = run.snapshot_all().await.unwrap();
         assert!(pass.throttled);
         assert!(gaps(&root).iter().all(|g| g.cause == GapCause::Throttled));
+    }
+
+    /// The ledger's status as written, read back.
+    fn written_status(file: &StatusFile) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_ledger_that_refuses_to_run_says_why_in_its_status() {
+        // What the refusal names, and how the test brings it about.
+        type Refuse = fn(&mut LedgerRun<Scripted, TestClock>);
+        let refusals: [(&str, Refuse); 3] = [
+            ("`withdraw`", |run| {
+                run.venue
+                    .keys
+                    .lock()
+                    .unwrap()
+                    .push_back(Err(KeyRefusal::Scopes {
+                        scopes: vec!["withdraw".into()],
+                    }));
+            }),
+            ("nosuchdex", |run| {
+                run.masters[0].dexes = vec![String::new(), "nosuchdex".into()];
+            }),
+            ("sub-account", |run| {
+                *run.venue.role.lock().unwrap() =
+                    Ok(br#"{"role":"subAccount","data":{"master":"0x01"}}"#.to_vec());
+            }),
+        ];
+        for (reason, refuse) in refusals {
+            let dir = tempfile::tempdir().unwrap();
+            let (run, _) = ledger(dir.path());
+            let file = StatusFile::named(&dir.path().join("status"), "ledger-hyperliquid");
+            let mut run = run.with_status_file(file.clone());
+            refuse(&mut run);
+            let err = run
+                .run(tokio_util::sync::CancellationToken::new())
+                .await
+                .unwrap_err();
+            let status = written_status(&file);
+            let stopped = status["stopped"].as_str().unwrap_or_default();
+            assert!(stopped.contains(reason), "{stopped}");
+            assert_eq!(stopped, err.to_string(), "as the refusal names it");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_running_ledgers_status_states_no_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, _) = ledger(dir.path());
+        let file = StatusFile::named(&dir.path().join("status"), "ledger-hyperliquid");
+        let mut run = run.with_status_file(file.clone());
+        run.boot().await.unwrap();
+        let status = written_status(&file);
+        assert!(status.get("stopped").is_none(), "{status}");
+    }
+
+    #[test]
+    fn a_stop_before_any_run_starts_a_status_and_one_after_keeps_what_it_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = StatusFile::named(dir.path(), "ledger-derive-xyz");
+        // Refused before any run wrote the file: the root, say.
+        record_stop(&file, "derive-xyz", "the ledger root has mode 750", T0);
+        let status = written_status(&file);
+        assert_eq!(status["venue"], "derive-xyz");
+        assert_eq!(status["stopped"], "the ledger root has mode 750");
+        assert_eq!(status["at_micros"], T0);
+
+        // After a run wrote its accounts: they are kept, the stop is added.
+        file.write(r#"{"venue":"derive-xyz","at_micros":1,"accounts":{"owner":{"missed":0}}}"#)
+            .unwrap();
+        record_stop(&file, "derive-xyz", "the session key expired", T0 + 1);
+        let status = written_status(&file);
+        assert_eq!(status["accounts"]["owner"]["missed"], 0);
+        assert_eq!(status["stopped"], "the session key expired");
+        assert_eq!(status["at_micros"], T0 + 1);
     }
 
     #[tokio::test]

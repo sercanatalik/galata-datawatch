@@ -20,7 +20,7 @@ use galata_datawatch::adapters;
 use galata_datawatch::config::{Adapters, Config, EnvSecrets, FileSource, SecretSource};
 use galata_markets::access::Tokens;
 use galata_markets::fill::Normalisers;
-use galata_markets::{Markets, app, routes, status};
+use galata_markets::{Markets, service, status};
 
 const USAGE: &str = "usage: galata-markets [--listen ADDR]";
 
@@ -103,6 +103,7 @@ async fn serve(listen: &str) -> Result<(), String> {
     let mut markets = Markets::over(config.paths.tape.clone());
     markets.archive = config.paths.archive.clone();
     markets.normalisers = normalisers;
+    markets.health = galata_markets::health::Sources::from_config(&config);
 
     // The bus, asked for in the background: a broker that is away delays the
     // live stream, never the rest.
@@ -128,7 +129,7 @@ async fn serve(listen: &str) -> Result<(), String> {
         ),
     }
 
-    let app = app(tokens, routes(Arc::new(markets)));
+    let app = service(tokens, Arc::new(markets));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("could not listen on {addr}: {e}"))?;

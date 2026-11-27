@@ -137,14 +137,7 @@ fn named(scopes: &[String]) -> String {
 /// A time in microseconds as a UTC time to the second, for a message:
 /// `2027-02-25 09:30:00 UTC`.
 pub fn utc(micros: i64) -> String {
-    let second = micros.div_euclid(1_000_000).rem_euclid(86_400);
-    format!(
-        "{} {:02}:{:02}:{:02} UTC",
-        crate::calendar::date_of(micros),
-        second / 3_600,
-        second / 60 % 60,
-        second % 60
-    )
+    crate::calendar::time_of(micros)
 }
 
 impl ResolvedAccount {

@@ -537,7 +537,7 @@ never connects to the bus. The service reads the tape and the archive
 read-only, reads the bus as `markets` and publishes nothing, and links no
 venue transport (`scripts/check-markets-no-transport.sh`).
 
-**Every request but `/health` carries a client's token**, as
+**Every request but `/health` and `/v1/health` carries a client's token**, as
 `Authorization: Bearer <token>`. The clients are a table in the code
 (`controlboard`, `watcher`, `operator`), each token held in the vault as
 `GALATA_MARKETS_TOKEN_<CLIENT>`. No token and a token not issued are refused
@@ -550,6 +550,7 @@ alike, and the refusal names no client.
 | `/v1/venues` | each venue, its dexes, and its capture's latest health | JSON |
 | `/v1/instruments?venue&base&contract_type&active&at` | each instrument's reference data, in the one format | JSON |
 | `/v1/instruments/{venue}/{ticker}` | the same, and what the tape holds for it | JSON |
+| `/v1/health` | every service's state and findings, judged when asked; no token | JSON |
 | `/health` | that it answers; no token | text |
 
 ```sh
@@ -570,6 +571,8 @@ curl -sH "$T" "$M/v1/instruments?base=BTC"
 
 # One instrument, and what is held for it.
 curl -sH "$T" "$M/v1/instruments/hyperliquid/BTC"
+# Every service's health, with no token.
+curl -s "$M/v1/health"
 ```
 
 - **History is the tape's own columns**, prices `Decimal128(38, 18)`, oldest
@@ -584,6 +587,32 @@ curl -sH "$T" "$M/v1/instruments/hyperliquid/BTC"
   `sources`, `sources_expected`, `complete`, `gap` and `is_final`.
 - **A venue's health is its capture's own report**, with the moment it was
   made; one older than a minute says `current: false`.
+- **The deployment's health** (`/v1/health`, `add-service-health-monitoring`)
+  is judged when asked, from each service's own latest report:
+  - capture's on the bus;
+  - from the status folder: each ledger's status and fold report, the
+    launcher's record of each start, and `galata-watch`'s `watch.json`.
+
+  Each service is `well`, `warning` or `down`. A finding has an identity,
+  `<service>/<kind>[/<subject>]`, that stays the same while the fact holds,
+  for instance:
+  - `ledger:derive-xyz/held`;
+  - `capture:hyperliquid/not-reporting`;
+  - `flows/refused`.
+
+  It needs no token: galata-markets is on the tailnet only, and a finding
+  names service names, aliases, counts, times and reasons, never an address,
+  an identifier or an amount. galata-watcher asks it every minute, and tells
+  Telegram once when a finding appears and once when it clears.
+
+  ```json
+  { "at_micros": 1795790000000000, "state": "warning",
+    "services": [ { "service": "ledger:derive-xyz", "state": "warning",
+                    "reported_at_micros": 1795789990000000,
+                    "findings": [ { "id": "ledger:derive-xyz/held", "kind": "held",
+                                    "observed": "ledger:derive-xyz is held for a rate refusal until 2026-11-27 14:33:23 UTC",
+                                    "expected": "no hold" } ] } ] }
+  ```
 - **An instrument's reference data** is its newest row, or as of `at`;
   `reference` is null where none is held yet. What is held is per dataset and,
   for candles, per source interval, computed on first asking and kept fifteen
@@ -709,9 +738,19 @@ whose flows only call the release binaries as subprocesses.
 | `compact-the-archive` | `galata-compact --closed-hours` | hourly at :20 |
 | `project-the-recent-days` | `galata-tape-rebuild --replace`, the last 3 closed days and today so far, per declared venue | hourly at :40 |
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
-| `judge-the-record` | `galata-watch` | hourly at :05 |
+| `judge-the-record` | `galata-watch`, which writes its report to `var/status/watch.json` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
 | `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity`, `backtest` and `realvol`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
+
+**The record's judge reports where its report can be read.** On every run,
+`galata-watch` writes `watch.json` to the status folder:
+- when it judged and how many partitions it checked;
+- each finding as observed, expected and where;
+- a run with nothing to check, and one that could not judge, each stated as
+  a finding.
+
+The deployment's health reads that report. The lane's own run store keeps
+only its exit.
 
 As a service, the lane runs in its container (Services in containers, below).
 By hand, for development:
@@ -919,8 +958,8 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
 | `capture:<venue>` | `galata-datawatch` | the archive and the status folder | nowhere |
 | `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
 | `nats` | `galata-nats` | its server configuration, the generated authorization file and a volume of its own | this Mac's tailnet name, port 4222 |
-| `flows` | `galata-flows` | the archive, the tape and a volume of its own | nowhere |
-| `markets` | `galata-markets` | the archive and the tape, **read-only** | this Mac's tailnet name, port 8780 |
+| `flows` | `galata-flows` | the archive, the tape, the status folder (the record judge's report) and a volume of its own | nowhere |
+| `markets` | `galata-markets` | the archive, the tape and the status folder, **read-only** | this Mac's tailnet name, port 8780 |
 
 - **The limits are stated, never defaulted.** A container given none gets
   4 CPUs and 1 GiB whatever it runs. A service's line states both, and a

@@ -45,7 +45,32 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin"
 export NO_COLOR=1
 cd "$ROOT"
 
-refuse() { echo "run-service: REFUSED — $1" >&2; exit 2; }
+refuse() { echo "run-service: REFUSED — $1" >&2; record_start refused "$1"; exit 2; }
+
+# **Each start is recorded** in the status folder, service-<service>.json: a
+# start just before the hand-over, a refusal with its reason here, the ten most
+# recent kept (scripts/lib/start_record.py). launchd retries a refused or
+# exited service every ten seconds and says so only in its log; the
+# deployment's health reads this (add-service-health-monitoring, design D5).
+# Never under --check, which starts nothing. Best effort: a record that cannot
+# be written must not change what the launcher does. GALATA_STATUS_DIR moves
+# it, for a test.
+RECORD_AS=""
+status_dir() {
+    if [[ -n "${GALATA_STATUS_DIR:-}" ]]; then printf '%s' "$GALATA_STATUS_DIR"; return; fi
+    local line
+    if [[ -n "${GALATA_CONFIG:-}" ]] \
+        && line="$(python3 "$ROOT/scripts/lib/config_roots.py" "$GALATA_CONFIG" "$ROOT" paths.status 2>/dev/null)"; then
+        printf '%s' "${line%%$'\t'*}"
+    else
+        printf '%s' "$ROOT/var/status"
+    fi
+}
+record_start() {  # record_start started | record_start refused <reason>
+    (( ${CHECK:-0} )) && return 0
+    [[ -n "$RECORD_AS" ]] || return 0
+    python3 "$ROOT/scripts/lib/start_record.py" "$(status_dir)" "$RECORD_AS" "$@" >/dev/null 2>&1 || true
+}
 
 # **--check: would this service start?** Every precondition below, plus that
 # its token opens and has not expired, and then `ready` in place of the exec.
@@ -66,6 +91,7 @@ start() {
         echo "ready: $*${note:+ ($note)}"
         exit 0
     fi
+    record_start started
     exec "$@"
 }
 
@@ -169,6 +195,7 @@ from_vault() {
     # Under --check, the program after `--` is what gv run would exec.
     (( CHECK )) && start "$@"
     [[ -x "$1" ]] || refuse "no program at $1"
+    record_start started
     exec "$gv" run --only "$names" -- "$@"
 }
 
@@ -300,6 +327,12 @@ own_volume() {
 }
 
 service="${1:-}"
+# The name a start is recorded under: the service as var/containers.conf
+# names it, `capture:<venue>` and `ledger:<venue>` with their venue.
+case "$service" in
+    capture|ledger) RECORD_AS="$service${2:+:$2}" ;;
+    ?*) RECORD_AS="$service" ;;
+esac
 case "$service" in
     nats)
         # **Every identity the generated authorization file names**, read
@@ -416,17 +449,19 @@ case "$service" in
         refuse "the vault is no longer a service of this deployment: start the hosted vault (galata-vault: deploy/apple-container/gv-container up), and remove the old agent with scripts/install-services.sh --uninstall vault"
         ;;
     flows)
-        # The archive and the tape, which its tools maintain; its own state;
-        # the configuration. No secret, by design and by check-python-flows.sh;
-        # no status folder, no ledger, and no port: its interface can start any
-        # registered flow, so it answers inside the container only
+        # The archive and the tape, which its tools maintain; the status
+        # folder, where the record's judge writes its report
+        # (add-service-health-monitoring, design D7); its own state; the
+        # configuration. No secret, by design and by check-python-flows.sh; no
+        # ledger, and no port: its interface can start any registered flow, so
+        # it answers inside the container only
         # (`container exec galata-flows cereyan runs ls`).
         #
         # Five flows, not seven: the image leaves out the two that need
         # galata-research (deploy/container/Containerfile.flows), so they do
         # not run while it is set aside.
         use_config
-        root_mounts paths.archive paths.tape
+        root_mounts paths.archive paths.tape paths.status
         config_mount "$(container_name flows)"
         in_container flows "$FLOWS_IMAGE" "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}" -v "$FLOWS_STATE:/data"
         if (( ! CHECK )); then own_volume "$FLOWS_STATE" "$FLOWS_IMAGE"; fi
@@ -439,7 +474,9 @@ case "$service" in
         # input; and its port published on the tailnet address alone, as the
         # broker's is, for clients on the tailnet.
         use_config
-        root_mounts_readonly paths.archive paths.tape
+        # The status folder too, read-only: the deployment's health is judged
+        # from the reports in it (add-service-health-monitoring, design D2).
+        root_mounts_readonly paths.archive paths.tape paths.status
         config_mount "$(container_name markets)"
         secrets=(); only=()
         while read -r name; do secrets+=("$name"); only+=(--only "$name"); done < <(markets_secrets)

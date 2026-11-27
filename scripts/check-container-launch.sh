@@ -392,8 +392,9 @@ else
     [[ "$line" == *"--publish"* ]] && say "the lane publishes a port: its interface can start any registered flow"
     [[ "$line" == *"hand-secrets"* || "$line" == *"with-secrets"* || "$line" == *" -i "* ]] \
         && say "the lane is handed something over standard input: it holds no secret"
-    [[ "$line" == *"/var/status"* || "$line" == *"/var/ledger"* ]] \
-        && say "the lane's container is given the status folder or the ledger's record, which are not its own roots"
+    has " -v $scratch/var/status:/app/var/status " "it is given the status folder, where the record's judge writes its report"
+    [[ "$line" == *"/var/ledger"* ]] \
+        && say "the lane's container is given the ledger's record, which is not its own root"
 fi
 : > "$scratch/containers.conf"
 line="$(GALATA_CONTAINER_BIN="$stubs/up/container" GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
@@ -426,8 +427,11 @@ else
     has " with-secrets $markets_names -- galata-markets" "the entrypoint receives every name, then becomes galata-markets"
     [[ "$line" == *" -v $scratch/var/archive"* || "$line" == *" -v $scratch/var/tape"* ]] \
         && say "galata-markets is given the archive or the tape writable"
-    [[ "$line" == *"/var/status"* || "$line" == *"/var/ledger"* ]] \
-        && say "galata-markets' container is given the status folder or the ledger's record, which are not its to read"
+    has "source=$scratch/var/status,target=/app/var/status,readonly" "it is given the status folder read-only: it judges the reports in it, and must not change them"
+    [[ "$line" == *" -v $scratch/var/status"* ]] \
+        && say "galata-markets is given the status folder writable"
+    [[ "$line" == *"/var/ledger"* ]] \
+        && say "galata-markets' container is given the ledger's record, which is not its to read"
     [[ "$line" =~ -e\ +\"?GALATA_(MARKETS_TOKEN|BROKER_PASSWORD) ]] && say "one of galata-markets' secrets is passed with -e"
 fi
 : > "$scratch/containers.conf"

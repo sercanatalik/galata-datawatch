@@ -8,6 +8,7 @@
 
 pub mod access;
 pub mod fill;
+pub mod health;
 pub mod history;
 pub mod live;
 pub mod metadata;
@@ -43,6 +44,8 @@ pub struct Markets {
     pub statuses: status::Statuses,
     /// What is held per instrument, kept a while.
     pub held: metadata::HeldCache,
+    /// Where the deployment's health is read from, and what to expect.
+    pub health: health::Sources,
 }
 
 impl Markets {
@@ -59,6 +62,7 @@ impl Markets {
             limits: history::Limits::default(),
             statuses: status::Statuses::default(),
             held: metadata::HeldCache::default(),
+            health: health::Sources::default(),
         }
     }
 }
@@ -86,6 +90,18 @@ pub fn routes(markets: Shared) -> Router {
             get(metadata::instrument_route),
         )
         .with_state(markets)
+}
+
+/// **The service as it is served**: `/health` and `/v1/health` open, every
+/// other route behind a client's token. `/v1/health` is a health check, which
+/// `market-data-access` lets answer without one (`add-service-health-monitoring`,
+/// design D9).
+pub fn service(tokens: access::Tokens, markets: Shared) -> Router {
+    app(tokens, routes(markets.clone())).merge(
+        Router::new()
+            .route("/v1/health", get(health::health_route))
+            .with_state(markets),
+    )
 }
 
 /// **The service's routes**: `/health` open, every other route behind a

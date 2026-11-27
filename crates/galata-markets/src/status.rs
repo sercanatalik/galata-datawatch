@@ -70,6 +70,20 @@ impl VenueStatus {
         })
     }
 
+    /// This status as a report for the deployment's health to judge
+    /// ([`galata_datawatch::health`]): what is held of it, under capture's own
+    /// names.
+    pub fn as_report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "venue": self.venue,
+            "observed_at_micros": self.reported_at_micros,
+            "connection": self.connection,
+            "subs_held": self.subs_held,
+            "subs_declared": self.subs_declared,
+            "pairs": [{ "last_recv_micros": self.last_event_micros }],
+        })
+    }
+
     /// Whether it is recent enough, at `now`, to call current.
     pub fn is_current(&self, now_micros: i64) -> bool {
         now_micros - self.reported_at_micros <= CURRENT_FOR_MICROS

@@ -144,8 +144,8 @@ prove "check-no-transport (the pure half reaches for the runtime)" \
 prove "check-container-launch (galata-markets mounts the record writable)" \
     "$ROOT/scripts/check-container-launch.sh" \
     "$ROOT/scripts/run-service.sh" \
-    replace '        root_mounts_readonly paths.archive paths.tape' \
-    '        root_mounts paths.archive paths.tape'
+    replace '        root_mounts_readonly paths.archive paths.tape paths.status' \
+    '        root_mounts paths.archive paths.tape paths.status'
 
 # galata-markets taking galata-datawatch with its capture loop.
 prove "check-markets-no-transport (the service links a venue transport)" \
@@ -512,6 +512,21 @@ prove "check-container-launch (var/ in the build context)" \
       .dockerignore replace \
       $'\nvar/\n' \
       $'\n'
+
+# A refused start left unrecorded: launchd's retries would say so only in a
+# log nobody reads.
+prove "check-start-record (a refusal goes unrecorded)" \
+      ./scripts/check-start-record.sh \
+      scripts/run-service.sh replace \
+      'record_start refused "$1"; exit 2; }' \
+      'exit 2; }'
+
+# A start handed over without its record: a restart loop would not show.
+prove "check-start-record (a hand-over goes unrecorded)" \
+      ./scripts/check-start-record.sh \
+      scripts/run-service.sh replace \
+      $'    record_start started\n    exec "$@"' \
+      $'    exec "$@"'
 
 # Every guard must have an entry above.
 listed=$(grep -c '^prove "' "$0" || true)

@@ -22,6 +22,19 @@ pub fn date_of(micros: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// A time in microseconds as a UTC time to the second, for a message:
+/// `2027-02-25 09:30:00 UTC`. The date is [`date_of`]'s.
+pub fn time_of(micros: i64) -> String {
+    let second = micros.div_euclid(1_000_000).rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}:{:02} UTC",
+        date_of(micros),
+        second / 3_600,
+        second / 60 % 60,
+        second % 60
+    )
+}
+
 /// Midnight UTC of a `YYYY-MM-DD` date, in microseconds. The exact inverse of
 /// [`date_of`].
 ///

@@ -112,6 +112,83 @@ impl Report {
     pub fn had_nothing(&self) -> bool {
         self.checked == 0
     }
+
+    /// This run as it is written to the status folder. Where there was
+    /// nothing to check, that is written as a finding too: an empty archive is
+    /// what capture having silently stopped looks like, and it must not read
+    /// as clean to whoever reads the report instead of the log.
+    pub fn written(&self, judged_at_micros: i64, archive_root: &Path) -> Written {
+        let mut findings: Vec<WrittenFinding> =
+            self.findings.iter().map(WrittenFinding::from).collect();
+        if self.had_nothing() {
+            findings.push(WrittenFinding {
+                observed: "the archive holds no partitions".into(),
+                expected: "partitions to judge: an empty archive is what capture having \
+                           silently stopped looks like"
+                    .into(),
+                at: archive_root.display().to_string(),
+            });
+        }
+        Written {
+            judged_at_micros,
+            checked: self.checked,
+            findings,
+        }
+    }
+}
+
+/// The name the judge's report goes under in the status folder: `watch.json`.
+pub const REPORT_NAME: &str = "watch";
+
+/// One run of the judge **as written to the status folder**, for the
+/// deployment's health to read (`add-service-health-monitoring`, design D7):
+/// when it judged, how much it checked, and each finding. Replaced by every
+/// run, whatever it found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Written {
+    /// When this run judged, by the judge's clock.
+    pub judged_at_micros: i64,
+    /// How many partitions it looked at.
+    pub checked: usize,
+    /// Each finding, as the log line states it.
+    pub findings: Vec<WrittenFinding>,
+}
+
+impl Written {
+    /// A run that could not judge: why, as its one finding. A judge that
+    /// cannot read the record has not found it well.
+    pub fn failed(judged_at_micros: i64, error: &str, archive_root: &Path) -> Written {
+        Written {
+            judged_at_micros,
+            checked: 0,
+            findings: vec![WrittenFinding {
+                observed: format!("the judge could not run: {error}"),
+                expected: "a record it can read and judge".into(),
+                at: archive_root.display().to_string(),
+            }],
+        }
+    }
+}
+
+/// A [`Finding`] as written: observed, expected and where.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WrittenFinding {
+    /// What was measured.
+    pub observed: String,
+    /// What was declared acceptable.
+    pub expected: String,
+    /// Where to look.
+    pub at: String,
+}
+
+impl From<&Finding> for WrittenFinding {
+    fn from(finding: &Finding) -> WrittenFinding {
+        WrittenFinding {
+            observed: finding.observed.clone(),
+            expected: finding.expected.clone(),
+            at: finding.at.display().to_string(),
+        }
+    }
 }
 
 /// Read the record and judge it.
