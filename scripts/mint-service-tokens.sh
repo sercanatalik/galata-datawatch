@@ -110,16 +110,17 @@ mint markets "${markets_names[@]}"
 
 # The ledger, per venue: that venue's account addresses and the fingerprint
 # key, named by the deployment's own [ledger] tables (scripts/lib/ledger_vars.py)
-# so this token and run-service.sh cannot disagree. None minted where no ledger
-# is declared for the venue.
+# so this token and run-service.sh cannot disagree. One per venue the accounts
+# name, with or without a [venue.…] table (add-derive-account-ledger, D7);
+# none where no ledger is declared.
 CONFIG="$ROOT/var/datawatch.local.toml"
 [[ -f "$CONFIG" ]] || CONFIG="$ROOT/config/datawatch.toml"
-for venue in hyperliquid; do
+ledger_venues="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" --venues 2>/dev/null)" \
+    || echo "no ledger declared in $CONFIG — no ledger token"
+for venue in $ledger_venues; do
     if names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" "$venue")"; then
         # shellcheck disable=SC2086  # one name per line, none with spaces
         mint "ledger-$venue" $names
-    else
-        echo "no ledger declared for $venue in $CONFIG — no ledger-$venue token"
     fi
 done
 

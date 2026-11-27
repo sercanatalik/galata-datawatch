@@ -93,8 +93,9 @@ while IFS= read -r name; do
     is_env_name "$name" || say "mint-service-tokens.sh mints a token for $name, which cannot be an environment variable"
 done < <(grep -E '^mint [a-z-]+ ' "$ROOT/scripts/mint-service-tokens.sh" | cut -d' ' -f3- | tr ' ' '\n')
 
-# The ledger's names, from the committed configuration (none declared is fine).
-for venue in hyperliquid; do
+# The ledger's names, from the committed configuration (none declared is fine),
+# for every venue its accounts name.
+for venue in $(python3 "$ROOT/scripts/lib/ledger_vars.py" "$ROOT/config/datawatch.toml" --venues 2>/dev/null); do
     if names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$ROOT/config/datawatch.toml" "$venue" 2>/dev/null)"; then
         while IFS= read -r name; do
             is_env_name "$name" || say "the ledger on $venue asks for $name, which cannot be an environment variable"

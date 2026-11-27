@@ -15,7 +15,8 @@
 # venue's, the tower the reader's), and the configuration's venues and
 # `[ledger]` tables (scripts/lib/ledger_vars.py). A venue with a broker
 # identity and no `[venue.…]` table has no capture here, so nothing reads its
-# password but the broker.
+# password but the broker. A ledger's venue is the one its accounts name, table
+# or no table: a ledger-only venue has none (add-derive-account-ledger, D7).
 #
 # **The template is what a fresh project is filled from.** A new vault holds
 # nothing, and a service started without a secret looks, for a while, like
@@ -80,7 +81,7 @@ required() {
         if names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" "$venue" 2>/dev/null)"; then
             while read -r name; do printf 'ledger:%s\t%s\n' "$venue" "$name"; done <<< "$names"
         fi
-    done <<< "$venues"
+    done < <(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" --venues 2>/dev/null)
 }
 
 # Each name once, in the order first asked for.
