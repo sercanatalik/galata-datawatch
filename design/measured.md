@@ -6036,3 +6036,32 @@ command line, which `time`'s and `gv run`'s command lines also contain, so
 `time` was stopped too and printed nothing (exit 143). The ledger itself
 stopped cleanly both times ("asked to terminate; stopping cleanly"). The
 second run anchored the pattern to the ledger's own command line.
+
+## The Derive ledger in its container — 2026-11-27
+
+`add-derive-account-ledger` task 6.5. `ledger:derive-xyz` installed at 13:19
+UTC from `galata-datawatch:latest`, built from `8318e97`, at 1 CPU and 512M.
+It runs beside `ledger:hyperliquid`, which was restarted onto the same image
+at 13:22. It reads the owner's wallet, alias `owner`, with the session key
+holding `trade:all` and `account_info`. Its wallet and key, and the
+fingerprint key, are read from the vault by the `ledger-derive-xyz` token.
+Read from the deployment's own record, projection and status at 14:20:
+
+```text
+snapshot passes                  13, 13:19:14 to 14:19:23, 300.3 to 301.3 s apart
+  private/get_all_portfolios     13, one a pass for the three subaccounts
+gaps                             0
+misses, every account            0
+discovery runs                   7, boot included, each listing the same three
+projected reads per subaccount   13, the newest 14:19:23, the last snapshot's
+  owner_s3                       margin 13, collateral 13, positions 26: two positions now
+status                           the key's expiry 2027-02-25 10:31:39 UTC, no warning,
+                                 nothing held, nothing stopped
+```
+
+**An hour deployed, as an hour native.** Every pass answered, and every
+subaccount's newest rows are the last snapshot's, with its time.
+- `owner_s3` holds two positions where it held one in the morning's runs;
+  the projection carries both.
+- The record and the projection stay owner-only, each venue in its own
+  `venue=` partition.
