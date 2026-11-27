@@ -31,13 +31,17 @@
 #   ledger  measured 2026-11-26 (add-hyperliquid-portfolio-margin-state): 24 MiB
 #           steady on one account and 59 MiB walking a long history, 0.5 s of
 #           cpu an hour; 512M holds the history the fold keeps as it grows.
+#           Derive's (add-derive-account-ledger, measured 2026-11-27): 21 MiB
+#           and 0.06 s of cpu in ten minutes, reading one wallet whole and
+#           walking no history; 512M as Hyperliquid's, for the rows the fold
+#           keeps as they grow.
 #   markets galata-markets. An answer is held whole before it is sent: the
 #           largest the limits allow (1.9 million rows, 167 MB) took the
 #           container to 536 MiB, idle is 30 MiB, and ten live clients on
 #           every instrument 115; 2G holds three of the largest at once.
 #
 # With galata-vault's container (1G) and galata-watcher's two (1G each), the
-# deployment's containers may hold 20G together, and 32G while
+# deployment's containers may hold 20.5G together, and 32.5G while
 # scripts/build-images.sh's builder (12G) is up.
 #
 # service              cpus  memory
@@ -46,3 +50,4 @@ nats                   1     1G
 capture:hyperliquid    2     2G
 markets                2     2G
 ledger:hyperliquid     1     512M
+ledger:derive-xyz      1     512M
