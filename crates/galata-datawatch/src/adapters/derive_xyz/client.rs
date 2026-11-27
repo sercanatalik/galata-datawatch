@@ -92,67 +92,9 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+    use super::super::local_server::{provider, serve};
     use super::*;
     use crate::venue::REFERENCE_CHANNEL;
-
-    /// The binary installs this once at boot; a test builds a client with
-    /// no boot behind it. Installing twice is refused and ignored.
-    fn provider() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-
-    /// Answer every request on 127.0.0.1 with one status and body, and keep
-    /// what was asked: the request line and the body.
-    async fn serve(status: u16, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
-        provider();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let record = asked.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut raw = Vec::new();
-                let mut buf = [0u8; 4096];
-                // The headers, then as much body as `content-length` states.
-                loop {
-                    match socket.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => raw.extend_from_slice(&buf[..n]),
-                    }
-                    let text = String::from_utf8_lossy(&raw);
-                    if let Some(end) = text.find("\r\n\r\n") {
-                        let length: usize = text
-                            .to_lowercase()
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length: ").map(str::to_string))
-                            .and_then(|v| v.trim().parse().ok())
-                            .unwrap_or(0);
-                        if raw.len() >= end + 4 + length {
-                            break;
-                        }
-                    }
-                }
-                record
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&raw).to_string());
-                let reason = if status == 200 { "OK" } else { "Refused" };
-                let response = format!(
-                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-            }
-        });
-        (url, asked)
-    }
 
     #[tokio::test]
     async fn an_instrument_is_asked_by_name_and_its_bytes_come_back_unread() {

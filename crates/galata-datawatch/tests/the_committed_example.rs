@@ -73,3 +73,129 @@ fn every_documented_key_loads_uncommented() {
     );
     eprintln!("documented keys checked: {found:?}");
 }
+
+/// The ledger binary's rules: the costs it declares for every venue it keeps.
+struct LedgerResolver {
+    /// A venue this build is told to lack, as a build without its feature does.
+    without: Option<&'static str>,
+}
+
+impl Adapters for LedgerResolver {
+    fn supplies(&self, venue: &str, series: galata_wire::Series) -> bool {
+        adapters::supplies(venue, series)
+    }
+    fn known(&self, venue: &str) -> bool {
+        adapters::known().contains(&venue) && Some(venue) != self.without
+    }
+    fn known_names(&self) -> Vec<&'static str> {
+        adapters::known()
+            .into_iter()
+            .filter(|v| Some(*v) != self.without)
+            .collect()
+    }
+    fn max_instruments(&self, venue: &str) -> Option<u32> {
+        adapters::max_instruments(venue)
+    }
+    fn instrument_problem(&self, venue: &str, ticker: &str) -> Option<String> {
+        adapters::instrument_problem(venue, ticker)
+    }
+    fn ledger_cost(&self, venue: &str) -> Option<galata_datawatch::config::LedgerCost> {
+        (Some(venue) != self.without)
+            .then(|| adapters::ledger_cost(venue))
+            .flatten()
+    }
+    fn keeps_ledgers(&self) -> bool {
+        true
+    }
+}
+
+/// The example's commented `[ledger]` block, enabled, with a Derive wallet
+/// beside the Hyperliquid account, at the given cadences.
+fn with_a_derive_ledger(snapshot_secs: u32, discover_secs: u32) -> String {
+    let (_, text) = example();
+    format!(
+        "{text}
+[ledger]
+root = \"var/ledger\"
+snapshot_secs = {snapshot_secs}
+discover_secs = {discover_secs}
+events_secs = 300
+fold_position_tolerance = 0.0
+fold_relative_tolerance = 0.00002
+ledger_share = 0.25
+fingerprint_key_var = \"GALATA_LEDGER_FINGERPRINT_KEY\"
+
+[ledger.account.main]
+venue = \"hyperliquid\"
+address_var = \"GALATA_LEDGER_HL_MAIN\"
+dexes = [\"\", \"xyz\"]
+
+[ledger.account.owner]
+venue = \"derive-xyz\"
+address_var = \"GALATA_LEDGER_DERIVE_WALLET\"
+session_key_var = \"GALATA_LEDGER_DERIVE_SESSION_KEY\"
+session_key_warn_days = 14
+"
+    )
+}
+
+#[test]
+fn the_committed_example_loads_for_the_ledger() {
+    let (path, _) = example();
+    Config::load_from(&path, &LedgerResolver { without: None }).unwrap();
+}
+
+#[cfg(feature = "derive-xyz")]
+#[test]
+fn a_derive_wallet_loads_at_the_deployments_cadences() {
+    let (path, _) = example();
+    Config::load_from_str(
+        &with_a_derive_ledger(300, 600),
+        Origin::File(path),
+        &LedgerResolver { without: None },
+    )
+    .unwrap();
+    // One request a snapshot and two a discovery: 0.4 a minute, against 75.
+    let cost = adapters::ledger_cost("derive-xyz").unwrap();
+    assert_eq!((cost.snapshot, cost.discovery), (1.0, 2.0));
+    assert!(cost.reads_with_key && !cost.has_dexes);
+}
+
+#[cfg(feature = "derive-xyz")]
+#[test]
+fn a_derive_cadence_over_the_ledgers_share_is_refused_naming_the_budget() {
+    let (path, _) = example();
+    // Every second, and discovery every second: 60 + 120 a minute, over the
+    // 75 that a quarter of 300 allows.
+    let refused = Config::load_from_str(
+        &with_a_derive_ledger(1, 1),
+        Origin::File(path),
+        &LedgerResolver { without: None },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("derive-xyz"), "{refused}");
+    assert!(
+        refused.contains("75"),
+        "the share's allowance is named: {refused}"
+    );
+}
+
+#[test]
+fn a_build_without_derive_says_so_naming_what_it_keeps() {
+    let (path, _) = example();
+    let refused = Config::load_from_str(
+        &with_a_derive_ledger(300, 600),
+        Origin::File(path),
+        &LedgerResolver {
+            without: Some("derive-xyz"),
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("derive-xyz"), "{refused}");
+    assert!(
+        refused.contains("hyperliquid"),
+        "what it keeps is named: {refused}"
+    );
+}

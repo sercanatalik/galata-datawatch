@@ -145,6 +145,8 @@ for relative in NON_CONNECTING:
 LEDGER_LOOP = [
     "crates/galata-datawatch/src/ledger/run.rs",
     "crates/galata-datawatch/src/adapters/hyperliquid/accounts.rs",
+    "crates/galata-datawatch/src/adapters/derive_xyz/private.rs",
+    "crates/galata-datawatch/src/adapters/derive_xyz/accounts.rs",
 ]
 for relative in LEDGER_LOOP:
     path = root / relative

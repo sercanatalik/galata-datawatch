@@ -441,7 +441,8 @@ built, for a history read and a live stream alike.
 `galata-ledger <venue>` records the operator's own accounts, as `capture`
 records markets: every answer archived verbatim before anything reads it, a
 missed read recorded as a gap, and **nothing computed** from what the venue
-states. It reads Hyperliquid today, by address, with no key.
+states. It reads Hyperliquid by address, with no key, and Derive with a
+session key ([below](#derive-a-wallet-read-with-a-session-key)).
 
 ```text
   every snapshot_secs   per account and dex     clearinghouseState   ──▶ margin, positions
@@ -470,6 +471,60 @@ states. It reads Hyperliquid today, by address, with no key.
   is refused at load.
 - **An address never names anything**: accounts are aliases (`main`, and
   `main_s1` for a discovered sub-account) in every path, subject and log.
+
+### Derive: a wallet, read with a session key
+
+Built with `--features derive-xyz`. An account with `venue = "derive-xyz"`
+names the Derive wallet and the session key that signs its reads, and no
+dexes:
+
+```toml
+[ledger.account.owner]
+venue = "derive-xyz"
+# The Derive wallet the key is registered to. NOT the address the owner signs
+# in with: a request naming that one is refused by Derive's gateway with a bare
+# 403. `public/get_wallets_from_session_key` names it from the key's address.
+address_var = "GALATA_LEDGER_DERIVE_WALLET"
+session_key_var = "GALATA_LEDGER_DERIVE_SESSION_KEY"
+# Days before the key expires from which the status warns. 14 when absent.
+session_key_warn_days = 14
+```
+
+```text
+  boot, and every discover_secs   public/get_wallets_from_session_key  the key is the wallet's, or nothing is signed
+                                  private/session_keys                 its scopes and expiry
+                                  private/get_subaccounts              subaccounts, bound to owner_s1, owner_s2, …
+  every snapshot_secs             private/get_all_portfolios           ──▶ margin_state, position_state, collateral,
+                                  ONE request per wallet                   per subaccount
+```
+
+- **The key.** Make one with `scripts/make-derive-session-key.sh`, which hands
+  its private half straight to the vault and prints the public address; or
+  make it in Derive's interface and enter the private half at `gv set`'s
+  hidden prompt. Register the address on the wallet with the owner's
+  subaccounts, an expiry, and no scope beyond trading.
+- **What the key may hold**: protocol scopes under `trade`, and the off-chain
+  `account_info` and `block_trade`. One key serves the ledger and the owner's
+  trading (`add-derive-account-ledger`, design D4); the ledger itself places,
+  amends and cancels no order. It refuses to start, or stops at the next
+  discovery, naming the reason, when the key holds anything else
+  (`withdraw`, `transfer:…`, `liquidate`, `set_session_key`, `vault:…`,
+  `admin`, or a scope Derive adds later), is registered to another wallet,
+  is not listed, has expired, or could not be checked.
+- **Its expiry is on the status surface** (`key_expires_micros`), with a
+  `key_warning` once fewer than `session_key_warn_days` remain. Renew the key
+  before then.
+- **The margins are net**: a subaccount's `margin_state` initial and
+  maintenance margin are what is left over the requirement, positive being
+  headroom; a position's and a collateral's are each one's contribution
+  (measured 2026-11-27, `design/measured.md`).
+- **A subaccount's identifier never names anything**: it stays inside the
+  archived answers, and the subaccount is `owner_s1` in every path and status.
+  The wallet's answer is recorded under the wallet, and projected under each
+  subaccount.
+- **Its cost**: Derive allows 300 reads a minute per wallet, shared with the
+  owner's own use. A rate refusal's stated wait holds the venue, and a
+  snapshot due inside it is a throttled gap.
 
 ---
 

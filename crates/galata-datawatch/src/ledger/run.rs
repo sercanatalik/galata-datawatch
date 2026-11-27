@@ -28,7 +28,9 @@ use crate::capture::{Clock, Refusal, StatusFile};
 use crate::config::Secret;
 use crate::ingest::{ingest, record_generated_at};
 use crate::ledger::Listed;
-use crate::ledger::accounts::{Bindings, FingerprintKey, LedgerError, ResolvedAccount, Seen};
+use crate::ledger::accounts::{
+    Bindings, FingerprintKey, KeyRefusal, KeyStanding, LedgerError, ResolvedAccount, Seen, utc,
+};
 use crate::normalise::{Normalise, NormaliseError};
 use crate::record::{Archive, Payload, PayloadAddress, RecordError};
 use crate::sink::Sink;
@@ -51,6 +53,25 @@ pub enum Ask {
     Balances,
     /// What an account has borrowed and supplied: account-wide.
     BorrowLend,
+}
+
+/// A read that did not answer: why, and how long the venue said to wait
+/// before it is asked again, where it said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refused {
+    /// Why.
+    pub refusal: Refusal,
+    /// The wait the venue stated, in microseconds.
+    pub wait_micros: Option<i64>,
+}
+
+impl From<Refusal> for Refused {
+    fn from(refusal: Refusal) -> Refused {
+        Refused {
+            refusal,
+            wait_micros: None,
+        }
+    }
 }
 
 /// What a venue must answer for its ledger to run. Its adapter implements it.
@@ -111,6 +132,68 @@ pub trait AccountVenue: Send + Sync {
     /// A page's earliest and newest venue time and its row count. `None` for
     /// an empty page.
     fn page_span(&self, page: &[u8]) -> Option<(i64, i64, usize)>;
+    /// Check the session key a declared account is read with: its standing,
+    /// or why it is not read with. Asked at boot and at each discovery run,
+    /// before any account request. A venue that reads by address alone holds
+    /// no key and has nothing to check.
+    fn check_key(
+        &self,
+        _account: &ResolvedAccount,
+        _now_micros: i64,
+    ) -> impl Future<Output = Result<Option<KeyStanding>, KeyRefusal>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Whether a snapshot is **one request for a whole wallet**, whose rows
+    /// name the subaccount each belongs to (design D1 of
+    /// `add-derive-account-ledger`), rather than one per account and dex.
+    fn reads_by_wallet(&self) -> bool {
+        false
+    }
+    /// Whether the venue says what a declared address is: a master or a
+    /// sub-account. A venue read by wallet has nothing to ask.
+    fn has_roles(&self) -> bool {
+        true
+    }
+    /// Whether the venue answers how each account's collateral is held.
+    fn has_modes(&self) -> bool {
+        true
+    }
+    /// The series a snapshot answer is recorded in, and a missed one is a gap
+    /// in.
+    fn snapshot_series(&self) -> Series {
+        Series::Margin
+    }
+    /// A master's sub-accounts, raw, asked with whatever the venue needs of
+    /// the master: its address alone, unless the venue signs its reads.
+    fn list(
+        &self,
+        master: &ResolvedAccount,
+        _now_micros: i64,
+    ) -> impl Future<Output = Result<Vec<u8>, Refused>> + Send {
+        let listing = self.listing(master.address());
+        async move { listing.await.map_err(Refused::from) }
+    }
+    /// A whole wallet's state in one answer, raw. Asked only of a venue that
+    /// [reads by wallet](AccountVenue::reads_by_wallet).
+    fn wallet_snapshot(
+        &self,
+        _master: &ResolvedAccount,
+        _now_micros: i64,
+    ) -> impl Future<Output = Result<Vec<u8>, Refused>> + Send {
+        async { Err(Refusal::Unreachable.into()) }
+    }
+    /// The kinds the ledger projects for this venue's accounts, and reads
+    /// back for the fold.
+    fn projected_kinds(&self) -> &'static [Kind] {
+        &crate::ledger::project::PROJECTED
+    }
+    /// A wallet payload: the answer verbatim, with the alias each subaccount
+    /// it names is bound to. `aliases` is keyed by the subaccount's
+    /// fingerprint, so the loop never holds an identifier in the clear.
+    fn compose_wallet(&self, _aliases: &BTreeMap<String, Account>, answer: &[u8]) -> Vec<u8> {
+        answer.to_vec()
+    }
 }
 
 /// How often, in microseconds.
@@ -163,6 +246,13 @@ pub struct AccountStatus {
     pub not_seen_since_micros: Option<i64>,
     /// Its history, by kind.
     pub events: BTreeMap<String, EventsStatus>,
+    /// When its session key expires, on a venue whose reads are signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_expires_micros: Option<i64>,
+    /// A warning that the key expires soon, once fewer than the declared days
+    /// remain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_warning: Option<String>,
 }
 
 /// One kind of an account's history, as the status surface shows it.
@@ -199,6 +289,10 @@ pub struct LedgerStatus {
     pub role_unverified: Vec<String>,
     /// Declared dexes the venue could not be asked about at boot.
     pub dex_unverified: BTreeSet<String>,
+    /// Until when the venue is not asked, holding to the wait it stated with
+    /// a rate refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_until_micros: Option<i64>,
 }
 
 /// The ledger for one venue.
@@ -221,6 +315,10 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
     polls: BTreeMap<(Account, String), Cadence>,
     /// (account, series) → the cadence of an account-wide read.
     wide_polls: BTreeMap<(Account, Series), Cadence>,
+    /// wallet → the cadence of its one read, on a venue read by wallet.
+    wallet_polls: BTreeMap<Account, Cadence>,
+    /// Not asked before this, holding to a wait the venue stated.
+    held_until: Option<i64>,
     /// The venue's reference data as last read at discovery, raw.
     reference: Option<Vec<u8>>,
     role_unverified: BTreeSet<Account>,
@@ -309,6 +407,8 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             modes: BTreeMap::new(),
             polls: BTreeMap::new(),
             wide_polls: BTreeMap::new(),
+            wallet_polls: BTreeMap::new(),
+            held_until: None,
             reference: None,
             role_unverified: BTreeSet::new(),
             backoff: Backoff::default(),
@@ -356,7 +456,15 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             relative_tolerance: tolerances.relative,
             ..Default::default()
         };
+        let kinds = self.venue.projected_kinds();
+        let by_wallet = self.venue.reads_by_wallet();
         for account in self.polled() {
+            // On a venue read by wallet, a subaccount's rows are its wallet's
+            // answer's, read and projected with the wallet below; its own
+            // record holds only its binding.
+            if by_wallet && self.subs.contains_key(&account.alias) {
+                continue;
+            }
             let history = self.histories.entry(account.alias.clone()).or_default();
             // **Best effort, like the writes below.** One unreadable segment
             // under one account used to end the whole ledger, so a report
@@ -368,7 +476,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 self.archive.root(),
                 account.venue.as_str(),
                 account.alias.as_str(),
-                &crate::ledger::project::PROJECTED,
+                kinds,
                 self.venue.normaliser(),
                 &ours,
             ) {
@@ -381,12 +489,23 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             // is: a projection that cannot be written must not stop the ledger
             // recording, which is what it projects.
             if let Some(root) = &self.projection
-                && let Err(error) = crate::ledger::project::write(
-                    root,
-                    account.venue.as_str(),
-                    account.alias.as_str(),
-                    rows,
-                )
+                && let Err(error) = if by_wallet {
+                    // Each subaccount under its own alias.
+                    crate::ledger::project::write_by_account(
+                        root,
+                        account.venue.as_str(),
+                        rows,
+                        kinds,
+                    )
+                } else {
+                    crate::ledger::project::write_kinds(
+                        root,
+                        account.venue.as_str(),
+                        account.alias.as_str(),
+                        rows,
+                        kinds,
+                    )
+                }
             {
                 tracing::warn!(account = account.alias.as_str(), %error, "the ledger was not projected");
             }
@@ -412,6 +531,12 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         &self.status
     }
 
+    /// The clock, for a test that moves it.
+    #[cfg(test)]
+    pub(crate) fn clock(&self) -> &C {
+        &self.clock
+    }
+
     fn record(
         &mut self,
         address: &ResolvedAccount,
@@ -419,7 +544,8 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         bytes: Vec<u8>,
     ) -> Result<(), RecordError> {
         let kind = match ask {
-            Ask::Snapshot | Ask::Mode => Series::Margin.kind(),
+            Ask::Snapshot => self.venue.snapshot_series().kind(),
+            Ask::Mode => Series::Margin.kind(),
             Ask::Listing | Ask::Role => galata_wire::Kind::Accounts,
             Ask::Balances => Series::Balances.kind(),
             Ask::BorrowLend => Series::BorrowLend.kind(),
@@ -452,6 +578,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     /// A master whose role could not be asked is not refused — the venue did
     /// not say — and is asked again at each discovery run until it answers.
     pub async fn boot(&mut self) -> Result<(), LedgerError> {
+        self.check_keys().await?;
         // A dex the venue does not know answers every snapshot with a failure,
         // which would read as an outage forever. Refused here, by name.
         for master in &self.masters {
@@ -470,10 +597,54 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 }
             }
         }
-        for master in self.masters.clone() {
-            self.check_role(&master).await?;
+        if self.venue.has_roles() {
+            for master in self.masters.clone() {
+                self.check_role(&master).await?;
+            }
         }
-        self.discover().await?;
+        self.discover_accounts().await?;
+        Ok(())
+    }
+
+    /// Check each declared account's session key, where its venue signs reads
+    /// (design D4 of `add-derive-account-ledger`). A refusal stops the ledger
+    /// before it asks anything of the account; a standing is written to the
+    /// status, with a warning once fewer than the declared days remain.
+    async fn check_keys(&mut self) -> Result<(), LedgerError> {
+        for master in self.masters.clone() {
+            let now = self.clock.now_micros();
+            let standing = match self.venue.check_key(&master, now).await {
+                Ok(Some(standing)) => standing,
+                Ok(None) => continue,
+                Err(reason) => {
+                    self.write_status();
+                    return Err(LedgerError::KeyRefused {
+                        alias: master.alias.to_string(),
+                        reason,
+                    });
+                }
+            };
+            let warning = standing.expiry_micros.and_then(|expiry| {
+                let days = (expiry - now).div_euclid(86_400 * 1_000_000);
+                (days < i64::from(master.key_warn_days)).then(|| {
+                    format!(
+                        "the session key expires in {days} day{}, at {}",
+                        if days == 1 { "" } else { "s" },
+                        utc(expiry)
+                    )
+                })
+            });
+            if let Some(warning) = &warning {
+                tracing::warn!(account = master.alias.as_str(), "{warning}");
+            }
+            let entry = self
+                .status
+                .accounts
+                .entry(master.alias.to_string())
+                .or_default();
+            entry.key_expires_micros = standing.expiry_micros;
+            entry.key_warning = warning;
+        }
         Ok(())
     }
 
@@ -497,10 +668,17 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         Ok(())
     }
 
-    /// One discovery run over every master: bind what is new, record a name
-    /// that changed, stop polling what vanished, read every account's mode —
-    /// and report the run whatever it found.
+    /// One discovery run over every master: check each declared account's
+    /// session key again, then bind what is new, record a name that changed,
+    /// stop polling what vanished, read every account's mode — and report the
+    /// run whatever it found. A key refused now stops the ledger here, before
+    /// anything more is asked with it.
     pub async fn discover(&mut self) -> Result<Vec<Discovery>, LedgerError> {
+        self.check_keys().await?;
+        self.discover_accounts().await
+    }
+
+    async fn discover_accounts(&mut self) -> Result<Vec<Discovery>, LedgerError> {
         for master in self.masters.clone() {
             if self.role_unverified.contains(&master.alias) {
                 self.check_role(&master).await?;
@@ -517,7 +695,18 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 new: Vec::new(),
                 missing: Vec::new(),
             };
-            if let Ok(answer) = self.venue.listing(master.address()).await {
+            let listing = if self.held(at) {
+                None
+            } else {
+                match self.venue.list(&master, at).await {
+                    Ok(answer) => Some(answer),
+                    Err(refused) => {
+                        self.hold(refused, at);
+                        None
+                    }
+                }
+            };
+            if let Some(answer) = listing {
                 let listed = self.venue.listed(&answer);
                 self.record(&master, Ask::Listing, answer)
                     .map_err(record_error)?;
@@ -574,7 +763,12 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 .insert(master.alias.to_string(), run.clone());
             runs.push(run);
         }
-        for account in self.polled() {
+        let accounts = if self.venue.has_modes() {
+            self.polled()
+        } else {
+            Vec::new()
+        };
+        for account in accounts {
             if let Ok(answer) = self.venue.mode(account.address()).await {
                 let at = self.clock.now_micros();
                 self.modes
@@ -691,12 +885,112 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             }
             self.account_wide(&account, &mut pass).await?;
         }
+        if self.venue.reads_by_wallet() {
+            for master in self.masters.clone() {
+                self.wallet_read(&master, &mut pass).await?;
+            }
+        }
         // A throttle backs the loop off (`run`); anything else resets it.
         if !pass.throttled {
             self.backoff.reset();
         }
         self.write_status();
         Ok(pass)
+    }
+
+    /// One wallet's state in **one request**, whatever its subaccounts number
+    /// (design D1 of `add-derive-account-ledger`): archived under the wallet,
+    /// with the alias each polled subaccount is bound to, so its rows are
+    /// addressed to the subaccount from the record alone.
+    async fn wallet_read(
+        &mut self,
+        master: &ResolvedAccount,
+        pass: &mut Pass,
+    ) -> Result<(), LedgerError> {
+        let asked = self.clock.now_micros();
+        let interval = self.cadences.snapshot_micros;
+        let subs: Vec<ResolvedAccount> = self
+            .subs
+            .iter()
+            .filter(|(alias, (under, _))| {
+                *under == master.alias && self.polled_subs.contains(*alias)
+            })
+            .map(|(_, (_, sub))| sub.clone())
+            .collect();
+        // Inside a wait the venue stated, the read is not asked, and is a miss
+        // like any other: the snapshot was due and was not taken.
+        let answer = if self.held(asked) {
+            Err(Refused::from(Refusal::Throttled))
+        } else {
+            self.venue.wallet_snapshot(master, asked).await
+        };
+        match answer {
+            Ok(answer) => {
+                let aliases: BTreeMap<String, Account> = subs
+                    .iter()
+                    .map(|sub| (sub.fingerprint.clone(), sub.alias.clone()))
+                    .collect();
+                let bytes = self.venue.compose_wallet(&aliases, &answer);
+                self.record(master, Ask::Snapshot, bytes)
+                    .map_err(record_error)?;
+                self.wallet_polls
+                    .entry(master.alias.clone())
+                    .or_insert_with(|| Cadence::new(interval))
+                    .answered(asked);
+                pass.answered += 1;
+                for alias in std::iter::once(&master.alias).chain(aliases.values()) {
+                    let entry = self.status.accounts.entry(alias.to_string()).or_default();
+                    entry.polled = true;
+                    entry.answered_micros.insert(String::new(), asked);
+                }
+            }
+            Err(refused) => {
+                self.hold(refused, asked);
+                pass.missed += 1;
+                pass.throttled |= refused.refusal == Refusal::Throttled;
+                for alias in std::iter::once(&master.alias).chain(subs.iter().map(|s| &s.alias)) {
+                    self.status
+                        .accounts
+                        .entry(alias.to_string())
+                        .or_default()
+                        .missed += 1;
+                }
+                let missed = self
+                    .wallet_polls
+                    .entry(master.alias.clone())
+                    .or_insert_with(|| Cadence::new(interval))
+                    .missed(asked, refused.refusal.cause());
+                // A gap for each subaccount the read was for. Nothing earlier
+                // is recorded again in the miss's place.
+                if let Polled::Missed {
+                    from_micros,
+                    to_micros,
+                    cause,
+                } = missed
+                {
+                    let series = self.venue.snapshot_series();
+                    for sub in &subs {
+                        self.record_gap_for(sub, series, None, from_micros, to_micros, cause)?;
+                        pass.gaps += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the venue is inside a wait it stated.
+    fn held(&self, now_micros: i64) -> bool {
+        self.held_until.is_some_and(|until| now_micros < until)
+    }
+
+    /// Hold the venue for the wait a refusal stated, if it stated one: at
+    /// least that long, and never shortened by a later, shorter one.
+    fn hold(&mut self, refused: Refused, now_micros: i64) {
+        if let Some(wait) = refused.wait_micros {
+            let until = now_micros.saturating_add(wait.max(0));
+            self.held_until = Some(self.held_until.map_or(until, |held| held.max(until)));
+        }
     }
 
     /// One account's account-wide reads, each on its own cadence: an answer is
@@ -1037,6 +1331,14 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     /// fills, then ledger updates, and each kind's reach recorded once.
     pub async fn events_all(&mut self) -> Result<EventsPass, LedgerError> {
         let mut pass = EventsPass::default();
+        // A venue whose history the ledger does not keep has nothing to walk,
+        // and no reach to state: "unknown" would read as a question asked.
+        if crate::ledger::events::EVENT_KINDS
+            .iter()
+            .all(|kind| self.venue.events_channel(*kind).is_none())
+        {
+            return Ok(pass);
+        }
         for account in self.polled() {
             self.load(&account)?;
             for kind in crate::ledger::events::EVENT_KINDS {
@@ -1073,6 +1375,9 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
 
     fn write_status(&mut self) {
         self.status.at_micros = self.clock.now_micros();
+        self.status.held_until_micros = self
+            .held_until
+            .filter(|until| *until > self.status.at_micros);
         self.status.role_unverified = self.role_unverified.iter().map(|a| a.to_string()).collect();
         if let Some(file) = &self.status_file
             && let Ok(json) = serde_json::to_string_pretty(&self.status)
@@ -1164,6 +1469,10 @@ mod tests {
         borrow_lend: Mutex<Result<Vec<u8>, Refusal>>,
         /// Every account-wide ask: (address, ask).
         wide_asked: Mutex<Vec<(String, Ask)>>,
+        /// What each key check answers, in order; `Ok(None)` after.
+        keys: Mutex<std::collections::VecDeque<Result<Option<KeyStanding>, KeyRefusal>>>,
+        /// Listings asked.
+        listings: Mutex<u32>,
     }
 
     /// The public portfolio-margin account's answers of 2026-11-26.
@@ -1187,6 +1496,8 @@ mod tests {
                 balances: Mutex::new(Ok(SPOT.to_vec())),
                 borrow_lend: Mutex::new(Ok(LEND.to_vec())),
                 wide_asked: Mutex::new(Vec::new()),
+                keys: Mutex::new(std::collections::VecDeque::new()),
+                listings: Mutex::new(0),
             }
         }
         fn pages(&self, address: &str, kind: Kind, pages: &[&str]) {
@@ -1264,6 +1575,7 @@ mod tests {
             self.snapshot.lock().unwrap().clone()
         }
         async fn listing(&self, _: &Secret) -> Result<Vec<u8>, Refusal> {
+            *self.listings.lock().unwrap() += 1;
             self.listing.lock().unwrap().clone()
         }
         async fn role(&self, _: &Secret) -> Result<Vec<u8>, Refusal> {
@@ -1317,6 +1629,13 @@ mod tests {
         fn page_span(&self, page: &[u8]) -> Option<(i64, i64, usize)> {
             let (last, rows) = ev::page_end(page)?;
             Some((ev::page_start(page)?, last, rows))
+        }
+        async fn check_key(
+            &self,
+            _: &ResolvedAccount,
+            _: i64,
+        ) -> Result<Option<KeyStanding>, KeyRefusal> {
+            self.keys.lock().unwrap().pop_front().unwrap_or(Ok(None))
         }
     }
 
@@ -2221,6 +2540,107 @@ mod tests {
         let err = run.boot().await.unwrap_err();
         assert!(matches!(err, LedgerError::NotAMaster { .. }), "{err}");
         assert!(err.to_string().contains("`main`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_stops_the_ledger_before_any_account_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.venue
+            .keys
+            .lock()
+            .unwrap()
+            .push_back(Err(KeyRefusal::Scopes {
+                scopes: vec!["withdraw".into()],
+            }));
+        let err = run.boot().await.unwrap_err();
+        assert!(matches!(err, LedgerError::KeyRefused { .. }), "{err}");
+        let said = err.to_string();
+        assert!(
+            said.contains("`main`") && said.contains("`withdraw`"),
+            "{said}"
+        );
+        assert_eq!(*run.venue.listings.lock().unwrap(), 0);
+        assert!(run.venue.wide_asked.lock().unwrap().is_empty());
+        assert!(
+            crate::replay::read_all(&root)
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing was asked, so nothing was recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_that_gains_a_scope_stops_the_ledger_at_the_next_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        {
+            let mut keys = run.venue.keys.lock().unwrap();
+            keys.push_back(Ok(Some(KeyStanding {
+                expiry_micros: Some(T0 + 90 * 86_400 * SECOND),
+            })));
+            keys.push_back(Err(KeyRefusal::Scopes {
+                scopes: vec!["transfer:existing_subaccount".into()],
+            }));
+        }
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        let (listings, wide) = (
+            *run.venue.listings.lock().unwrap(),
+            run.venue.wide_asked.lock().unwrap().len(),
+        );
+
+        let err = run.discover().await.unwrap_err();
+        assert!(
+            err.to_string().contains("`transfer:existing_subaccount`"),
+            "{err}"
+        );
+        assert_eq!(
+            *run.venue.listings.lock().unwrap(),
+            listings,
+            "no listing after the refusal"
+        );
+        assert_eq!(run.venue.wide_asked.lock().unwrap().len(), wide);
+    }
+
+    #[tokio::test]
+    async fn the_status_states_the_keys_expiry_and_warns_inside_the_declared_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        let far = T0 + 90 * 86_400 * SECOND;
+        let near = T0 + 5 * 86_400 * SECOND;
+        {
+            let mut keys = run.venue.keys.lock().unwrap();
+            keys.push_back(Ok(Some(KeyStanding {
+                expiry_micros: Some(far),
+            })));
+            keys.push_back(Ok(Some(KeyStanding {
+                expiry_micros: Some(near),
+            })));
+        }
+        run.boot().await.unwrap();
+        let main = &run.status().accounts["main"];
+        assert_eq!(main.key_expires_micros, Some(far));
+        assert_eq!(main.key_warning, None, "90 days is outside the 14 declared");
+
+        run.discover().await.unwrap();
+        let main = &run.status().accounts["main"];
+        assert_eq!(main.key_expires_micros, Some(near));
+        let warning = main.key_warning.as_deref().unwrap();
+        assert!(warning.contains("expires in 5 days"), "{warning}");
+        assert!(warning.contains(&utc(near)), "{warning}");
+    }
+
+    #[tokio::test]
+    async fn a_venue_without_keys_writes_no_key_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _) = ledger(dir.path());
+        run.boot().await.unwrap();
+        let json = serde_json::to_string(run.status()).unwrap();
+        assert!(
+            !json.contains("key_expires") && !json.contains("key_warning"),
+            "{json}"
+        );
     }
 
     #[tokio::test]

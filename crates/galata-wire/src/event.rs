@@ -1232,8 +1232,15 @@ pub struct TokenMargin {
 /// A subaccount's margin, **as the venue states it**: Derive's per-subaccount
 /// figures, shaped by neither [`Margin`] (per dex, Hyperliquid's) nor any
 /// computation here. Every figure is optional — absent where the venue stated
-/// none, never zero. Whether the margins are net of the subaccount's value or
-/// gross requirements is the venue's, recorded as stated.
+/// none, never zero.
+///
+/// **The margins are net, not gross requirements.** Each is what is left once
+/// the requirement is met: the collateral's contribution, positive, plus the
+/// positions', negative ([`Collateral`] and [`PositionState`] carry each one's
+/// own). A positive figure is headroom, not an amount to subtract from the
+/// value. Measured on Derive on 2026-11-27: a subaccount's portfolio figures
+/// equal `private/get_margin`'s `pre_` figures, and equal the sum of its
+/// collaterals' and positions' contributions.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MarginState {
     /// The venue's margin type for the subaccount, such as `PM2` or `SM`.
@@ -1244,9 +1251,10 @@ pub struct MarginState {
     pub risk_universe: Option<String>,
     /// The subaccount's value.
     pub value: Option<Num>,
-    /// Its initial margin.
+    /// Its initial margin, net: what is left over the initial requirement.
     pub initial_margin: Option<Num>,
-    /// Its maintenance margin.
+    /// Its maintenance margin, net: what is left over the maintenance
+    /// requirement.
     pub maintenance_margin: Option<Num>,
     /// The value of its positions.
     pub positions_value: Option<Num>,
@@ -1284,9 +1292,11 @@ pub struct PositionState {
     pub theta: Option<Num>,
     /// Vega.
     pub vega: Option<Num>,
-    /// The position's initial margin.
+    /// The position's contribution to its subaccount's initial margin;
+    /// negative where it uses margin.
     pub initial_margin: Option<Num>,
-    /// The position's maintenance margin.
+    /// The position's contribution to its subaccount's maintenance margin;
+    /// negative where it uses margin.
     pub maintenance_margin: Option<Num>,
     /// Where the venue would liquidate it, where it states one.
     pub liquidation_price: Option<Num>,
@@ -1308,9 +1318,11 @@ pub struct Collateral {
     pub mark_price: Option<Num>,
     /// The amount at the mark.
     pub mark_value: Option<Num>,
-    /// Its contribution to initial margin.
+    /// Its contribution to its subaccount's initial margin; positive where it
+    /// adds headroom.
     pub initial_margin: Option<Num>,
-    /// Its contribution to maintenance margin.
+    /// Its contribution to its subaccount's maintenance margin; positive where
+    /// it adds headroom.
     pub maintenance_margin: Option<Num>,
     /// Interest accrued since held.
     pub cumulative_interest: Option<Num>,

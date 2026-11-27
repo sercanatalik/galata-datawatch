@@ -74,12 +74,89 @@ pub struct ResolvedAccount {
     /// The keyed fingerprint of its address.
     pub fingerprint: String,
     address: Secret,
+    /// The session key its reads are signed with, on a venue that signs them
+    /// (`session_key_var`); none on one that reads by address alone.
+    session_key: Option<Secret>,
+    /// Days before the session key expires from which the status warns.
+    pub key_warn_days: u32,
+}
+
+/// The days before a session key expires from which the status warns, where
+/// the configuration names none.
+pub const KEY_WARN_DAYS: u32 = 14;
+
+/// What a venue's check of an account's session key found it to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyStanding {
+    /// When it expires, where the venue states it.
+    pub expiry_micros: Option<i64>,
+}
+
+/// Why a session key is not read with (design D4 of `add-derive-account-ledger`).
+/// **Never carries the key, the wallet or an address.**
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum KeyRefusal {
+    /// The account declares no key, on a venue whose reads are signed.
+    #[error("no session key is declared for it")]
+    Absent,
+    /// The key's value is not a key.
+    #[error("{0}")]
+    Unreadable(String),
+    /// The venue registers the key to another wallet than the one declared.
+    #[error("the session key is registered to another wallet than the one declared")]
+    OtherWallet,
+    /// The venue does not list the key among the wallet's keys.
+    #[error("the session key is not registered to the wallet")]
+    NotRegistered,
+    /// The venue did not answer the question, so the key could not be checked.
+    #[error("the venue did not answer what the session key may do, so it could not be checked")]
+    Unanswered,
+    /// The key holds scopes the ledger does not read with.
+    #[error("the session key holds {}, which the ledger does not read with", named(.scopes))]
+    Scopes {
+        /// Each, as the venue names it.
+        scopes: Vec<String>,
+    },
+    /// The key's expiry has passed.
+    #[error("the session key expired at {expiry}")]
+    Expired {
+        /// When, as a UTC time.
+        expiry: String,
+    },
+}
+
+fn named(scopes: &[String]) -> String {
+    scopes
+        .iter()
+        .map(|s| format!("`{s}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A time in microseconds as a UTC time to the second, for a message:
+/// `2027-02-25 09:30:00 UTC`.
+pub fn utc(micros: i64) -> String {
+    let second = micros.div_euclid(1_000_000).rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}:{:02} UTC",
+        crate::calendar::date_of(micros),
+        second / 3_600,
+        second / 60 % 60,
+        second % 60
+    )
 }
 
 impl ResolvedAccount {
     /// Hand the address to the one thing that needs it: the request.
     pub fn address(&self) -> &Secret {
         &self.address
+    }
+
+    /// Hand the session key to the one thing that needs it: the signer. Read
+    /// once, at boot, with the address.
+    pub fn session_key(&self) -> Option<&Secret> {
+        self.session_key.as_ref()
     }
 
     /// The same account under the alias a binding gave it.
@@ -112,6 +189,8 @@ impl ResolvedAccount {
             dexes,
             fingerprint: fingerprint(key, address.expose()),
             address,
+            session_key: None,
+            key_warn_days: KEY_WARN_DAYS,
         }
     }
 }
@@ -208,6 +287,16 @@ pub enum LedgerError {
         /// Its permission bits.
         mode: u32,
     },
+    /// An account's session key is not read with (design D4 of
+    /// `add-derive-account-ledger`). The ledger exits, so the service
+    /// manager's retries show the refusal until the key is fixed.
+    #[error("`{alias}`: {reason}. Nothing is read with it until the key is fixed")]
+    KeyRefused {
+        /// The account.
+        alias: String,
+        /// Why.
+        reason: KeyRefusal,
+    },
     /// The ledger root could not be inspected.
     #[error("the ledger root {root}: {source}")]
     Root {
@@ -288,12 +377,19 @@ pub fn resolve(
     let mut out = Vec::with_capacity(declared.len());
     for (alias, account) in declared {
         let address = secrets.secret(&account.address_var)?;
+        let session_key = account
+            .session_key_var
+            .as_deref()
+            .map(|var| secrets.secret(var))
+            .transpose()?;
         out.push(ResolvedAccount {
             alias: Account::new(alias.as_str())?,
             venue: venue_token.clone(),
             dexes: account.dexes.clone(),
             fingerprint: fingerprint(&key, address.expose()),
             address,
+            session_key,
+            key_warn_days: account.session_key_warn_days.unwrap_or(KEY_WARN_DAYS),
         });
     }
     Ok((key, out))
@@ -608,6 +704,45 @@ mod tests {
             !printed.to_lowercase().contains(&ADDRESS[2..10]),
             "{printed}"
         );
+    }
+
+    #[test]
+    fn a_session_key_is_read_at_boot_beside_the_address_and_does_not_print() {
+        const SESSION_KEY: &str =
+            "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ledger(dir.path());
+        let main = ledger.account.get_mut("main").unwrap();
+        main.venue = "derive-xyz".into();
+        main.dexes = vec![];
+        main.session_key_var = Some("SESSION".into());
+
+        let with_key = Secrets(
+            [
+                ("KEY", "deployment-key"),
+                ("MAIN", ADDRESS),
+                ("SESSION", SESSION_KEY),
+            ]
+            .into(),
+        );
+        let (_, accounts) = resolve(&ledger, "derive-xyz", &with_key).unwrap();
+        assert_eq!(
+            accounts[0].session_key().map(|k| k.expose()),
+            Some(SESSION_KEY)
+        );
+        let printed = format!("{:?}", accounts[0]);
+        assert!(!printed.contains(&SESSION_KEY[2..12]), "{printed}");
+
+        // A key the vault does not hold is refused by its name, not its value.
+        let refusal = resolve(&ledger, "derive-xyz", &secrets(ADDRESS))
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("SESSION"), "{refusal}");
+
+        // A venue that reads by address alone holds no key.
+        let (_, hyperliquid) =
+            resolve(&self::ledger(dir.path()), "hyperliquid", &secrets(ADDRESS)).unwrap();
+        assert!(hyperliquid[0].session_key().is_none());
     }
 
     #[cfg(unix)]

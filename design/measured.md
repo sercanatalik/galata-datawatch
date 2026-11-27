@@ -5888,3 +5888,151 @@ the container                    30 MiB, 0.36 s of cpu; nothing logged at WARN o
 The restart the refusal test made is the record's only interruption, and no
 gap stands for it: the ledger asks at each start, and the next snapshot was
 taken on the cadence.
+
+## What Derive answers the owner's session key — 2026-11-27
+
+`add-derive-account-ledger` tasks 3.2 and 3.3. A throwaway probe, not
+committed, over mainnet REST (`https://api.derive.xyz/v3`): each request
+once, 400 ms apart, signed by the ledger's session key from the vault, with
+the wallet passed only into headers and bodies. No wallet, subaccount
+identifier, key or amount is recorded.
+
+**The key.** The owner made it in Derive's interface (design D3), labelled
+`read-only`, for 90 days, with no IP whitelist, on the owner's three
+subaccounts. When the reads ran it held `trade:all` and `vault:all`, and the
+off-chain `account_info`. The owner kept `vault:all`, which design D4
+refuses; the probe was told to read anyway. Whether a key with no scope may
+read was not measured: the requests made earlier that day with every scope
+off named the wrong wallet (below).
+
+**The wallet is the Derive wallet, not the address the owner signs in
+with.** Naming the sign-in address, every signed request got a bare `403
+Forbidden` page from Derive's gateway, 147 bytes of HTML and no JSON error.
+`public/get_wallets_from_session_key`, unsigned, named the wallet the key is
+registered to; with it, every request was answered. A key Derive does not
+hold answers error 14026, "Session key not found", there.
+
+```text
+request                          answered   the answer
+private/session_keys {wallet}    200        public_session_keys[]: public_session_key, label,
+                                            protocol_scopes[], offchain_scopes[], expiry_sec,
+                                            registered_sec, ip_whitelist[], subaccount_ids[];
+                                            two keys on the wallet
+private/get_subaccounts          200        subaccount_ids[] (3), wallet
+  {wallet}
+private/get_all_portfolios       200        one portfolio a subaccount (3)
+  {wallet}
+private/get_margin               200        subaccount_id, is_valid_trade, pre_ and post_
+  {subaccount_id}, nothing                  initial_margin and maintenance_margin
+  simulated
+```
+
+**A portfolio** states `subaccount_id`, `label`, `margin_type`, `manager_id`,
+`risk_universe_id`, `currency[]`, `subaccount_value`, `initial_margin`,
+`maintenance_margin`, `open_orders_margin`, `projected_margin_change`,
+`mm_credits`, `is_under_liquidation`, `failed_to_fetch`, the positions' and
+the collaterals' `_value`, `_initial_margin` and `_maintenance_margin`, and
+`positions[]`, `collaterals[]`, `open_orders[]` and `vault_deposit_holds[]`.
+Decimals are strings; the identifiers are numbers.
+
+- **A position**: `instrument_type`, `instrument_name`, `amount`,
+  `average_price` (and `_excl_fees`), `mark_price`, `index_price`,
+  `mark_value`, `amount_step`, `creation_timestamp`, `cumulative_funding`,
+  `pending_funding`, `net_settlements`, `initial_margin`,
+  `maintenance_margin`, `open_orders_margin`, `realized_pnl` and
+  `unrealized_pnl` (each also `_excl_fees`), `total_fees`, `delta`, `gamma`,
+  `vega`, `theta`, `leverage` (null on the option) and `liquidation_price`.
+- **A collateral**: `asset_type`, `asset_name`, `currency`, `amount`,
+  `average_price` (and `_excl_fees`), `mark_price`, `mark_value`,
+  `amount_step`, `creation_timestamp`, `cumulative_interest`,
+  `pending_interest`, `initial_margin`, `maintenance_margin`,
+  `open_orders_margin`, the same profit and fee figures as a position,
+  `delta` and `delta_currency`.
+- **An open order** is the order as signed: its `signature`, `signer` and
+  `nonce` are in the portfolio answer.
+
+Every field design D5 names is stated. The margin types were `SM` on one
+subaccount and `PM2` on two; one `PM2` subaccount held one option, one
+collateral and one open order, and the other two were flat.
+
+**3.3: the portfolio's margin figures are net.** On the `PM2` subaccount
+holding the option, asked as it stood, about a second apart:
+
+```text
+                                               initial     maintenance
+the portfolio's figure                         positive    positive
+get_margin's pre_ figure                       positive    positive
+  the two, relative difference                 0.01 %      0.01 %
+get_margin's post_ against its pre_            0.00 %      0.00 %
+the collaterals' figure                        positive    positive
+the positions' figure                          negative    negative
+  the portfolio's against their sum            0.00 %      0.00 %
+get_margin's pre_ against value less the
+  portfolio's figure                           41 %        58 %
+```
+
+The portfolio's margin is the collaterals' contribution, positive, plus the
+positions', negative: what is left once the requirement is met, as
+`get_margin`'s `pre_` figure is. The 0.01 % between them is the option's
+mark moving between the two requests. A flat subaccount states 0 for both.
+So a positive figure is headroom, not a requirement to subtract from the
+subaccount's value.
+
+**The portfolio answer holds signed orders.** The ledger's record is
+owner-only already; 3.4's fixtures replace each signature, signer and nonce
+with a stand-in.
+
+## The Derive ledger, natively — 2026-11-27
+
+`add-derive-account-ledger` task 5.1, on the working tree after its group 4
+(over `e6e816d`, uncommitted). The release `galata-ledger derive-xyz`, built
+with `derive-xyz`, natively, into a scratch root with a throwaway fingerprint
+key, at the deployment's cadences (`snapshot_secs = 300`, `discover_secs =
+600`, `events_secs = 300`, `ledger_share = 0.25`). The wallet and the session
+key were read from the vault's `mainnet` section by `gv run --only`. The
+owner's wallet, alias `owner`, for an hour (10:43:57 to 11:43:57 UTC), the key
+holding `trade:all` and `account_info`. No wallet, subaccount identifier, key
+or amount is recorded.
+
+```text
+                                       owner, an hour
+subaccounts, by alias                  owner_s1 SM, owner_s2 PM2, owner_s3 PM2 (holds the option)
+snapshot passes                        12, 300.4 to 302.2 s apart
+  private/get_all_portfolios           12: one a pass, for the three subaccounts
+  a pass with neither answer nor gap   0
+gaps                                   0
+rows a snapshot                        margin_state 3, position_state 1, collateral 1
+discovery runs                         6, boot included, each listing the same three
+  key checks                           6, each the public lookup and private/session_keys
+requests a minute, the wallet's        0.4: 12 snapshots, 6 listings, 6 key lists
+  declared for the set                 0.4
+  the share allows                     75
+  unsigned lookups, not the wallet's   0.1
+projected reads per subaccount         12, the newest the last snapshot's
+the key's expiry, in the status        2027-02-25 10:31:39 UTC; no warning (14 days declared)
+peak memory (RSS)                      21 MiB, from the ten-minute run below
+cpu time                               0.06 s in ten minutes, below; about 0.4 s an hour, scaled
+```
+
+**One request read the whole wallet, every pass.** Three subaccounts, one
+`private/get_all_portfolios` a snapshot: the declared cost is the spent cost,
+0.4 a minute against the 75 a quarter of the wallet's budget allows. The key
+was checked at boot and at each of the five discoveries after it, by the
+unsigned lookup (which names the wallet) and the wallet's own list of keys,
+before anything else was asked.
+
+**The subaccounts are aliases everywhere but inside the answers.** The record
+holds `account=owner` (the wallet's twelve answers and six listings) and
+`account=owner_s1` to `_s3` (one binding each); the status names the same
+four. The projection writes each subaccount's rows under its alias, twelve
+reads each, and nothing under the wallet.
+
+**Memory and CPU are from a second run of ten minutes** (11:58:53 to 12:08:53
+UTC, a fresh scratch root, otherwise the same): `/usr/bin/time -l` stated 21
+MiB maximum resident set (9.3 MiB peak footprint) and 0.06 s of CPU (0.02
+user, 0.04 system) for two snapshot passes and a discovery run. The hour's own
+figures were lost. The script stopped the ledger with `pkill -f` on its
+command line, which `time`'s and `gv run`'s command lines also contain, so
+`time` was stopped too and printed nothing (exit 143). The ledger itself
+stopped cleanly both times ("asked to terminate; stopping cleanly"). The
+second run anchored the pattern to the ledger's own command line.

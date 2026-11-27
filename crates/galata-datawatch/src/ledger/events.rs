@@ -54,6 +54,17 @@ pub fn identity(envelope: &Envelope) -> String {
             envelope.recv_micros,
             serde_json::to_string(&envelope.event).unwrap_or_default()
         ),
+        // **A wallet's subaccounts, read in one answer** (Derive): states, as
+        // above, told apart by receipt — and by the subaccount, since one
+        // wallet's history holds every subaccount's rows, and two flat ones
+        // state the same figures.
+        Event::MarginState(_) | Event::PositionState(_) | Event::Collateral(_) => format!(
+            "{}:{}:recv:{}:{}",
+            envelope.kind(),
+            envelope.account().map(|a| a.as_str()).unwrap_or_default(),
+            envelope.recv_micros,
+            serde_json::to_string(&envelope.event).unwrap_or_default()
+        ),
         other => format!(
             "{}:{}:{}",
             envelope.kind(),

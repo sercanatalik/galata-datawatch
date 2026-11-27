@@ -218,6 +218,30 @@ pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
             has_dexes: true,
             reads_with_key: false,
         }),
+        // Design D6 of `add-derive-account-ledger`. Reads are limited per
+        // wallet, "not per-subaccount or per-session-key": 5 a second for a
+        // trader, so 300 a minute, shared with the owner's own use and the
+        // margin optimiser's simulations (read 2026-11-26).
+        #[cfg(all(feature = "derive-xyz", feature = "ledger"))]
+        derive_xyz::VENUE => Some(crate::config::LedgerCost {
+            budget_per_minute: 300.0,
+            // One `private/get_all_portfolios` per wallet per snapshot,
+            // whatever its subaccounts number (design D1).
+            snapshot: 1.0,
+            // `private/get_subaccounts` and `private/session_keys`. The key's
+            // lookup, `public/get_wallets_from_session_key`, is unsigned and
+            // names no wallet, so it is not the wallet's to pay for.
+            discovery: 2.0,
+            // No mode, no account-wide reads, no history.
+            mode: 0.0,
+            events: 0.0,
+            balances: 0.0,
+            borrow_lend: 0.0,
+            reference: 0.0,
+            // A wallet read whole, every request signed by a session key.
+            has_dexes: false,
+            reads_with_key: true,
+        }),
         _ => None,
     }
 }
@@ -265,6 +289,28 @@ pub async fn run_ledger(
                 hyperliquid::Market::parse(market)?.rest_url(),
             )?
             .with_key(parts.key.clone());
+            let mut run = crate::ledger::run::LedgerRun::new(
+                accounts,
+                crate::capture::SystemClock,
+                parts.archive,
+                parts.sink,
+                parts.key,
+                parts.cadences,
+                parts.masters,
+                parts.bindings,
+            )
+            .with_status_file(parts.status)
+            .with_fold(parts.fold.0, parts.fold.1)
+            .with_projection(parts.projection);
+            run.run(shutdown).await?;
+            Ok(())
+        }
+        #[cfg(feature = "derive-xyz")]
+        derive_xyz::VENUE => {
+            let accounts = derive_xyz::accounts::DeriveAccounts::new(
+                derive_xyz::Market::parse(market)?.rest_url(),
+                parts.key.clone(),
+            )?;
             let mut run = crate::ledger::run::LedgerRun::new(
                 accounts,
                 crate::capture::SystemClock,

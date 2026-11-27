@@ -32,7 +32,8 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use galata_wire::{
-    Counterparty, Effect, Envelope, Event, Fill, FundingPayment, Kind, Margin, Num, Position,
+    Collateral, Counterparty, Effect, Envelope, Event, Fill, FundingPayment, Kind, Margin,
+    MarginState, Num, Position, PositionState,
 };
 
 use crate::ledger::accounts::LedgerError;
@@ -53,6 +54,10 @@ pub const PROJECTED: [Kind; 10] = [
     Kind::PortfolioMargin,
     Kind::TokenMargin,
 ];
+
+/// The kinds projected for a venue read by wallet (Derive): each subaccount's
+/// margin, positions and collateral, as the venue states them.
+pub const WALLET_PROJECTED: [Kind; 3] = [Kind::MarginState, Kind::PositionState, Kind::Collateral];
 
 /// An account's newest rows of one kind, and the time they were stated: the
 /// rows of the latest read. **The time is the read's receipt**, since these
@@ -152,9 +157,20 @@ pub fn write(
     account: &str,
     rows: &[Envelope],
 ) -> Result<Vec<PathBuf>, ProjectError> {
+    write_kinds(root, venue, account, rows, &PROJECTED)
+}
+
+/// Write the given kinds for one account, each file whole.
+pub fn write_kinds(
+    root: &Path,
+    venue: &str,
+    account: &str,
+    rows: &[Envelope],
+    kinds: &[Kind],
+) -> Result<Vec<PathBuf>, ProjectError> {
     crate::ledger::accounts::check_root(root)?;
     let mut written = Vec::new();
-    for kind in PROJECTED {
+    for &kind in kinds {
         let expanded: Vec<std::borrow::Cow<'_, Envelope>>;
         let of_kind: Vec<&Envelope> = if kind == Kind::LedgerUpdates {
             expanded = per_effect(rows);
@@ -166,6 +182,33 @@ pub fn write(
         let path = path_of(root, venue, account, kind);
         galata_segments::write_file(&path, &batch, galata_segments::Codec::Zstd)?;
         written.push(path);
+    }
+    Ok(written)
+}
+
+/// Write the given kinds for **each account the rows name**, each under its
+/// own alias: a wallet's rows, read in one answer, are its subaccounts' rows
+/// (design D1 of `add-derive-account-ledger`). An account the rows do not
+/// name is not written.
+pub fn write_by_account(
+    root: &Path,
+    venue: &str,
+    rows: &[Envelope],
+    kinds: &[Kind],
+) -> Result<Vec<PathBuf>, ProjectError> {
+    let mut by_account: std::collections::BTreeMap<&str, Vec<Envelope>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        if let Some(account) = row.account() {
+            by_account
+                .entry(account.as_str())
+                .or_default()
+                .push(row.clone());
+        }
+    }
+    let mut written = Vec::new();
+    for (account, rows) in by_account {
+        written.extend(write_kinds(root, venue, account, &rows, kinds)?);
     }
     Ok(written)
 }
@@ -299,6 +342,55 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("supply_ratio", MONEY, true),
             Field::new("available_after_maintenance", MONEY, true),
         ]),
+        // A subaccount's margin as the venue states it: on Derive, net of the
+        // requirement, positive being headroom (`galata_wire::MarginState`).
+        Kind::MarginState => fields.extend([
+            Field::new("margin_type", DataType::Utf8, true),
+            Field::new("manager", DataType::Utf8, true),
+            Field::new("risk_universe", DataType::Utf8, true),
+            Field::new("value", MONEY, true),
+            Field::new("initial_margin", MONEY, true),
+            Field::new("maintenance_margin", MONEY, true),
+            Field::new("positions_value", MONEY, true),
+            Field::new("collateral_value", MONEY, true),
+            Field::new("open_orders_margin", MONEY, true),
+            Field::new("under_liquidation", DataType::Boolean, true),
+        ]),
+        // One position per row, options and perpetuals alike; `ticker` above
+        // is the venue's instrument name. The greeks are the venue's.
+        Kind::PositionState => fields.extend([
+            Field::new("instrument_type", DataType::Utf8, true),
+            // Signed: positive is long.
+            Field::new("amount", MONEY, true),
+            Field::new("average_price", MONEY, true),
+            Field::new("mark_price", MONEY, true),
+            Field::new("mark_value", MONEY, true),
+            Field::new("unrealised_pnl", MONEY, true),
+            Field::new("delta", MONEY, true),
+            Field::new("gamma", MONEY, true),
+            Field::new("theta", MONEY, true),
+            Field::new("vega", MONEY, true),
+            // Its contribution to the subaccount's margin: negative where it
+            // uses margin.
+            Field::new("initial_margin", MONEY, true),
+            Field::new("maintenance_margin", MONEY, true),
+            Field::new("liquidation_price", MONEY, true),
+            Field::new("cumulative_funding", MONEY, true),
+        ]),
+        // One collateral asset per row.
+        Kind::Collateral => fields.extend([
+            Field::new("asset", DataType::Utf8, false),
+            Field::new("asset_type", DataType::Utf8, true),
+            Field::new("amount", MONEY, true),
+            Field::new("mark_price", MONEY, true),
+            Field::new("mark_value", MONEY, true),
+            // Its contribution to the subaccount's margin: positive where it
+            // adds headroom.
+            Field::new("initial_margin", MONEY, true),
+            Field::new("maintenance_margin", MONEY, true),
+            Field::new("cumulative_interest", MONEY, true),
+            Field::new("pending_interest", MONEY, true),
+        ]),
         _ => return None,
     }
     Some(Arc::new(Schema::new(fields)))
@@ -397,6 +489,26 @@ fn ticker_of(e: &Envelope) -> Option<&str> {
         Event::Fill(f) => Some(f.ticker.as_str()),
         Event::FundingPayment(p) => Some(p.ticker.as_str()),
         Event::Position(p) => Some(p.ticker.as_str()),
+        Event::PositionState(p) => Some(p.instrument.as_str()),
+        _ => None,
+    }
+}
+
+fn margin_state_of(e: &Envelope) -> Option<&MarginState> {
+    match &e.event {
+        Event::MarginState(m) => Some(m),
+        _ => None,
+    }
+}
+fn position_state_of(e: &Envelope) -> Option<&PositionState> {
+    match &e.event {
+        Event::PositionState(p) => Some(p),
+        _ => None,
+    }
+}
+fn collateral_of(e: &Envelope) -> Option<&Collateral> {
+    match &e.event {
+        Event::Collateral(c) => Some(c),
         _ => None,
     }
 }
@@ -606,6 +718,70 @@ fn batch_for(
             columns.push(dec(rows, each(|x| x.borrow_ratio))?);
             columns.push(dec(rows, each(|x| x.supply_ratio))?);
             columns.push(dec(rows, each(|x| x.available_after_maintenance))?);
+        }
+        Kind::MarginState => {
+            let each = |g: fn(&MarginState) -> Option<Num>| {
+                move |e: &Envelope| margin_state_of(e).and_then(g)
+            };
+            columns.push(text(rows, |e| {
+                margin_state_of(e).and_then(|x| x.margin_type.as_deref())
+            }));
+            columns.push(text(rows, |e| {
+                margin_state_of(e).and_then(|x| x.manager.as_deref())
+            }));
+            columns.push(text(rows, |e| {
+                margin_state_of(e).and_then(|x| x.risk_universe.as_deref())
+            }));
+            columns.push(dec(rows, each(|x| x.value))?);
+            columns.push(dec(rows, each(|x| x.initial_margin))?);
+            columns.push(dec(rows, each(|x| x.maintenance_margin))?);
+            columns.push(dec(rows, each(|x| x.positions_value))?);
+            columns.push(dec(rows, each(|x| x.collateral_value))?);
+            columns.push(dec(rows, each(|x| x.open_orders_margin))?);
+            columns.push({
+                let mut b = BooleanBuilder::with_capacity(rows.len());
+                rows.iter().for_each(|e| {
+                    b.append_option(margin_state_of(e).and_then(|x| x.under_liquidation))
+                });
+                Arc::new(b.finish())
+            });
+        }
+        Kind::PositionState => {
+            let each = |g: fn(&PositionState) -> Option<Num>| {
+                move |e: &Envelope| position_state_of(e).and_then(g)
+            };
+            columns.push(text(rows, |e| {
+                position_state_of(e).and_then(|x| x.instrument_type.as_deref())
+            }));
+            columns.push(dec(rows, each(|x| x.amount))?);
+            columns.push(dec(rows, each(|x| x.average_price))?);
+            columns.push(dec(rows, each(|x| x.mark_price))?);
+            columns.push(dec(rows, each(|x| x.mark_value))?);
+            columns.push(dec(rows, each(|x| x.unrealised_pnl))?);
+            columns.push(dec(rows, each(|x| x.delta))?);
+            columns.push(dec(rows, each(|x| x.gamma))?);
+            columns.push(dec(rows, each(|x| x.theta))?);
+            columns.push(dec(rows, each(|x| x.vega))?);
+            columns.push(dec(rows, each(|x| x.initial_margin))?);
+            columns.push(dec(rows, each(|x| x.maintenance_margin))?);
+            columns.push(dec(rows, each(|x| x.liquidation_price))?);
+            columns.push(dec(rows, each(|x| x.cumulative_funding))?);
+        }
+        Kind::Collateral => {
+            let each = |g: fn(&Collateral) -> Option<Num>| {
+                move |e: &Envelope| collateral_of(e).and_then(g)
+            };
+            columns.push(text(rows, |e| collateral_of(e).map(|x| x.asset.as_str())));
+            columns.push(text(rows, |e| {
+                collateral_of(e).and_then(|x| x.asset_type.as_deref())
+            }));
+            columns.push(dec(rows, each(|x| x.amount))?);
+            columns.push(dec(rows, each(|x| x.mark_price))?);
+            columns.push(dec(rows, each(|x| x.mark_value))?);
+            columns.push(dec(rows, each(|x| x.initial_margin))?);
+            columns.push(dec(rows, each(|x| x.maintenance_margin))?);
+            columns.push(dec(rows, each(|x| x.cumulative_interest))?);
+            columns.push(dec(rows, each(|x| x.pending_interest))?);
         }
         _ => unreachable!("only projected kinds are built"),
     }

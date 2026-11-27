@@ -46,9 +46,21 @@
 //! See `design/measured.md`.
 
 /// **Behind the `capture` feature**: it makes HTTP requests.
+/// The ledger's questions about the owner's account. **Transport**, behind
+/// `capture` and `ledger`.
+#[cfg(all(feature = "capture", feature = "ledger"))]
+pub mod accounts;
 #[cfg(feature = "capture")]
 pub mod client;
+/// The owner's account answers, read for the ledger. Pure.
+#[cfg(feature = "ledger")]
+pub mod ledger;
+#[cfg(all(test, feature = "capture"))]
+mod local_server;
 pub mod normalise;
+/// The ledger's signed reads. **Transport**, behind `capture` and `ledger`.
+#[cfg(all(feature = "capture", feature = "ledger"))]
+pub mod private;
 pub mod sign;
 pub mod wire;
 

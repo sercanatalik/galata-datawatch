@@ -98,6 +98,14 @@ EXPOSE_ALLOWED = {
     # new key's private half is written once, into the pipe to the vault
     # (`Secret::expose`). Added 2026-11-26 with `add-derive-account-ledger`.
     "crates/galata-datawatch/src/adapters/derive_xyz/sign.rs",
+    # A Derive wallet's address into a signed request's header and body, to
+    # the venue (`Secret::expose`). Added 2026-11-27 with
+    # `add-derive-account-ledger`.
+    "crates/galata-datawatch/src/adapters/derive_xyz/private.rs",
+    # A Derive wallet's address, compared with the wallets the venue says its
+    # session key is registered to, and printed nowhere (`Secret::expose`).
+    # Added 2026-11-27 with `add-derive-account-ledger`.
+    "crates/galata-datawatch/src/adapters/derive_xyz/accounts.rs",
     "crates/galata-datawatch/src/adapters/rh_chain/client.rs",
     "crates/galata-datawatch/src/venue/transport.rs",   # the accessor itself
     "crates/galata-datawatch/src/config/source.rs",     # Secret::expose lives here

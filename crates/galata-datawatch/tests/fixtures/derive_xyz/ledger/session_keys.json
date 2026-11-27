@@ -1,0 +1,49 @@
+{
+ "id": "38500005-2225-7012-9279-075472136434",
+ "result": {
+  "public_session_keys": [
+   {
+    "public_session_key": "0x0001000100010001000100010001000100010001",
+    "offchain_scopes": [
+     "account_info"
+    ],
+    "protocol_scopes": [
+     "trade:all",
+     "vault:all"
+    ],
+    "label": "read-only",
+    "ip_whitelist": [],
+    "expiry_sec": 1798766335,
+    "registered_sec": 1798785854,
+    "subaccount_ids": [
+     1001,
+     1002,
+     1003
+    ]
+   },
+   {
+    "public_session_key": "0x0002000200020002000200020002000200020002",
+    "offchain_scopes": [
+     "account_info"
+    ],
+    "protocol_scopes": [
+     "trade:all",
+     "transfer:existing_subaccount",
+     "transfer:new_subaccount",
+     "withdraw",
+     "liquidate",
+     "vault:all"
+    ],
+    "label": "a-label",
+    "ip_whitelist": [],
+    "expiry_sec": 1798846094,
+    "registered_sec": 1798833650,
+    "subaccount_ids": [
+     1001,
+     1002,
+     1003
+    ]
+   }
+  ]
+ }
+}
