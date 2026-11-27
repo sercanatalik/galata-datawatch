@@ -3,7 +3,11 @@
 # Mint one read token per service, each able to read ONLY its own secrets, and
 # write them to var/tokens/<service>.gvt (0600; *.gvt is ignored by git).
 #
-#   mint-service-tokens.sh
+#   mint-service-tokens.sh [service ...]
+#
+# Every service's token, or only the services named (`ledger-derive-xyz`, say),
+# so adding one service does not re-mint, and revoke, every other's. A name
+# that is not a service here is refused before anything is minted.
 #
 # **They expire.** 365 days is the server's maximum for a read token, and an
 # expired token is a service that cannot restart — capture above all. Run this
@@ -31,8 +35,32 @@ GV="$(gv_tool 2>&1)" || { echo "mint-service-tokens: $GV" >&2; exit 1; }
 umask 077
 mkdir -p "$TOKENS"
 
+# The services named on the command line; none is every one.
+ONLY_SERVICES=("$@")
+
+# The ledger's venues, from the deployment's own [ledger] tables: one token per
+# venue the accounts name, with or without a [venue.…] table
+# (add-derive-account-ledger, D7); none where no ledger is declared.
+CONFIG="$ROOT/var/datawatch.local.toml"
+[[ -f "$CONFIG" ]] || CONFIG="$ROOT/config/datawatch.toml"
+ledger_venues="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" --venues 2>/dev/null)" \
+    || { ledger_venues=""; echo "no ledger declared in $CONFIG — no ledger token"; }
+
+known=(nats capture-hyperliquid tower markets)
+for venue in $ledger_venues; do known+=("ledger-$venue"); done
+for asked in ${ONLY_SERVICES[@]+"${ONLY_SERVICES[@]}"}; do
+    [[ " ${known[*]} " == *" $asked "* ]] \
+        || { echo "mint-service-tokens: no service $asked here (${known[*]}) — nothing minted" >&2; exit 1; }
+done
+
+# Whether a service is one this run mints.
+wanted() {
+    (( ${#ONLY_SERVICES[@]} == 0 )) || [[ " ${ONLY_SERVICES[*]} " == *" $1 "* ]]
+}
+
 mint() {
     local service="$1"; shift
+    wanted "$service" || return 0
     local only=()
     for name in "$@"; do only+=(--only "$name"); done
     # gv's own structured result: one JSON object on stdout carrying the
@@ -95,6 +123,8 @@ PY
 
 # The broker reads every identity's password the generated authorization file
 # names, so its token is minted for exactly those (as run-service.sh reads them).
+# Read whether or not the broker's token is asked for: a file naming no
+# identity is wrong either way.
 broker_names=()
 while read -r id; do
     [[ -n "$id" ]] && broker_names+=("$(password_var "$id")")
@@ -110,13 +140,7 @@ mint markets "${markets_names[@]}"
 
 # The ledger, per venue: that venue's account addresses and the fingerprint
 # key, named by the deployment's own [ledger] tables (scripts/lib/ledger_vars.py)
-# so this token and run-service.sh cannot disagree. One per venue the accounts
-# name, with or without a [venue.…] table (add-derive-account-ledger, D7);
-# none where no ledger is declared.
-CONFIG="$ROOT/var/datawatch.local.toml"
-[[ -f "$CONFIG" ]] || CONFIG="$ROOT/config/datawatch.toml"
-ledger_venues="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" --venues 2>/dev/null)" \
-    || echo "no ledger declared in $CONFIG — no ledger token"
+# so this token and run-service.sh cannot disagree.
 for venue in $ledger_venues; do
     if names="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" "$venue")"; then
         # shellcheck disable=SC2086  # one name per line, none with spaces
