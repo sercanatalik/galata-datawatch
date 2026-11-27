@@ -6065,3 +6065,48 @@ subaccount's newest rows are the last snapshot's, with its time.
   the projection carries both.
 - The record and the projection stay owner-only, each venue in its own
   `venue=` partition.
+
+## A stopped ledger, as the watcher tells it — 2026-11-27
+
+`add-service-health-monitoring` task 6.3. galata-markets judges at
+`/v1/health`, and galata-watcher asks it every minute and sends each finding
+once and its recovery once. `ledger:derive-xyz` was uninstalled for twelve
+minutes, twice, and capture was restarted once, all times UTC.
+
+```text
+first run, judge as built (dd0fd7c)
+  14:26:21  the ledger's last pass
+  14:30:06  uninstalled; its clean stop writes its status once more
+  14:37:00  5 alerts: no-answer for owner, owner_s1, owner_s2, owner_s3; fold-not-reporting
+  14:42:00  1 alert: not-reporting (14:30:06 + 660 s)
+  14:42:06  installed again
+  14:43:00  6 recoveries, one each; nothing repeated
+
+second run, judge fixed (cc6e897)
+  14:52:35  the ledger's last pass
+  14:53:17  uninstalled
+  15:05:00  1 alert: not-reporting
+  15:05:17  installed again
+  15:06:00  1 recovery; nothing else sent
+
+capture restarted (judge as of cc6e897)
+  15:06:43  installed again; 4 of 27 subscriptions held at 14 s
+  15:07:00  1 alert: subscriptions
+  15:08:00  1 recovery; all 27 held within 74 s of its start
+```
+
+**A stopped ledger is one fact.** As built, the accounts' and the fold's
+ages were measured against the time of asking, and the ledger's own against
+its last status. The clean stop rewrites that status, so for five minutes the
+ledger looked alive while each account looked silent. Ages are now read
+against the ledger's latest report, and not at all once it is not reporting.
+
+**A restart is not a finding.** Capture subscribes in about a minute, so the
+subscriptions rule now waits three minutes after capture's own start, as the
+disconnection rule waits a minute.
+
+The watcher's side held from the first run on:
+- each identity was sent once and recovered once, and nothing repeated;
+- `services.json` emptied on recovery;
+- health stayed readable through both galata-markets reinstalls, with no
+  `health-unreadable` alert.

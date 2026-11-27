@@ -32,6 +32,10 @@ use crate::watch::Written;
 
 /// How long capture's status may go unpublished: it publishes every second.
 pub const CAPTURE_ALLOWANCE_SECS: i64 = 60;
+/// How long after its start capture may hold fewer subscriptions than it
+/// declares. Measured on 2026-11-27: a restarted capture held 4 of 27 at
+/// 14 s and all 27 within 74 s, so a minute's grace alerted every restart.
+pub const SUBSCRIBE_GRACE_SECS: i64 = 3 * 60;
 /// How long the record's judge's report may age: it runs hourly.
 pub const RECORD_ALLOWANCE_SECS: i64 = 2 * 3_600;
 /// The window a restart loop is counted in, and how many starts make one.
@@ -131,6 +135,7 @@ pub struct Judgement {
 #[serde(default)]
 struct CaptureView {
     observed_at_micros: Option<i64>,
+    started_at_micros: Option<i64>,
     connection: Option<String>,
     subs_held: Option<u64>,
     subs_declared: Option<u64>,
@@ -294,8 +299,13 @@ fn capture(venue: &str, status: Option<&serde_json::Value>, now: i64) -> (String
             );
         }
     }
+    // A capture just started is still subscribing: short is a finding only
+    // past the grace, as down is only past a minute.
     if let (Some(held), Some(declared)) = (view.subs_held, view.subs_declared)
         && held < declared
+        && view
+            .started_at_micros
+            .is_none_or(|started| observed - started > SUBSCRIBE_GRACE_SECS * SECOND)
     {
         judged.say(
             State::Warning,
@@ -738,6 +748,28 @@ mod tests {
         status["pairs"][0]["last_recv_micros"] = json!(T - 10 * S);
         reports.captures[0].1 = Some(status);
         assert!(!ids(&judge(&reports, T)).contains(&"capture:hyperliquid/disconnected"));
+    }
+
+    #[test]
+    fn a_capture_just_started_is_still_subscribing() {
+        // As measured on 2026-11-27: 4 of 27 held 14 s after a restart.
+        let mut reports = well();
+        let observed = T - 2 * S;
+        let mut status = capture_status(observed);
+        status["started_at_micros"] = json!(observed - 14 * S);
+        status["subs_held"] = json!(4);
+        status["subs_declared"] = json!(27);
+        reports.captures[0].1 = Some(status.clone());
+        let judged = judge(&reports, T);
+        assert!(
+            !ids(&judged).contains(&"capture:hyperliquid/subscriptions"),
+            "{judged:#?}"
+        );
+        assert_eq!(service(&judged, "capture:hyperliquid").state, State::Well);
+        // Still short three minutes after its start: a finding.
+        status["started_at_micros"] = json!(observed - (SUBSCRIBE_GRACE_SECS + 1) * S);
+        reports.captures[0].1 = Some(status);
+        assert!(ids(&judge(&reports, T)).contains(&"capture:hyperliquid/subscriptions"));
     }
 
     #[test]
