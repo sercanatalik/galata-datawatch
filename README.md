@@ -245,6 +245,7 @@ published crates link none of it.
 | `galata-watch` | judge the record's freshness and completeness, per venue |
 | `galata-retain` | report, and optionally delete, what a retention horizon would expire |
 | `galata-signals-commit` | check one run of computed signals against the dataset's schema and write it to the tape |
+| `galata-quant-signals` | compute `varcov`'s EWMA horizons (30m, 1d, 1w) and what is derived from their Σ with [galata-quant](https://github.com/sercanatalik/galata-quant), and write them to the tape; refuses a run already there |
 | `galata-bus` | the broker's process: applies the stream table once the server answers, and is `nats-server` meanwhile |
 | `galata-margin` | advise where to place an option on Derive and its perpetual hedge, and what each placement costs against the owner's book ([Margin advice](#margin-advice)); acts on nothing |
 
@@ -961,6 +962,7 @@ whose flows only call the release binaries as subprocesses.
 | `report-what-retention-would-expire` | `galata-retain`, report only | Sundays 01:30 |
 | `judge-the-record` | `galata-watch`, which writes its report to `var/status/watch.json` | hourly at :05 |
 | `rebuild-one-day` | `galata-tape-rebuild --replace <venue> <date>` | on demand, for backfills |
+| `derive-the-covariance` | `galata-quant-signals varcov`: the EWMA covariance, computed and committed in Rust | :15 and :45 |
 | `derive-the-signals` | `galata-signals varcov`, `carry`, `jumps`, `liquidity`, `basis`, `flow`, `moments`, `cascade`, `leadlag`, `activity`, `backtest` and `realvol`, each then `galata-signals-commit` when it wrote rows | :15 and :45 |
 
 **The record's judge reports where its report can be read.** On every run,
@@ -983,6 +985,16 @@ uv sync --project py/signals       # the signal calculator's own environment
 cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
 ```
 
+- **The EWMA covariance is computed in Rust** (`add-galata-quant`).
+  `galata-quant-signals varcov` (crate `galata-signals`, not published) reads
+  the tape's candles, computes the EWMA horizons declared in
+  `py/signals/signals.toml` (30m from 1m bars, 1d and 1w from 1d) with
+  galata-quant, and commits the rows itself, field for field as `py/signals`
+  wrote them (held to it on the record, `design/measured.md`). galata-quant is
+  the one implementation of proven arithmetic: galata-research's
+  `gr.models.corr` calls the same code through its Python bindings. It is the
+  flow the lane's image registers while `derive-the-signals` is set aside; the
+  fitted horizons (5m, 1h, 4h) follow in galata-quant's next slice.
 - **Signals are computed outside the lane and committed by Rust.**
   `py/signals` holds the calculators (numpy, arch and galata-research, pinned
   by commit), in an environment of their own: cereyan runs every engine under

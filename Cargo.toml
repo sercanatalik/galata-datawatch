@@ -14,6 +14,9 @@ members = [
     # holds the request that simulates the owner's Derive subaccount
     # (`add-cross-venue-margin-optimiser`).
     "crates/galata-margin",
+    # Not published: the market-data signals computed in Rust over the tape,
+    # with galata-quant's arithmetic (`add-galata-quant`).
+    "crates/galata-signals",
 ]
 
 # Declared once, and taken once — every member says `license.workspace = true`.

@@ -112,6 +112,7 @@ TABLES = {
     "galata-watch": WATCH,
     "galata-signals": MAINTENANCE,
     "galata-signals-commit": MAINTENANCE,
+    "galata-quant-signals": MAINTENANCE,
     "galata-fetch": MAINTENANCE,
 }
 # The tools that live in py/signals' environment rather than target/release:

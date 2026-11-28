@@ -11,11 +11,12 @@
 # /app/target/release and /app/config are where a checkout has them, and the
 # runner is not taught that it is in a container.
 #
-# **Five flows, not seven.** `derive-the-signals` and `update-the-reference`
-# are left out, with the signals environment they need. That environment pins
-# galata-research by an absolute path on one machine, and galata-research is
-# set aside for now. A flow that is not in the image is not registered, so it
-# is neither scheduled nor startable: registration is the exposure boundary
+# **Six flows, not eight.** `derive-the-signals` and `update-the-reference`
+# are left out, with the signals environment they need; the EWMA covariance
+# is computed by `derive-the-covariance` in Rust instead (add-galata-quant).
+# That environment pins galata-research by an absolute path on one machine.
+# A flow that is not in the image is not registered, so it is neither
+# scheduled nor startable: registration is the exposure boundary
 # (py/flows/__init__.py). Both stay in the tree, untouched.
 #
 # **No secret, as natively.** The lane holds no credential and is handed
@@ -28,12 +29,15 @@ FROM rust:1.98.1-bookworm AS build
 WORKDIR /src
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --locked -p galata-datawatch --bins \
+# And galata-quant-signals (add-galata-quant): the EWMA covariance in Rust,
+# which fetches galata-quant from GitHub by its tag.
+RUN cargo build --release --locked -p galata-datawatch --bins -p galata-signals \
  && mkdir /out \
  && cp target/release/galata-datawatch target/release/galata-ledger \
        target/release/galata-compact target/release/galata-tape-rebuild \
        target/release/galata-retain target/release/galata-watch \
-       target/release/galata-derive target/release/galata-signals-commit /out/
+       target/release/galata-derive target/release/galata-signals-commit \
+       target/release/galata-quant-signals /out/
 
 FROM python:3.12-slim-bookworm
 COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
@@ -53,7 +57,10 @@ RUN uv sync --frozen --no-dev
 # who reaches the lane can start.
 COPY py/flows/__init__.py py/flows/_runner.py py/flows/compact.py \
      py/flows/project.py py/flows/rebuild.py py/flows/retain.py \
-     py/flows/watch.py ./flows/
+     py/flows/watch.py py/flows/covariance.py ./flows/
+# The declared horizons derive-the-covariance reads; py/signals' environment
+# is not here.
+COPY py/signals/signals.toml ./signals/signals.toml
 COPY --from=build /out/ /app/target/release/
 
 ARG SOURCE_TREE=unknown

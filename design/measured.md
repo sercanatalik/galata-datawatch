@@ -6516,3 +6516,60 @@ over seven days, at this rate                           ~0.26 GB
     removed. The projection's counts held or grew, and the fold found no
     break.
   - Fixed in `63d1de3`, which compacts `venue=<its venue>` alone.
+
+## The signals that overlapped, and the EWMA covariance in Rust — 2026-11-28
+
+`add-galata-quant` tasks 4.1 and 4.2. Read from the segments set aside on
+2026-11-24 (`var/tape.set-aside/kind=signals`), and from a run of each
+calculator over the live tape's candles.
+
+**Why `date=2026-11-18` held nine overlapping pairs.** Each signals segment
+claims a single instant, `[computed, computed]`, and every overlap was three
+(or two) segments claiming the same one:
+
+```text
+t-1794986576520922_…_1556_0   carry     81 rows   run carry-1794986576520922
+t-1794986576520922_…_1557_0   carry     81 rows   run carry-1794986576520922
+t-1794986576520922_…_1558_0   carry     81 rows   run carry-1794986576520922
+t-1794986587683051_…_1640_0   backtest 243 rows   run backtest-1794986587683051   (and _1641, _1642)
+```
+
+- **One run, committed again and again.** The same rows, `run_id` and
+  `code`, written by consecutive processes (pids 1556, 1557, 1558) within a
+  second, at 07:22 UTC. That is not the schedule (:15 and :45), and the
+  lane's runner does not retry, so it was a hand-run commit repeated over
+  hand-offs that were still there.
+- **`galata-signals-commit` let it happen.** It writes whatever run it is
+  handed, and a hand-off it already committed is the same run again.
+- The Rust calculator refuses a run whose instant is already on the tape,
+  under the tape's exclusive hold. In that hold it also reads the cursor
+  again, so of two runs at once a horizon is stored by one
+  (`galata-signals`, `store::commit`).
+
+**The EWMA horizons, Rust against `py/signals`.**
+- Both computed `varcov` over the live candles (the tape linked read-only
+  into two scratch roots), `--now 2026-11-28T16:15:00Z`. That covered 30m,
+  1d and 1w, and from them beta, absorption, surprise and turbulence.
+
+```text
+rows                         py/signals 315    galata-signals 315
+only on one side             none
+fields that differ           none   (absent reasons, n_eff, asof, target,
+                                     after_gap, model, params, flags)
+largest value difference     2.2e-15 relative
+time                         galata-signals 7.5 s
+```
+
+- **What the run said:**
+  - 30m held nine instruments at 07:00, the tape's newest complete
+    half-hour;
+  - 1d and 1w were absent, "the first origin has 32 joint returns, under
+    the warm-up 33 at lam=0.94: it starts at ANT's first return". ANT was
+    listed on 2026-10-26.
+- **The four instruments added today** (SKHX, BRENTOIL, AMD, BABA) held no
+  closed half-hour yet, so the 30m sample is nine instruments.
+- **Once they hold one**, the joint sample starts at the latest of their
+  first bars on the tape. Capture walks each new instrument's venue history
+  back, so for 1d that may be far back. Until it holds 33 joint returns, a
+  horizon is written absent with that reason. That is the joint sample's
+  rule, not a fault.

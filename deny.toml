@@ -37,6 +37,8 @@ deny = []
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Nothing is vendored and nothing comes from git. A published crate may not
-# depend on a git source at all: `cargo publish` refuses it.
-allow-git = []
+# Nothing is vendored, and git only for galata-quant (add-galata-quant): the
+# arithmetic galata-research proves and galata-signals links, by tag. A
+# published crate may not depend on a git source at all — `cargo publish`
+# refuses it — so only the unpublished galata-signals does.
+allow-git = ["https://github.com/sercanatalik/galata-quant"]

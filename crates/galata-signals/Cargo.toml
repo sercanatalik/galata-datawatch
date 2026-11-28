@@ -1,0 +1,34 @@
+[package]
+name = "galata-signals"
+version.workspace = true
+description = "The market-data signals computed in Rust: galata-quant's arithmetic over the tape, written through signals::write"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Not published: it links galata-quant by git tag, which a published crate
+# cannot (add-galata-quant, D6).
+publish = false
+
+# Not `galata-signals`: that is py/signals' command, which the lane's runner
+# finds in py/signals' environment.
+[[bin]]
+name = "galata-quant-signals"
+path = "src/main.rs"
+
+[dependencies]
+# The tape and the signals schema only: no runtime, no venue transport.
+galata-datawatch = { version = "0.1.0", path = "../galata-datawatch", default-features = false }
+galata-segments = { version = "0.1.0", path = "../galata-segments" }
+galata-wire = { version = "0.1.0", path = "../galata-wire" }
+# The arithmetic: one implementation, galata-research's oracle behind it.
+galata-quant = { git = "https://github.com/sercanatalik/galata-quant", tag = "v0.1.0" }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+arrow.workspace = true
+parquet.workspace = true
+serde.workspace = true
+toml.workspace = true
+jiff = { version = "0.2.37", default-features = false, features = ["std", "tzdb-bundle-always"] }
+
+[dev-dependencies]
+tempfile = "3"

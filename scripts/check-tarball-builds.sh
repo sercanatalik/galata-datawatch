@@ -143,9 +143,24 @@ version_of() {
     return 1
 }
 
+# **A member that takes a dependency from git cannot be packaged at all**:
+# `cargo package` drops the git source and asks crates.io for the crate, which
+# is not there. Such a member is unpublished by construction — `cargo publish`
+# refuses it for the same reason — so there is no tarball of it to check, and
+# it is left out of the packaging, by name and said. galata-signals is one: it
+# links galata-quant by tag (add-galata-quant). Found from cargo's metadata, so
+# a second such member is left out the day it appears, not the day this list
+# is edited.
+git_sourced=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
+for pkg in json.load(sys.stdin)["packages"]:
+    if any((d.get("source") or "").startswith("git+") for d in pkg["dependencies"]):
+        print(pkg["name"])')
 members=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
 for pkg in json.load(sys.stdin)["packages"]:
-    print(pkg["name"] + "-" + pkg["version"])')
+    if not any((d.get("source") or "").startswith("git+") for d in pkg["dependencies"]):
+        print(pkg["name"] + "-" + pkg["version"])')
+excluded=()
+for name in $git_sourced; do excluded+=(--exclude "$name"); done
 if [[ -z "$members" ]]; then
     echo "$(basename "$0"): cargo metadata named no workspace member — refusing to skip the purge and call the result a check" >&2
     exit 2
@@ -248,7 +263,10 @@ fi
 purge
 
 
-if ! output=$(cargo package --workspace --allow-dirty 2>&1); then
+if [[ -n "$git_sourced" ]]; then
+    echo "tarball builds: not packaged, a git dependency makes them unpublishable: $(echo $git_sourced)"
+fi
+if ! output=$(cargo package --workspace "${excluded[@]}" --allow-dirty 2>&1); then
     echo "tarball builds: a crate does not build from what it would ship" >&2
     # The compiler's own words, and the crate it was compiling. A guard that
     # reported only "packaging failed" would send somebody to run the command
@@ -305,4 +323,4 @@ done
 mkdir -p "$(dirname "$KEY_FILE")"
 key_now > "$KEY_FILE"
 
-echo "tarball builds: ok. $built crate(s) compiled from their tarballs with default features, and ${#shapes[@]} configuration(s) a stranger takes — no-default-features (galata-tower's) and the venue features the README advertises — built from the same unpacked sources"
+echo "tarball builds: ok. $built crate(s) compiled from their tarballs with default features, and ${#shapes[@]} configuration(s) a stranger takes — no-default-features (galata-markets' and galata-margin's) and the venue features the README advertises — built from the same unpacked sources"

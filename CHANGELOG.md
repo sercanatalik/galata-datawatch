@@ -24,6 +24,19 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Added
 
+**`galata-signals`** (new, not published)
+
+- **The EWMA covariance in Rust** (`add-galata-quant`): `galata-quant-signals
+  varcov` computes `varcov`'s EWMA horizons (30m, 1d, 1w) and their beta,
+  absorption, surprise and turbulence from the tape's candles with
+  galata-quant (by git tag), and commits them through `signals::write` — the
+  same rows `py/signals` writes, held to it on the record to 2.2e-15. A run
+  already on the tape is refused, and the cursor is read again under the
+  tape's exclusive hold, so two runs at once store a horizon once: the cause
+  of 2026-11-18's overlapping segments, one run committed three times. The
+  lane's image registers it as `derive-the-covariance`. `deny.toml` allows
+  galata-quant's repository as the one git source.
+
 **`galata-markets`** (new, not published)
 
 - **The one door for market data** (`add-galata-markets`): history from the
