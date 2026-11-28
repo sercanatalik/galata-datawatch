@@ -210,7 +210,7 @@ use_config() {
     if (( CHECK )); then
         # What a start would compose, in a file of the check's own outside
         # var/, removed when the check exits.
-        CHECK_CONFIG="$(mktemp -t galata-config)" || refuse "could not make a file for the check's composition"
+        CHECK_CONFIG="$(mktemp "${TMPDIR:-/tmp}/galata-config.XXXXXX")" || refuse "could not make a file for the check's composition"
         trap 'rm -f "$CHECK_CONFIG"' EXIT
         said="$(python3 "$ROOT/scripts/lib/compose_config.py" "$ROOT" --check "$CHECK_CONFIG" 2>&1)" \
             || refuse "${said#compose-config: REFUSED — }"

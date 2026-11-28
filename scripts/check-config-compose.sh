@@ -66,6 +66,13 @@ fresh() {  # fresh <name>: a scratch root with the committed document
     printf '%s' "$root"
 }
 compose() { python3 "$COMPOSE" "$@" 2>&1; }
+# Portable to CI's Linux as well as macOS: no in-place sed, BSD stat or
+# shasum, each of which differs between the two.
+edit() {  # edit <file> <find> <replace>: once, and the find must be there
+    python3 -c 'import sys, pathlib; p = pathlib.Path(sys.argv[1]); t = p.read_text(); assert sys.argv[2] in t, sys.argv[2]; p.write_text(t.replace(sys.argv[2], sys.argv[3], 1))' "$@"
+}
+mode() { python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "$1"; }
+digest() { cksum < "$1"; }
 reads() {  # reads <file> <python expr over d>: true when it holds
     python3 -c 'import sys, tomllib; d = tomllib.load(open(sys.argv[1], "rb")); sys.exit(0 if eval(sys.argv[2]) else 1)' "$1" "$2"
 }
@@ -79,9 +86,9 @@ head -1 "$r/var/datawatch.local.toml" 2>/dev/null | grep -q '^# GENERATED' || sa
 reads "$r/var/datawatch.local.toml" 'd["broker"]["url"] == "nats://example:4222" and d["ledger"]["account"]["main"]["address_var"] == "ADDR_MAIN" and d["venue"]["hyperliquid"]["series"] == ["quotes"]' \
     || say "the composed document is not the committed tables and the overlay's"
 grep -q '^# the committed document' "$r/var/datawatch.local.toml" || say "the committed file's comments did not survive"
-[[ "$(stat -f %Lp "$r/var/datawatch.local.toml")" == 600 ]] || say "the composed document is not 0600"
+[[ "$(mode "$r/var/datawatch.local.toml")" == 600 ]] || say "the composed document is not 0600"
 # A committed instrument is in the next composition.
-sed -i '' 's/{ ticker = "BTC" },/{ ticker = "BTC" },\n  { ticker = "ETH" },/' "$r/config/datawatch.toml"
+edit "$r/config/datawatch.toml" '{ ticker = "BTC" },' $'{ ticker = "BTC" },\n  { ticker = "ETH" },'
 compose "$r" >/dev/null
 reads "$r/var/datawatch.local.toml" '{"ticker": "ETH"} in d["venue"]["hyperliquid"]["instruments"]' \
     || say "a committed instrument is not in the next composition"
@@ -96,11 +103,11 @@ out="$(compose "$r")"
 r="$(fresh both)"
 printf '%s' "$OVERLAY" > "$r/var/datawatch.overlay.toml"
 compose "$r" >/dev/null
-before="$(shasum "$r/var/datawatch.local.toml")"
+before="$(digest "$r/var/datawatch.local.toml")"
 printf '\n[venue.hyperliquid]\nseries = ["candles"]\n' >> "$r/var/datawatch.overlay.toml"
 out="$(compose "$r")" && say "an overlay declaring a committed table was accepted"
 [[ "$out" == *REFUSED*venue.hyperliquid* ]] || say "a table in both is not refused by its name: $out"
-[[ "$(shasum "$r/var/datawatch.local.toml")" == "$before" ]] || say "a refused composition changed the document"
+[[ "$(digest "$r/var/datawatch.local.toml")" == "$before" ]] || say "a refused composition changed the document"
 r="$(fresh bare)"
 printf 'stray = 1\n%s' "$OVERLAY" > "$r/var/datawatch.overlay.toml"
 out="$(compose "$r")" && say "an overlay with a key outside any table was accepted"
@@ -110,11 +117,11 @@ out="$(compose "$r")" && say "an overlay with a key outside any table was accept
 r="$(fresh edited)"
 printf '%s' "$OVERLAY" > "$r/var/datawatch.overlay.toml"
 compose "$r" >/dev/null
-sed -i '' 's/series = \["quotes"\]/series = ["quotes", "candles"]/' "$r/var/datawatch.local.toml"
-before="$(shasum "$r/var/datawatch.local.toml")"
+edit "$r/var/datawatch.local.toml" 'series = ["quotes"]' 'series = ["quotes", "candles"]'
+before="$(digest "$r/var/datawatch.local.toml")"
 out="$(compose "$r")" && say "a hand-edited document was composed over"
 [[ "$out" == *REFUSED*"edited by hand"* ]] || say "a hand edit is not refused as one: $out"
-[[ "$(shasum "$r/var/datawatch.local.toml")" == "$before" ]] || say "a hand edit was overwritten"
+[[ "$(digest "$r/var/datawatch.local.toml")" == "$before" ]] || say "a hand edit was overwritten"
 
 # --- 5. hand-kept with no overlay ---------------------------------------------
 r="$(fresh handkept)"
@@ -149,10 +156,10 @@ compose "$r" >/dev/null || say "a migrated machine does not compose"
 # --- 8. migration, drifted ------------------------------------------------------
 r="$(fresh drifted)"
 printf '%s\n[broker]\nurl = "x"\n' "${COMMITTED/\"quotes\"/\"quotes\", \"funding\"}" > "$r/var/datawatch.local.toml"
-before="$(shasum "$r/var/datawatch.local.toml")"
+before="$(digest "$r/var/datawatch.local.toml")"
 out="$(compose "$r" --migrate)" && say "a drifted hand-kept document was migrated"
 [[ "$out" == *REFUSED*venue.hyperliquid* ]] || say "a drifted migration does not name what drifted: $out"
-[[ "$(shasum "$r/var/datawatch.local.toml")" == "$before" && ! -e "$r/var/datawatch.overlay.toml" && ! -e "$r/var/datawatch.local.toml.hand-kept" ]] \
+[[ "$(digest "$r/var/datawatch.local.toml")" == "$before" && ! -e "$r/var/datawatch.overlay.toml" && ! -e "$r/var/datawatch.local.toml.hand-kept" ]] \
     || say "a refused migration changed something"
 
 # --- 9. at once -----------------------------------------------------------------

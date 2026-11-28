@@ -331,13 +331,13 @@ head -1 "$scratch/var/run/galata-ledger-hyperliquid/datawatch.toml" 2>/dev/null 
     || say "the ledger's copy of the configuration is not the composed document"
 # A hand edit to the composed document refuses the start and is kept.
 printf '\n# an operator was here\n' >> "$scratch/var/datawatch.local.toml"
-edited="$(shasum "$scratch/var/datawatch.local.toml")"
+edited="$(cksum < "$scratch/var/datawatch.local.toml")"
 line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
         GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
         /bin/bash "$scratch/scripts/run-service.sh" --check ledger hyperliquid 2>&1 || true)"
 [[ "$line" == *"REFUSED"*"edited by hand"* ]] \
     || say "a start over a hand-edited configuration is not refused as one: $line"
-[[ "$(shasum "$scratch/var/datawatch.local.toml")" == "$edited" ]] || say "a hand edit was overwritten by a start"
+[[ "$(cksum < "$scratch/var/datawatch.local.toml")" == "$edited" ]] || say "a hand edit was overwritten by a start"
 rm -f "$scratch/var/datawatch.local.toml"
 : > "$scratch/containers.conf"
 line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
