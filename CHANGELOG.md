@@ -216,6 +216,17 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Fixed
 
+- **A handover is no longer judged a subscription shortfall**
+  (`judge-subscriptions-per-connection`). Capture hands over to a fresh socket
+  every eight minutes, and its held count starts again at zero on each; the
+  health judge's three-minute grace ran from capture's start only, so a capture
+  hours old read short in the seconds after every handover. Between 2026-11-27
+  and 2026-11-28 that put "holds 7 subscriptions of 27 declared" on the
+  watcher's Telegram 86 times, while the archive shows all 27 delivering. The
+  grace now runs from the later of capture's start and its current connection's
+  opening (`session_age_secs`); with no connection open, the disconnected
+  finding speaks instead; a status without the field is judged by its start, as
+  before.
 - **A connection that dies without closing is found, and its silence is a gap**
   (`capture-recovers-dead-connections`). Measured on 2026-11-25: a change in the
   host's network killed capture's connection inside its container, capture said

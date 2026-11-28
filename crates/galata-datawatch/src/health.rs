@@ -32,9 +32,16 @@ use crate::watch::Written;
 
 /// How long capture's status may go unpublished: it publishes every second.
 pub const CAPTURE_ALLOWANCE_SECS: i64 = 60;
-/// How long after its start capture may hold fewer subscriptions than it
-/// declares. Measured on 2026-11-27: a restarted capture held 4 of 27 at
-/// 14 s and all 27 within 74 s, so a minute's grace alerted every restart.
+/// How long after its start, **and after its current connection opened**,
+/// capture may hold fewer subscriptions than it declares. Measured on
+/// 2026-11-27: a restarted capture held 4 of 27 at 14 s and all 27 within
+/// 74 s, so a minute's grace alerted every restart.
+///
+/// **From the connection too** (`judge-subscriptions-per-connection`):
+/// capture hands over to a fresh socket every eight minutes, and its held
+/// count starts again at zero on each. Graced from the start alone, every
+/// handover read as a shortfall, and one reached Telegram every eight
+/// minutes while all 27 delivered.
 pub const SUBSCRIBE_GRACE_SECS: i64 = 3 * 60;
 /// How long the record's judge's report may age: it runs hourly.
 pub const RECORD_ALLOWANCE_SECS: i64 = 2 * 3_600;
@@ -141,9 +148,24 @@ struct CaptureView {
     observed_at_micros: Option<i64>,
     started_at_micros: Option<i64>,
     connection: Option<String>,
+    /// The current connection's age, as capture states it. **Three states**:
+    /// absent from a capture that never wrote it (`None`), `null` while it has
+    /// no connection open (`Some(None)`), or its age (`Some(Some(_))`).
+    #[serde(deserialize_with = "present")]
+    session_age_secs: Option<Option<u64>>,
     subs_held: Option<u64>,
     subs_declared: Option<u64>,
     pairs: Vec<PairView>,
+}
+
+/// A field that is present, `null` included: `#[serde(default)]` alone would
+/// read a `null` as absent.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -306,13 +328,23 @@ fn capture(venue: &str, status: Option<&serde_json::Value>, now: i64) -> (String
             );
         }
     }
-    // A capture just started is still subscribing: short is a finding only
-    // past the grace, as down is only past a minute.
+    // A capture just started, or just connected again, is still
+    // subscribing: short is a finding only past the grace from both, as down
+    // is only past a minute. With no connection open there is nothing to
+    // subscribe on; that is the disconnected finding's to say.
+    let started_settled = view
+        .started_at_micros
+        .is_none_or(|started| observed - started > SUBSCRIBE_GRACE_SECS * SECOND);
+    let connection_settled = match view.session_age_secs {
+        // An older capture, which never stated its connection's age.
+        None => true,
+        Some(None) => false,
+        Some(Some(age)) => i64::try_from(age).is_ok_and(|age| age > SUBSCRIBE_GRACE_SECS),
+    };
     if let (Some(held), Some(declared)) = (view.subs_held, view.subs_declared)
         && held < declared
-        && view
-            .started_at_micros
-            .is_none_or(|started| observed - started > SUBSCRIBE_GRACE_SECS * SECOND)
+        && started_settled
+        && connection_settled
     {
         judged.say(
             State::Warning,
@@ -856,6 +888,85 @@ mod tests {
         status["started_at_micros"] = json!(observed - (SUBSCRIBE_GRACE_SECS + 1) * S);
         reports.captures[0].1 = Some(status);
         assert!(ids(&judge(&reports, T)).contains(&"capture:hyperliquid/subscriptions"));
+    }
+
+    /// A capture four hours old, short at 7 of 27, its connection `age`
+    /// seconds old (`None`: no connection open).
+    fn handed_over(age: Option<u64>) -> serde_json::Value {
+        let observed = T - 2 * S;
+        let mut status = capture_status(observed);
+        status["started_at_micros"] = json!(observed - 4 * 3_600 * S);
+        status["session_age_secs"] = json!(age);
+        status["subs_held"] = json!(7);
+        status["subs_declared"] = json!(27);
+        if age.is_none() {
+            status["connection"] = json!("down");
+        }
+        status
+    }
+
+    fn short(status: serde_json::Value) -> bool {
+        let mut reports = well();
+        reports.captures[0].1 = Some(status);
+        ids(&judge(&reports, T)).contains(&"capture:hyperliquid/subscriptions")
+    }
+
+    #[test]
+    fn a_handover_is_graced_as_a_start_is() {
+        // The 2026-11-28 flood: 7 of 27 five seconds after a handover, on a
+        // capture hours old, while all 27 delivered.
+        assert!(!short(handed_over(Some(5))), "just handed over");
+        assert!(
+            !short(handed_over(Some(SUBSCRIBE_GRACE_SECS as u64))),
+            "at the grace exactly"
+        );
+        // Still short four minutes into the connection: a finding.
+        let mut reports = well();
+        reports.captures[0].1 = Some(handed_over(Some(4 * 60)));
+        let judged = judge(&reports, T);
+        let f = finding(&judged, "capture:hyperliquid/subscriptions");
+        assert_eq!(
+            f.observed,
+            "capture:hyperliquid holds 7 subscriptions of 27 declared"
+        );
+        // The spec's first scenario: 50 of 54, five minutes into a connection.
+        let mut status = capture_status(T - 2 * S);
+        status["session_age_secs"] = json!(5 * 60);
+        status["subs_held"] = json!(50);
+        assert!(short(status));
+    }
+
+    #[test]
+    fn no_connection_is_the_disconnected_findings_and_not_a_shortfall() {
+        let status = handed_over(None);
+        assert!(
+            status.as_object().unwrap().contains_key("session_age_secs"),
+            "stated as null"
+        );
+        assert!(!short(status.clone()));
+        // Whether it is disconnected is judged by that finding's own minute:
+        // nothing received for two minutes before it said so.
+        let mut reports = well();
+        let mut status = status;
+        status["pairs"][0]["last_recv_micros"] = json!(T - 2 * S - 120 * S);
+        reports.captures[0].1 = Some(status);
+        let judged = judge(&reports, T);
+        assert!(
+            ids(&judged).contains(&"capture:hyperliquid/disconnected"),
+            "{judged:#?}"
+        );
+        assert!(!ids(&judged).contains(&"capture:hyperliquid/subscriptions"));
+    }
+
+    #[test]
+    fn a_capture_that_states_no_connection_age_is_judged_by_its_start() {
+        // `capture_status` predates the field: as before this change.
+        let mut status = capture_status(T - 2 * S);
+        assert!(!status.as_object().unwrap().contains_key("session_age_secs"));
+        status["subs_held"] = json!(50);
+        assert!(short(status.clone()), "an hour after its start");
+        status["started_at_micros"] = json!(T - 2 * S - 14 * S);
+        assert!(!short(status), "fourteen seconds after its start");
     }
 
     #[test]

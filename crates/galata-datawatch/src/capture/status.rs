@@ -288,6 +288,55 @@ mod tests {
         }
     }
 
+    /// **The health judge reads what capture writes**
+    /// (`judge-subscriptions-per-connection`, task 1.2): a status just after a
+    /// handover, short of its declared count, is graced by its connection's
+    /// age; the same status four minutes on is a finding. A renamed or
+    /// reshaped `session_age_secs` fails here, not on the deployment.
+    #[test]
+    fn the_health_judge_graces_a_connection_capture_states_as_just_opened() {
+        const S: i64 = 1_000_000;
+        let now = 1_795_859_280_000_000;
+        let judged_short = |s: &Status| {
+            let reports = crate::health::Reports {
+                captures: vec![(
+                    "hyperliquid".into(),
+                    Some(serde_json::from_str(&s.to_json()).unwrap()),
+                )],
+                ledgers: Vec::new(),
+                starts: Vec::new(),
+                record: None,
+                snapshot_secs: 300,
+                events_secs: None,
+            };
+            serde_json::to_string(&crate::health::judge(&reports, now))
+                .unwrap()
+                .contains("capture:hyperliquid/subscriptions")
+        };
+        let mut s = status();
+        s.observed_at_micros = now - S;
+        s.started_at_micros = now - 4 * 3_600 * S;
+        s.subs_held = 7;
+        s.subs_declared = 27;
+        s.session_age_secs = Some(5);
+        assert!(!judged_short(&s), "five seconds after a handover");
+        s.session_age_secs = Some(4 * 60);
+        assert!(judged_short(&s), "four minutes on, still short");
+        s.connection = Connection::Down;
+        s.session_age_secs = None;
+        let written: serde_json::Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert!(
+            written
+                .get("session_age_secs")
+                .is_some_and(serde_json::Value::is_null),
+            "written as null, not left out"
+        );
+        assert!(
+            !judged_short(&s),
+            "no connection: the disconnected finding's to say"
+        );
+    }
+
     #[test]
     fn an_instrument_that_left_is_named_with_its_reason_and_time() {
         let mut s = status();
