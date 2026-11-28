@@ -172,6 +172,37 @@ where
 #[serde(default)]
 struct PairView {
     last_recv_micros: Option<i64>,
+    ticker: Option<String>,
+    series: Option<String>,
+    state: Option<String>,
+}
+
+/// Whether capture states a pair held on its current connection.
+fn held_state(state: Option<&str>) -> bool {
+    matches!(state, Some("live" | "stale" | "closed"))
+}
+
+/// **Candles waiting on a quiet market** (`judge-quiet-candles-as-held`): each
+/// `candles` pair not yet delivering whose instrument's `quotes` pair is held.
+/// A candle is pushed on a trade, so a thin market between trades has no bar
+/// on a connection that is working; its quotes, on the same socket, show the
+/// venue is serving it. A status that states no pair's state excuses none.
+fn quiet_candles(pairs: &[PairView]) -> u64 {
+    let quotes_held = |ticker: &str| {
+        pairs.iter().any(|q| {
+            q.ticker.as_deref() == Some(ticker)
+                && q.series.as_deref() == Some("quotes")
+                && held_state(q.state.as_deref())
+        })
+    };
+    pairs
+        .iter()
+        .filter(|p| {
+            p.series.as_deref() == Some("candles")
+                && matches!(p.state.as_deref(), Some("notsubscribed" | "not_subscribed"))
+                && p.ticker.as_deref().is_some_and(quotes_held)
+        })
+        .count() as u64
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -342,7 +373,7 @@ fn capture(venue: &str, status: Option<&serde_json::Value>, now: i64) -> (String
         Some(Some(age)) => i64::try_from(age).is_ok_and(|age| age > SUBSCRIBE_GRACE_SECS),
     };
     if let (Some(held), Some(declared)) = (view.subs_held, view.subs_declared)
-        && held < declared
+        && held + quiet_candles(&view.pairs) < declared
         && started_settled
         && connection_settled
     {
@@ -956,6 +987,107 @@ mod tests {
             "{judged:#?}"
         );
         assert!(!ids(&judged).contains(&"capture:hyperliquid/subscriptions"));
+    }
+
+    /// A capture four minutes into its connection, 39 declared: BTC and BABA,
+    /// each with its pairs in the states given, and 33 more held elsewhere.
+    fn quiet(babas: [(&str, &str); 3], btc_funding: &str) -> serde_json::Value {
+        let observed = T - 2 * S;
+        let mut status = capture_status(observed);
+        status["session_age_secs"] = json!(4 * 60);
+        let mut pairs = vec![
+            json!({"ticker": "BTC", "series": "quotes", "state": "live", "last_recv_micros": observed - S}),
+            json!({"ticker": "BTC", "series": "candles", "state": "live", "last_recv_micros": observed - S}),
+            json!({"ticker": "BTC", "series": "funding", "state": btc_funding}),
+        ];
+        for (series, state) in babas {
+            pairs.push(json!({"ticker": "BABA", "series": series, "state": state}));
+        }
+        let held = pairs
+            .iter()
+            .filter(|p| held_state(p["state"].as_str()))
+            .count();
+        status["pairs"] = json!(pairs);
+        status["subs_held"] = json!(33 + held);
+        status["subs_declared"] = json!(39);
+        status
+    }
+
+    #[test]
+    fn a_thin_markets_candles_wait_while_its_quotes_are_held() {
+        let waiting = [
+            ("quotes", "live"),
+            ("candles", "notsubscribed"),
+            ("funding", "live"),
+        ];
+        let status = quiet(waiting, "live");
+        assert_eq!(status["subs_held"], json!(38));
+        assert!(!short(status), "BABA between trades");
+        // Its quotes too quiet for a minute: still held, still excused.
+        assert!(!short(quiet(
+            [
+                ("quotes", "stale"),
+                ("candles", "notsubscribed"),
+                ("funding", "live")
+            ],
+            "live"
+        )));
+        // Capture's own spelling of the state, from `PairState::as_str`.
+        assert!(!short(quiet(
+            [
+                ("quotes", "live"),
+                ("candles", "not_subscribed"),
+                ("funding", "live")
+            ],
+            "live"
+        )));
+    }
+
+    #[test]
+    fn candles_and_quotes_both_missing_or_another_series_missing_are_findings() {
+        let mut reports = well();
+        reports.captures[0].1 = Some(quiet(
+            [
+                ("quotes", "notsubscribed"),
+                ("candles", "notsubscribed"),
+                ("funding", "live"),
+            ],
+            "live",
+        ));
+        let judged = judge(&reports, T);
+        assert_eq!(
+            finding(&judged, "capture:hyperliquid/subscriptions").observed,
+            "capture:hyperliquid holds 37 subscriptions of 39 declared"
+        );
+        let mut reports = well();
+        reports.captures[0].1 = Some(quiet(
+            [("quotes", "live"), ("candles", "live"), ("funding", "live")],
+            "notsubscribed",
+        ));
+        let judged = judge(&reports, T);
+        assert_eq!(
+            finding(&judged, "capture:hyperliquid/subscriptions").observed,
+            "capture:hyperliquid holds 38 subscriptions of 39 declared",
+            "funding does not wait on a trade"
+        );
+        // Candles refused, not waiting: a refusal is never excused.
+        assert!(short(quiet(
+            [
+                ("quotes", "live"),
+                ("candles", "refused"),
+                ("funding", "live")
+            ],
+            "live"
+        )));
+    }
+
+    #[test]
+    fn a_status_with_no_waiting_candles_is_counted_as_before() {
+        // `capture_status` states one pair, BTC's quotes, and no candles: there
+        // is nothing to excuse, and a shortfall is judged on the counts alone.
+        let mut status = capture_status(T - 2 * S);
+        status["subs_held"] = json!(53);
+        assert!(short(status));
     }
 
     #[test]

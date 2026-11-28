@@ -171,6 +171,7 @@ mod tests {
             // the counts.
             started_at_micros: None,
             session_age_secs: None,
+            pair_reports: Vec::new(),
         });
         markets.health = Sources {
             status,

@@ -216,6 +216,16 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Fixed
 
+- **A quiet market's candles are no longer judged a subscription shortfall**
+  (`judge-quiet-candles-as-held`). A candle is pushed on a trade, so a thin
+  market has no bar for minutes on a working connection: `xyz:BABA`, about
+  $0.77M a day, first delivered candles 140 s into a connection, against the
+  judge's 180 s grace. A `candles` pair not yet delivering whose instrument's
+  `quotes` pair is held (`live`, `stale` or `closed`) is no longer counted as
+  missing; quotes, funding, a refusal, and candles whose quotes are missing
+  too still are, and the finding names capture's own counts. galata-markets
+  passes the judge each pair's series and state (`status::PairReport`, not
+  shown by `/v1/venues`).
 - **A handover is no longer judged a subscription shortfall**
   (`judge-subscriptions-per-connection`). Capture hands over to a fresh socket
   every eight minutes, and its held count starts again at zero on each; the

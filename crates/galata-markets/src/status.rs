@@ -48,6 +48,25 @@ pub struct VenueStatus {
     /// design D4): dropped here, every handover read as a shortfall.
     #[serde(skip)]
     pub session_age_secs: Option<Option<u64>>,
+    /// Each pair as capture stated it, for the deployment's health only: not
+    /// shown. The judge excuses a quiet market's candles by its quotes' state
+    /// (`judge-quiet-candles-as-held`).
+    #[serde(skip)]
+    pub pair_reports: Vec<PairReport>,
+}
+
+/// One pair, as the deployment's health judges it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairReport {
+    /// The instrument.
+    pub ticker: String,
+    /// `quotes`, `candles`, `funding`…
+    pub series: String,
+    /// As capture stated it: `live`, `stale`, `closed`, `refused`,
+    /// `notsubscribed`.
+    pub state: Option<String>,
+    /// Its newest receipt.
+    pub last_recv_micros: Option<i64>,
 }
 
 impl VenueStatus {
@@ -78,6 +97,17 @@ impl VenueStatus {
                     ))
                 })
                 .collect(),
+            pair_reports: pairs
+                .iter()
+                .filter_map(|p| {
+                    Some(PairReport {
+                        ticker: p["ticker"].as_str()?.to_string(),
+                        series: p["series"].as_str()?.to_string(),
+                        state: p["state"].as_str().map(str::to_string),
+                        last_recv_micros: p["last_recv_micros"].as_i64(),
+                    })
+                })
+                .collect(),
             started_at_micros: v["started_at_micros"].as_i64(),
             session_age_secs: v.get("session_age_secs").map(serde_json::Value::as_u64),
         })
@@ -102,6 +132,20 @@ impl VenueStatus {
         }
         if let Some(age) = self.session_age_secs {
             report["session_age_secs"] = serde_json::json!(age);
+        }
+        // Each pair as stated, where capture stated them: the newest receipt
+        // across them is the one above, and each state is the judge's.
+        if !self.pair_reports.is_empty() {
+            report["pairs"] = self
+                .pair_reports
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "ticker": p.ticker, "series": p.series,
+                        "state": p.state, "last_recv_micros": p.last_recv_micros,
+                    })
+                })
+                .collect();
         }
         report
     }
@@ -327,6 +371,68 @@ pub(crate) mod tests {
                 "subs_held",
                 "venue"
             ]
+        );
+    }
+
+    /// The recorded status with BABA's three pairs added, in the states given,
+    /// and its counts following them.
+    fn with_baba(states: [&str; 3]) -> serde_json::Value {
+        let mut status: serde_json::Value = serde_json::from_str(RECORDED).unwrap();
+        let observed = status["observed_at_micros"].as_i64().unwrap();
+        status["session_age_secs"] = serde_json::json!(4 * 60);
+        let pairs = status["pairs"].as_array_mut().unwrap();
+        for (series, state) in ["quotes", "candles", "funding"].iter().zip(states) {
+            pairs.push(
+                serde_json::json!({"ticker": "BABA", "series": series, "state": state,
+                "last_recv_micros": (state != "notsubscribed").then_some(observed - 1_000_000)}),
+            );
+        }
+        let held = states
+            .iter()
+            .filter(|s| matches!(**s, "live" | "stale" | "closed"))
+            .count();
+        status["subs_declared"] = serde_json::json!(27 + 3);
+        status["subs_held"] = serde_json::json!(27 + held);
+        status
+    }
+
+    /// `judge-quiet-candles-as-held`, task 1.2: what galata-markets holds of a
+    /// status carries each pair's state to the judge.
+    #[test]
+    fn a_quiet_markets_candles_are_judged_from_what_is_held() {
+        assert!(
+            !judged_short(&with_baba(["live", "notsubscribed", "live"])),
+            "BABA between trades"
+        );
+        assert!(
+            !judged_short(&with_baba(["stale", "notsubscribed", "live"])),
+            "its quotes stale"
+        );
+        assert!(
+            judged_short(&with_baba(["notsubscribed", "notsubscribed", "live"])),
+            "quotes missing too"
+        );
+        assert!(
+            judged_short(&with_baba(["live", "live", "notsubscribed"])),
+            "funding missing"
+        );
+    }
+
+    #[test]
+    fn the_newest_receipt_reads_the_same_with_each_pair_passed() {
+        let held = VenueStatus::parse(RECORDED.as_bytes()).unwrap();
+        let report = held.as_report();
+        let newest = report["pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["last_recv_micros"].as_i64())
+            .max();
+        assert_eq!(newest, held.last_event_micros);
+        assert_eq!(
+            report["pairs"].as_array().unwrap().len(),
+            held.pairs.len(),
+            "one entry per pair"
         );
     }
 }
