@@ -126,6 +126,18 @@ instruments = [
   { ticker = "NVDA",   dex = "xyz" },
   { ticker = "SILVER", dex = "xyz" },
   { ticker = "ANT",    dex = "xyz" },
+  # Added 2026-11-28, the markets on galata-desk's watchlist that capture did
+  # not follow, so the watcher's market update and move alerts had nothing to
+  # read for them. Each checked against the venue's own universe first
+  # (`metaAndAssetCtxs` with `dex = "xyz"`, 150 instruments): listed and not
+  # delisted, with a day's volume of $154M (SKHX), $64.7M (BRENTOIL), $19.1M
+  # (AMD) and $0.77M (BABA). No calendar is declared for them, as for the
+  # others; AMD, BABA and SKHX are equities, and whether they thin or stop
+  # outside their home sessions is not yet measured here.
+  { ticker = "SKHX",     dex = "xyz" },
+  { ticker = "BRENTOIL", dex = "xyz" },
+  { ticker = "AMD",      dex = "xyz" },
+  { ticker = "BABA",     dex = "xyz" },
 ]
 
 # A CHAIN VENUE IS NOT DECLARED HERE EITHER, AND ITS PROVIDER IS A SECRET.
