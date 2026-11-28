@@ -6483,3 +6483,36 @@ projection, rewritten 05:19–05:20     orders  order_updates  fills  funding_pa
 - Neither ledger's log warns, and neither stopped.
 - The fills walk recorded 12 pages in the hour before the deploy and 12 in
   the hour after, one each events pass.
+
+## The account stream, deployed — 2026-11-28
+
+`add-realtime-account-ledger` task 7.2. `0968f9f` deployed at 06:01 UTC,
+both ledgers publishing as `ledger-<venue>` from 06:01:52. Read at the
+broker's restart at 07:23:00, from its own `stream applied` line (counts
+only):
+
+```text
+ACCOUNTS, 81 minutes                 2,529 messages     2,116,831 bytes
+per hour                            ~1,870 messages     ~1.57 MB
+over seven days, at this rate                           ~0.26 GB
+```
+
+- That is the measured stream, against the 0.24 GB projected above. It is
+  an upper bound for this quarter of the day: the ledgers were restarted
+  at 07:17 (`63d1de3`), and each run publishes every current set at its
+  start.
+- **Each event once.** Every event on the stream from position 0 was read
+  through galata-markets' `/v1/accounts/live` (`add-markets-accounts`) at
+  07:25, and counted by the ledger's identity:
+  - 225 events: 217 PnL points, 5 order updates, 2 fills and 1 funding
+    payment;
+  - no identity twice, positions increasing, no address.
+- Both ledgers' streams stayed connected through the hour, and both
+  publication cursors advanced with no unacknowledged publish.
+- **The first hourly compaction failed part-way on both ledgers**, at
+  07:01:54. Each compacted the whole shared record, not its own venue's,
+  and both did it in the same second.
+  - No row was lost: a replacement is written before any original is
+    removed. The projection's counts held or grew, and the fold found no
+    break.
+  - Fixed in `63d1de3`, which compacts `venue=<its venue>` alone.
