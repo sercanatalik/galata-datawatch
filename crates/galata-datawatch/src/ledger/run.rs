@@ -2236,7 +2236,17 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     /// alone (task 4.3). Best effort: a fold that fails leaves the segments as
     /// they were, every one still read.
     fn compact_record(&mut self, now: i64) {
-        let root = self.archive.root().to_path_buf();
+        // **Its own venue's partitions, and no other's.** Every ledger records
+        // under one root, `venue=<v>` beside `venue=<v>`, and ledgers started
+        // together compact on the same minute. Two compacting one partition at
+        // once each remove segments the other is merging: no row is lost (a
+        // replacement is written before any original is removed), but each
+        // run fails part-way. Measured 2026-11-28 07:01:54, the first hourly
+        // run after the deploy, on both ledgers.
+        let root = self
+            .archive
+            .root()
+            .join(format!("venue={}", self.venue.venue().as_str()));
         let today = crate::calendar::date_of(now);
         let cutoff =
             (now - COMPACT_GRACE_MICROS).div_euclid(COMPACT_EVERY_MICROS) * COMPACT_EVERY_MICROS;
@@ -4048,6 +4058,61 @@ mod tests {
         run.publish().await.unwrap();
         assert_eq!(run.publication.as_ref().unwrap().0.cursor(), cursor);
         assert_eq!(bus.ids().len(), sent);
+    }
+
+    /// **A ledger compacts its own venue's partitions, and no other's**: every
+    /// ledger records under one root, and two compacting one partition at
+    /// once remove what the other is merging (measured 2026-11-28 07:01:54).
+    #[tokio::test]
+    async fn a_ledger_compacts_its_own_venue_and_leaves_another_venues_partitions_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _bus) = publishing(dir.path(), 0).await;
+        run.boot().await.unwrap();
+        // Another venue's closed day — long before the run's clock — in three
+        // segments, beside this ledger's.
+        let other = dir
+            .path()
+            .join("venue=derive-xyz/account=owner/kind=fills/date=2020-01-01");
+        std::fs::create_dir_all(&other).unwrap();
+        let batch = {
+            use arrow::array::Int64Array;
+            use arrow::datatypes::{DataType, Field, Schema};
+            let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+                "recv_micros",
+                DataType::Int64,
+                false,
+            )]));
+            arrow::record_batch::RecordBatch::try_new(
+                schema,
+                vec![std::sync::Arc::new(Int64Array::from(vec![1_i64]))],
+            )
+            .unwrap()
+        };
+        for i in 0..3_i64 {
+            galata_segments::write_file(
+                &other.join(format!("t-{}_{}_1_0.parquet", 1_000 + i, 1_000 + i)),
+                &batch,
+                galata_segments::Codec::Zstd,
+            )
+            .unwrap();
+        }
+        let count = || {
+            other
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    galata_segments::Cursor::parse(e.file_name().to_str().unwrap()).is_some()
+                })
+                .count()
+        };
+        assert_eq!(count(), 3);
+        run.compact_record(run.clock.now_micros());
+        assert_eq!(
+            count(),
+            3,
+            "another venue's partitions are its own ledger's to compact"
+        );
     }
 
     #[tokio::test]
