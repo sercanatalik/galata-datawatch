@@ -90,6 +90,11 @@ both `ConnectionPolicy` variants gain `reply_secs`.
   defaulted on deserialisation, so a row written before them still reads. An
   out-of-tree venue building an `Instrument` by struct literal adds the six as
   `None`, which states nothing it did not state before.
+- `Fill::liquidated` (`move-watcher-onto-markets`, design D9): whether the
+  fill liquidated the account, where the venue says; `None` where it does not
+  (Derive) or could not be told. Defaulted on deserialisation, so an envelope
+  published before it still reads. **Breaking** for a struct literal. The
+  projection's `fills` gain the `liquidated` column, null where unsaid.
 
 **`galata-datawatch`**
 

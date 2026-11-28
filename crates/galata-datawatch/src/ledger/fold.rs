@@ -566,6 +566,7 @@ mod tests {
                 order_id: id.to_string(),
                 trade_id: id.to_string(),
                 twap_id: None,
+                liquidated: None,
             }),
         )
     }

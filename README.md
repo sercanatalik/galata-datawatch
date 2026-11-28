@@ -677,7 +677,8 @@ alike, and the refusal names no client.
 | Route | Answers | As |
 |---|---|---|
 | `/v1/tape/{kind}?venue&ticker&from&to` | one dataset's rows over a venue-time window | Arrow IPC |
-| `/v1/candles?venue&ticker&period&from&to` | candles at a period (`tape::bars`) | Arrow IPC |
+| `/v1/candles?venue&ticker&period&from&to[&format=json]` | candles at a period (`tape::bars`) | Arrow IPC, or JSON with `format=json` |
+| `/v1/prices?venue&tickers[&since]` | each ticker's newest mid and mark from the market window, and its range since a moment | JSON |
 | `/v1/venues` | each venue, its dexes, and its capture's latest health | JSON |
 | `/v1/instruments?venue&base&contract_type&active&at` | each instrument's reference data, in the one format | JSON |
 | `/v1/instruments/{venue}/{ticker}` | the same, and what the tape holds for it | JSON |
@@ -716,6 +717,22 @@ curl -s "$M/v1/health"
 - **Candles** add `galata.unsourced` to the metadata, a JSON list of `[from,
   to)` spans no source covers. Each bar carries `source_interval`,
   `sources`, `sources_expected`, `complete`, `gap` and `is_final`.
+- **Candles as JSON** (`format=json`) are the same bars, decimals as exact
+  strings, with `bound` (where the tape ends, `null` where it holds none of
+  the venue) and `unsourced` beside them. Arrow stays the default.
+- **Prices now** (`/v1/prices`) come from the market window, seconds old.
+  - Each ticker gets its newest `mid` (a quote's, halfway between bid and
+    ask, or the venue's own on a mark) and its newest `mark`, each with
+    `at_micros`.
+  - Its `price` is the mid, or the mark where there is none.
+  - With `since`, it also gets the `high` and `low` price since that moment,
+    from every quote and mark, each with its time. A `since` older than the
+    window is refused (`410`), naming the oldest moment it holds.
+  - A ticker the window holds nothing of is listed under `absent`.
+
+  ```sh
+  curl -sH "$T" "$M/v1/prices?venue=hyperliquid&tickers=BTC,ETH"
+  ```
 - **A venue's health is its capture's own report**, with the moment it was
   made; one older than a minute says `current: false`.
 - **The deployment's health** (`/v1/health`, `add-service-health-monitoring`)

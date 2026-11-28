@@ -1,0 +1,156 @@
+[
+ {
+  "coin": "BTC",
+  "px": "64451.0",
+  "sz": "0.72174",
+  "side": "A",
+  "time": 1794808378480,
+  "startPosition": "0.72174",
+  "dir": "Close Long",
+  "closedPnl": "-593.99202",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "oid": 606720462524,
+  "crossed": true,
+  "fee": "13.955059",
+  "tid": 972259449280415,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000aa",
+   "markPx": "64456.0",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "BTC",
+  "px": "64451.0",
+  "sz": "0.75",
+  "side": "A",
+  "time": 1794808378480,
+  "startPosition": "1.47174",
+  "dir": "Close Long",
+  "closedPnl": "-617.25",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "oid": 606720462524,
+  "crossed": true,
+  "fee": "14.501474",
+  "tid": 870061174422351,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000aa",
+   "markPx": "64456.0",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "BTC",
+  "px": "62151.0",
+  "sz": "1.60302",
+  "side": "A",
+  "time": 1795118485263,
+  "startPosition": "23.70264",
+  "dir": "Close Long",
+  "closedPnl": "-2805.285",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+  "oid": 610592484213,
+  "crossed": true,
+  "fee": "27.896202",
+  "tid": 1102578260330157,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000aa",
+   "markPx": "62136.4",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "BTC",
+  "px": "62151.0",
+  "sz": "0.00097",
+  "side": "A",
+  "time": 1795118485263,
+  "startPosition": "23.70361",
+  "dir": "Close Long",
+  "closedPnl": "-1.6975",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+  "oid": 610592484213,
+  "crossed": true,
+  "fee": "0.01688",
+  "tid": 484794316714775,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000aa",
+   "markPx": "62136.4",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "BTC",
+  "px": "62121.0",
+  "sz": "0.28979",
+  "side": "A",
+  "time": 1795119051791,
+  "startPosition": "41.53869",
+  "dir": "Close Long",
+  "closedPnl": "-510.436106",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+  "oid": 610601593605,
+  "crossed": true,
+  "fee": "5.040572",
+  "tid": 21237445878712,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000aa",
+   "markPx": "62122.0",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "BTC",
+  "px": "62121.0",
+  "sz": "0.231",
+  "side": "A",
+  "time": 1795119051791,
+  "startPosition": "41.76969",
+  "dir": "Close Long",
+  "closedPnl": "-406.8834",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+  "oid": 610601593605,
+  "crossed": true,
+  "fee": "4.017986",
+  "tid": 446302549701484,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000aa",
+   "markPx": "62122.0",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ },
+ {
+  "coin": "BTC",
+  "px": "64451.0",
+  "sz": "0.72174",
+  "side": "B",
+  "time": 1794808378480,
+  "startPosition": "0.72174",
+  "dir": "Open Long",
+  "closedPnl": "-593.99202",
+  "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+  "oid": 606720462524,
+  "crossed": true,
+  "fee": "13.955059",
+  "tid": 1,
+  "liquidation": {
+   "liquidatedUser": "0x00000000000000000000000000000000000000bb",
+   "markPx": "64456.0",
+   "method": "market"
+  },
+  "feeToken": "USDC",
+  "twapId": null
+ }
+]

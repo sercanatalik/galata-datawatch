@@ -1049,6 +1049,14 @@ pub struct Fill {
     pub trade_id: String,
     /// The TWAP order this fill belonged to, where one did.
     pub twap_id: Option<u64>,
+    /// Whether this fill liquidated the account, where the venue says:
+    /// Hyperliquid marks a liquidation fill with the user it liquidated, and
+    /// this is whether that user is this account (a liquidator's own fill
+    /// names somebody else). `None` where the venue does not say (Derive), or
+    /// where it could not be told (`move-watcher-onto-markets`, design D9).
+    /// Absent from an envelope published before it existed.
+    #[serde(default)]
+    pub liquidated: Option<bool>,
 }
 
 /// Funding one position paid or received in one settlement.
@@ -1918,6 +1926,7 @@ mod tests {
                 order_id: "1".into(),
                 trade_id: "2".into(),
                 twap_id: None,
+                liquidated: None,
             }),
             Event::FundingPayment(FundingPayment {
                 dex: None,

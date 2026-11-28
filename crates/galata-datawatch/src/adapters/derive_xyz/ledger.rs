@@ -512,6 +512,7 @@ fn trade_of(t: &Value) -> Option<Fill> {
         order_id: text(t.get("order_id"))?,
         trade_id: text(t.get("trade_id"))?,
         twap_id: None,
+        liquidated: None,
     })
 }
 

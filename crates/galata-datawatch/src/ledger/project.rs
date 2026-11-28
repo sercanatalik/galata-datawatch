@@ -352,6 +352,9 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             // Not unique alone: identity is (trade_id, order_id).
             Field::new("trade_id", DataType::Utf8, false),
             Field::new("twap_id", DataType::UInt64, true),
+            // Whether the fill liquidated the account; null where the venue
+            // does not say.
+            Field::new("liquidated", DataType::Boolean, true),
         ]),
         Kind::FundingPayments => fields.extend([
             // As the venue signs it: negative when the position paid.
@@ -720,6 +723,7 @@ fn batch_for(
             columns.push(text(rows, |e| fill_of(e).map(|x| x.order_id.as_str())));
             columns.push(text(rows, |e| fill_of(e).map(|x| x.trade_id.as_str())));
             columns.push(u64s(rows, |e| fill_of(e).and_then(|x| x.twap_id)));
+            columns.push(bools(rows, |e| fill_of(e).and_then(|x| x.liquidated)));
         }
         Kind::FundingPayments => {
             let each = |g: fn(&FundingPayment) -> Option<Num>| {
@@ -1106,8 +1110,40 @@ mod tests {
                 order_id,
                 trade_id,
                 twap_id: None,
+                liquidated: None,
             }),
         )
+    }
+
+    #[test]
+    fn a_fills_liquidation_mark_is_a_column_null_where_unsaid() {
+        let mut marked = fill(1, 1, 10);
+        let mut ordinary = fill(2, 2, 20);
+        if let Event::Fill(f) = &mut marked.event {
+            f.liquidated = Some(true);
+        }
+        if let Event::Fill(f) = &mut ordinary.event {
+            f.liquidated = Some(false);
+        }
+        let unsaid = fill(3, 3, 30);
+        let b = batch(
+            Kind::Fills,
+            "hyperliquid",
+            "main",
+            &[marked, ordinary, unsaid],
+        )
+        .unwrap();
+        let column = b
+            .column_by_name("liquidated")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            column.iter().collect::<Vec<_>>(),
+            [Some(true), Some(false), None]
+        );
     }
 
     fn owner_only() -> tempfile::TempDir {

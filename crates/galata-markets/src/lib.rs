@@ -19,6 +19,8 @@ pub mod history;
 pub mod live;
 pub mod metadata;
 pub mod periods;
+pub mod prices;
+pub mod rows;
 pub mod status;
 
 use std::path::PathBuf;
@@ -104,6 +106,7 @@ pub fn routes_granting(markets: Shared, grant: access::AccountGrant) -> Router {
     Router::new()
         .route("/v1/tape/{kind}", get(history::tape))
         .route("/v1/candles", get(periods::candles))
+        .route("/v1/prices", get(prices::prices_route))
         .route("/v1/live", get(live::live))
         .route("/v1/venues", get(metadata::venues_route))
         .route("/v1/instruments", get(metadata::instruments_route))

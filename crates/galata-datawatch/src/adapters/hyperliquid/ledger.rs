@@ -290,7 +290,14 @@ pub fn stream_rows(
                 &raw("spotState")?,
             ),
         ),
-        WS_FILLS => super::events::fill_rows(venue, account, recv_micros, &raw("fills")?),
+        WS_FILLS => super::events::fill_rows(
+            venue,
+            account,
+            key,
+            own_fingerprint,
+            recv_micros,
+            &raw("fills")?,
+        ),
         // Streamed flat, `{time, coin, usdc, szi, fundingRate, nSamples}`;
         // walked under `delta`. Lifted into the walked shape, so both are one
         // row by identity.
@@ -1259,9 +1266,14 @@ impl Normalise for LedgerNormaliser {
                 let account = Account::new(address.account.as_str())?;
                 let (venue, recv, bytes) = (&self.venue, payload.recv_micros, &payload.payload);
                 match payload.channel.as_str() {
-                    super::events::FILLS_CHANNEL => {
-                        super::events::fill_rows(venue, &account, recv, bytes)
-                    }
+                    super::events::FILLS_CHANNEL => super::events::fill_rows(
+                        venue,
+                        &account,
+                        self.key.as_ref(),
+                        &address.fingerprint,
+                        recv,
+                        bytes,
+                    ),
                     super::events::FUNDING_CHANNEL => {
                         super::events::funding_rows(venue, &account, recv, bytes)
                     }
@@ -2104,9 +2116,12 @@ mod tests {
                 .any(|r| matches!(&r.event, Event::Fill(f) if f.market.starts_with('@')))
         );
         // And each is the row the walk gives for the same fill: one identity.
+        let key = crate::ledger::FingerprintKey::new(Secret::new("deployment-key"));
         let walked = super::super::events::fill_rows(
             &venue(),
             &main(),
+            Some(&key),
+            "0123456789abcdef",
             9,
             &serde_json::to_vec(&tagged["data"]["fills"]).unwrap(),
         )

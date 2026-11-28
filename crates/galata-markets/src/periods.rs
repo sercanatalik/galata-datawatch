@@ -49,6 +49,10 @@ pub struct CandleQuery {
     pub from: i64,
     /// End, venue micros, exclusive.
     pub to: i64,
+    /// `json` for the same bars as JSON (`move-watcher-onto-markets`, design
+    /// D8); Arrow IPC where absent.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// A source interval's spelling: `1m`, `4h`, `1d`.
@@ -264,8 +268,29 @@ fn batch(
 
 /// `GET /v1/candles`.
 pub async fn candles(State(markets): State<Shared>, Query(query): Query<CandleQuery>) -> Response {
+    let json = match query.format.as_deref() {
+        None | Some("arrow") => false,
+        Some("json") => true,
+        Some(other) => {
+            return Refusal::Period(format!(
+                "format {other:?} is not offered; ask for json, or leave it out for Arrow IPC"
+            ))
+            .into_response();
+        }
+    };
     let root = markets.tape.clone();
     let max_bars = markets.limits.bars;
+    if json {
+        let answered = tokio::task::spawn_blocking(move || {
+            read(&root, &query, max_bars).map(|a| as_json(&query, &a))
+        })
+        .await;
+        return match answered {
+            Ok(Ok(answer)) => axum::Json(answer).into_response(),
+            Ok(Err(refusal)) => refusal.into_response(),
+            Err(join) => Refusal::Unreadable(join.to_string()).into_response(),
+        };
+    }
     let answered =
         tokio::task::spawn_blocking(move || read(&root, &query, max_bars).and_then(|a| encode(&a)))
             .await;
@@ -274,6 +299,36 @@ pub async fn candles(State(markets): State<Shared>, Query(query): Query<CandleQu
         Ok(Err(refusal)) => refusal.into_response(),
         Err(join) => Refusal::Unreadable(join.to_string()).into_response(),
     }
+}
+
+/// **The same bars as JSON** (`market-periods`, design D8 of
+/// `move-watcher-onto-markets`): each bar in the Arrow answer's columns,
+/// decimals as exact strings; the tape's bound, `null` where it holds none of
+/// the venue; and the spans no source covers, as `[from, to)` pairs.
+pub fn as_json(query: &CandleQuery, answer: &Answer) -> serde_json::Value {
+    let metadata = answer.schema.metadata();
+    let bound = metadata
+        .get(&bound_key(&query.venue))
+        .and_then(|b| b.parse::<u64>().ok());
+    let unsourced: serde_json::Value = metadata
+        .get(UNSOURCED)
+        .and_then(|u| serde_json::from_str(u).ok())
+        .unwrap_or_else(|| serde_json::json!([]));
+    let bars: Vec<crate::rows::Row> = answer
+        .batches
+        .iter()
+        .flat_map(crate::rows::rows_json)
+        .collect();
+    serde_json::json!({
+        "venue": query.venue,
+        "ticker": query.ticker,
+        "period": query.period,
+        "from": query.from,
+        "to": query.to,
+        "bound": bound,
+        "unsourced": unsourced,
+        "bars": bars,
+    })
 }
 
 #[cfg(test)]
@@ -349,7 +404,32 @@ mod tests {
             period: period.into(),
             from,
             to,
+            format: None,
         }
+    }
+
+    #[test]
+    fn the_json_form_holds_the_same_bars_as_the_arrow_answer() {
+        let root = tape();
+        let from = T0 - 2 * HOUR;
+        let asked = query("5m", from, T0 + HOUR);
+        let answer = read(root.path(), &asked, 1_000_000).unwrap();
+        let json = as_json(&asked, &answer);
+        let bars = json["bars"].as_array().unwrap();
+        let batch = &answer.batches[0];
+        assert_eq!(bars.len(), batch.num_rows());
+        let closes = column::<Decimal128Array>(batch, "close");
+        let starts = column::<Int64Array>(batch, "start_micros");
+        for (i, bar) in bars.iter().enumerate() {
+            assert_eq!(bar["start_micros"], starts.value(i));
+            assert_eq!(
+                bar["close"].as_str().unwrap(),
+                crate::rows::decimal(closes.value(i), SCALE),
+                "an exact string"
+            );
+        }
+        assert_eq!(json["unsourced"][0][0], from, "the span no source covers");
+        assert!(json["bound"].is_u64() || json["bound"].is_null());
     }
 
     fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> &'a T {

@@ -77,6 +77,7 @@ fn fill(tid: u64, recv: i64) -> Envelope {
             order_id: (1000 + tid).to_string(),
             trade_id: tid.to_string(),
             twap_id: None,
+            liquidated: None,
         }),
     );
     // The venue's time: fills in trade-id order.

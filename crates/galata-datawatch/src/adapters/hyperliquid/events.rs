@@ -96,14 +96,33 @@ struct WireFill {
     builder_fee: Option<Num>,
     tid: u64,
     twap_id: Option<u64>,
+    /// Present on a liquidation fill, naming the user liquidated: on the
+    /// liquidated account's fill and on the liquidator's alike.
+    #[serde(default)]
+    liquidation: Option<WireLiquidation>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireLiquidation {
+    liquidated_user: Option<String>,
 }
 
 /// A fills page to its rows, spot fills among them: a spot pair (`@107`)
 /// keeps the name the venue gives it, where a perp's dex prefix is composed
 /// away.
+///
+/// **Whether a fill liquidated this account** is told by fingerprint, as a
+/// transfer's parties are: a fill's `liquidation` names the user liquidated,
+/// which is this account when its fingerprint is `own`. Without the key it
+/// cannot be told, and is left `None`; a fill without `liquidation` did not
+/// liquidate anyone (`move-watcher-onto-markets`, design D9). The address
+/// goes no further than the comparison.
 pub fn fill_rows(
     venue: &Venue,
     account: &Account,
+    key: Option<&FingerprintKey>,
+    own: &str,
     recv_micros: i64,
     bytes: &[u8],
 ) -> Result<Vec<Envelope>, NormaliseError> {
@@ -146,6 +165,15 @@ pub fn fill_rows(
                     order_id: f.oid.to_string(),
                     trade_id: f.tid.to_string(),
                     twap_id: f.twap_id,
+                    liquidated: match (&f.liquidation, key) {
+                        (None, _) => Some(false),
+                        (Some(l), Some(key)) => Some(
+                            l.liquidated_user
+                                .as_deref()
+                                .is_some_and(|u| fingerprint(key, u) == own),
+                        ),
+                        (Some(_), None) => None,
+                    },
                 }),
             ))
         })
@@ -425,7 +453,7 @@ mod tests {
     #[test]
     fn a_fill_keeps_its_venue_ids_and_drops_its_hash() {
         let page = br#"[{"coin":"xyz:GOLD","px":"4301.5","sz":"0.5","side":"A","time":1790332213000,"startPosition":"1.0","dir":"Close Long","closedPnl":"12.5","hash":"0xdeadbeef","oid":77,"crossed":true,"fee":"0.9","builderFee":"0.0","tid":88,"feeToken":"USDC","twapId":null}]"#;
-        let rows = fill_rows(&venue(), &main(), 5, page).unwrap();
+        let rows = fill_rows(&venue(), &main(), None, "", 5, page).unwrap();
         let Event::Fill(f) = &rows[0].event else {
             panic!()
         };
@@ -441,6 +469,62 @@ mod tests {
         );
     }
 
+    /// Recorded 2026-11-19 from Hyperliquid mainnet by galata-watcher, its
+    /// addresses replaced: six fills liquidating `0x…aa`, and a synthetic
+    /// liquidator's fill naming `0x…bb` (tid 1).
+    const LIQUIDATIONS: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-user-fills-liquidation.json");
+    const LIQUIDATED: &str = "0x00000000000000000000000000000000000000aa";
+
+    fn liquidated(rows: &[Envelope]) -> Vec<(String, Option<bool>)> {
+        rows.iter()
+            .map(|r| match &r.event {
+                Event::Fill(f) => (f.trade_id.clone(), f.liquidated),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fill_says_whether_it_liquidated_this_account_and_never_names_it() {
+        let own = fingerprint(&key(), LIQUIDATED);
+        let rows = fill_rows(&venue(), &main(), Some(&key()), &own, 1, LIQUIDATIONS).unwrap();
+        let marks = liquidated(&rows);
+        assert_eq!(marks.len(), 7);
+        for (tid, mark) in &marks {
+            let want = if tid == "1" { Some(false) } else { Some(true) };
+            assert_eq!(
+                *mark, want,
+                "tid {tid}: the liquidator's own fill names somebody else"
+            );
+        }
+        let json = serde_json::to_string(&rows).unwrap();
+        assert!(!json.contains("0x0000000000"), "no address reaches a row");
+
+        // Another account's fingerprint: none of them liquidated it.
+        let other = fingerprint(&key(), "0x00000000000000000000000000000000000000cc");
+        let rows = fill_rows(&venue(), &main(), Some(&key()), &other, 1, LIQUIDATIONS).unwrap();
+        assert!(liquidated(&rows).iter().all(|(_, m)| *m == Some(false)));
+
+        // Without the key it cannot be told.
+        let rows = fill_rows(&venue(), &main(), None, "", 1, LIQUIDATIONS).unwrap();
+        assert!(liquidated(&rows).iter().all(|(_, m)| m.is_none()));
+    }
+
+    #[test]
+    fn an_ordinary_fill_liquidated_nobody() {
+        let page = br#"[{"coin":"BTC","px":"81213.5","sz":"0.01","side":"B","time":1790332215000,"startPosition":"0.0","dir":"Open Long","closedPnl":"0.0","hash":"0xdeadbeef","oid":9,"crossed":true,"fee":"0.3","builderFee":"0.0","tid":10,"feeToken":"USDC","twapId":null}]"#;
+        let own = fingerprint(&key(), LIQUIDATED);
+        assert_eq!(
+            liquidated(&fill_rows(&venue(), &main(), Some(&key()), &own, 1, page).unwrap()),
+            [("10".to_string(), Some(false))]
+        );
+        assert_eq!(
+            liquidated(&fill_rows(&venue(), &main(), None, "", 1, page).unwrap()),
+            [("10".to_string(), Some(false))]
+        );
+    }
+
     #[test]
     fn a_page_with_a_spot_fill_normalises_whole() {
         // A spot pair is no ticker: one spot fill used to fail its whole page
@@ -449,6 +533,8 @@ mod tests {
         let rows = fill_rows(
             &Venue::new("hyperliquid").unwrap(),
             &Account::new("main").unwrap(),
+            None,
+            "",
             1,
             page,
         )
