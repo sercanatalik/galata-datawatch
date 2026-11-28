@@ -13,7 +13,8 @@ use galata_wire::{Account, Kind, Series, Venue};
 
 use super::ledger::{self, LedgerNormaliser};
 use super::private::{
-    PrivateClient, PrivateError, RATE_REFUSED, answer_error, refused, retry_after_ms,
+    GET_FUNDING_HISTORY, GET_ORDER_HISTORY, GET_TRADE_HISTORY, GET_VALUE_HISTORY, PrivateClient,
+    PrivateError, RATE_REFUSED, answer_error, refused, retry_after_ms,
 };
 use super::sign::SessionKey;
 use crate::capture::Refusal;
@@ -72,9 +73,20 @@ fn signer(account: &ResolvedAccount) -> Result<SessionKey, Refused> {
         .ok_or(Refusal::Unreachable.into())
 }
 
-/// Never asked of this venue: it has no per-dex snapshot, roles, modes,
-/// account-wide reads or history.
+/// Never asked of this venue: it has no per-dex snapshot, roles, modes or
+/// account-wide reads.
 const NOT_ASKED: &str = "not-asked";
+
+/// Rows a history page holds. The owner's whole month was one page of 50
+/// (measured 2026-11-27).
+const HISTORY_PAGE_SIZE: u32 = 100;
+
+/// The most pages one window reads: a window past it is read to here, and
+/// the next window starts from the newest of it.
+const HISTORY_MAX_PAGES: u32 = 20;
+
+/// The period a value history is asked at, in seconds: hourly.
+const VALUE_PERIOD_SECS: i64 = 3_600;
 
 impl AccountVenue for DeriveAccounts {
     fn venue(&self) -> &Venue {
@@ -89,6 +101,10 @@ impl AccountVenue for DeriveAccounts {
         match ask {
             Ask::Snapshot => ledger::SNAPSHOT_CHANNEL,
             Ask::Listing => ledger::LISTING_CHANNEL,
+            Ask::OrderHistory => ledger::ORDER_HISTORY_CHANNEL,
+            Ask::TradeHistory => ledger::TRADE_HISTORY_CHANNEL,
+            Ask::FundingHistory => ledger::FUNDING_HISTORY_CHANNEL,
+            Ask::ValueHistory => ledger::VALUE_HISTORY_CHANNEL,
             _ => NOT_ASKED,
         }
     }
@@ -111,6 +127,77 @@ impl AccountVenue for DeriveAccounts {
 
     fn projected_kinds(&self) -> &'static [Kind] {
         &crate::ledger::project::WALLET_PROJECTED
+    }
+
+    /// The open orders ride the wallet's snapshot: its newest receipt is
+    /// every subaccount's newest set.
+    fn orders_answer(&self) -> Kind {
+        Kind::MarginState
+    }
+
+    /// Orders change after they first appear (Derive states each at its
+    /// latest status), so their window always reaches back; trades, funding
+    /// and value points do not, and are read from the newest held.
+    fn wallet_history_asks(&self) -> &'static [(Ask, Series, bool)] {
+        &[
+            (Ask::OrderHistory, Series::OrderUpdates, false),
+            (Ask::TradeHistory, Series::Fills, true),
+            (Ask::FundingHistory, Series::FundingPayments, true),
+            (Ask::ValueHistory, Series::PnlHistory, true),
+        ]
+    }
+
+    /// Every page of the window: the first says how many there are. Each
+    /// method names its bounds its own way (measured 2026-11-27).
+    async fn wallet_history(
+        &self,
+        master: &ResolvedAccount,
+        ask: Ask,
+        from_micros: i64,
+        now_micros: i64,
+    ) -> Result<Vec<u8>, Refused> {
+        let key = signer(master)?;
+        let (method, from_key, to_key, period) = match ask {
+            Ask::OrderHistory => (GET_ORDER_HISTORY, "from_timestamp", "to_timestamp", None),
+            Ask::TradeHistory => (GET_TRADE_HISTORY, "from_timestamp", "to_timestamp", None),
+            Ask::FundingHistory => (
+                GET_FUNDING_HISTORY,
+                "start_timestamp",
+                "end_timestamp",
+                None,
+            ),
+            Ask::ValueHistory => (
+                GET_VALUE_HISTORY,
+                "start_timestamp",
+                "end_timestamp",
+                Some(VALUE_PERIOD_SECS),
+            ),
+            _ => return Err(Refusal::Unreachable.into()),
+        };
+        let mut pages: Vec<Vec<u8>> = Vec::new();
+        let mut total = 1;
+        let mut page = 1;
+        while page <= total {
+            let mut window = serde_json::Map::new();
+            window.insert(from_key.into(), (from_micros / 1_000).into());
+            window.insert(to_key.into(), (now_micros / 1_000).into());
+            window.insert("page".into(), page.into());
+            window.insert("page_size".into(), HISTORY_PAGE_SIZE.into());
+            if let Some(period) = period {
+                window.insert("period".into(), period.into());
+            }
+            let answer = answered(
+                self.client
+                    .history(method, &key, master.address(), now_micros, window)
+                    .await,
+            )?;
+            if page == 1 {
+                total = ledger::num_pages(&answer).min(HISTORY_MAX_PAGES);
+            }
+            pages.push(answer);
+            page += 1;
+        }
+        Ok(ledger::history_window(period, &pages))
     }
 
     async fn check_key(
@@ -183,7 +270,7 @@ impl AccountVenue for DeriveAccounts {
         &[]
     }
 
-    async fn account_wide(&self, _: Ask, _: &Secret) -> Result<Vec<u8>, Refusal> {
+    async fn account_wide(&self, _: Ask, _: &Secret, _: &[String]) -> Result<Vec<u8>, Refusal> {
         Err(Refusal::Unreachable)
     }
 
@@ -568,7 +655,216 @@ mod tests {
                 ),
                 (GET_SUBACCOUNTS, 200, listing(listed)),
                 (GET_ALL_PORTFOLIOS, 200, portfolios()),
+                (
+                    GET_ORDER_HISTORY,
+                    200,
+                    history(include_bytes!(
+                        "../../../tests/fixtures/derive_xyz/ledger/get_order_history.json"
+                    )),
+                ),
+                (
+                    GET_TRADE_HISTORY,
+                    200,
+                    history(include_bytes!(
+                        "../../../tests/fixtures/derive_xyz/ledger/get_trade_history.json"
+                    )),
+                ),
+                (
+                    GET_FUNDING_HISTORY,
+                    200,
+                    history(include_bytes!(
+                        "../../../tests/fixtures/derive_xyz/ledger/get_funding_history.json"
+                    )),
+                ),
+                (
+                    GET_VALUE_HISTORY,
+                    200,
+                    history(include_bytes!(
+                        "../../../tests/fixtures/derive_xyz/ledger/get_subaccount_value_history.json"
+                    )),
+                ),
             ]
+        }
+
+        /// A history fixture, its subaccounts `1001` and `1002` renamed to the
+        /// first two listed.
+        fn history(fixture: &[u8]) -> String {
+            fn rename(v: &mut serde_json::Value) {
+                match v {
+                    serde_json::Value::Object(map) => {
+                        for (k, x) in map.iter_mut() {
+                            if k == "subaccount_id"
+                                && let Some(id) = x.as_u64()
+                                && (1001..=1003).contains(&id)
+                            {
+                                *x = IDS[(id - 1001) as usize].into();
+                            }
+                            rename(x);
+                        }
+                    }
+                    serde_json::Value::Array(items) => items.iter_mut().for_each(rename),
+                    _ => {}
+                }
+            }
+            let mut answer: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+            rename(&mut answer);
+            answer.to_string()
+        }
+
+        /// The body of the last request of `method`.
+        fn last_body(asked: &Mutex<Vec<String>>, method: &str) -> serde_json::Value {
+            let asked = asked.lock().unwrap();
+            let request = asked.iter().rev().find(|r| r.contains(method)).unwrap();
+            serde_json::from_str(crate::adapters::derive_xyz::local_server::body(request)).unwrap()
+        }
+
+        /// The rows one subaccount's projection holds of a kind.
+        fn projected(tape: &Path, alias: &str, kind: Kind) -> usize {
+            galata_segments::read_segment(&crate::ledger::project::path_of(
+                tape,
+                "derive-xyz",
+                alias,
+                kind,
+            ))
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum()
+        }
+
+        fn folding(
+            run: LedgerRun<DeriveAccounts, TestClock>,
+            dir: &Path,
+        ) -> LedgerRun<DeriveAccounts, TestClock> {
+            run.with_fold(
+                crate::capture::StatusFile::named(&dir.join("status"), "ledger-fold-derive-xyz"),
+                crate::ledger::fold::Tolerances {
+                    position: "0".parse().unwrap(),
+                    relative: "0.00002".parse().unwrap(),
+                },
+            )
+            .with_projection(Some(dir.join("ledger-tape")))
+        }
+
+        #[tokio::test]
+        async fn a_wallets_history_is_four_windows_each_bound_to_its_subaccount() {
+            let dir = tempfile::tempdir().unwrap();
+            let (run, asked, _) = ledger_over(dir.path(), &IDS[..2]).await;
+            let mut run = folding(run, dir.path());
+            run.boot().await.unwrap();
+            let pass = run.events_all().await.unwrap();
+            assert_eq!((pass.reads, pass.missed), (4, 0));
+            run.fold_all().unwrap();
+
+            // Every window starts thirty days back: nothing is held yet.
+            let reach = (NOW - crate::ledger::run::FIRST_REACH_MICROS) / 1_000;
+            assert_eq!(
+                last_body(&asked, GET_ORDER_HISTORY)["from_timestamp"],
+                reach
+            );
+            assert_eq!(
+                last_body(&asked, GET_TRADE_HISTORY)["from_timestamp"],
+                reach
+            );
+            assert_eq!(
+                last_body(&asked, GET_FUNDING_HISTORY)["start_timestamp"],
+                reach
+            );
+            assert_eq!(
+                last_body(&asked, GET_VALUE_HISTORY)["start_timestamp"],
+                reach
+            );
+            assert_eq!(last_body(&asked, GET_VALUE_HISTORY)["period"], 3_600);
+
+            // Each row under its subaccount's alias, and nothing else.
+            let tape = dir.path().join("ledger-tape");
+            assert_eq!(projected(&tape, "owner_s1", Kind::OrderUpdates), 3);
+            assert_eq!(projected(&tape, "owner_s1", Kind::Fills), 2);
+            assert_eq!(projected(&tape, "owner_s1", Kind::FundingPayments), 0);
+            let values: serde_json::Value = serde_json::from_slice(include_bytes!(
+                "../../../tests/fixtures/derive_xyz/ledger/get_subaccount_value_history.json"
+            ))
+            .unwrap();
+            let points = |id: u64| {
+                values["result"]["subaccount_value_history"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|p| p["subaccount_id"] == id)
+                    .count()
+            };
+            assert_eq!(projected(&tape, "owner_s1", Kind::PnlHistory), points(1001));
+            assert_eq!(projected(&tape, "owner_s2", Kind::PnlHistory), points(1002));
+            fn walk(dir: &Path, out: &mut Vec<String>) {
+                for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                    out.push(entry.path().display().to_string());
+                    if entry.path().is_dir() {
+                        walk(&entry.path(), out);
+                    }
+                }
+            }
+            let mut paths = Vec::new();
+            walk(&tape, &mut paths);
+            assert!(
+                paths
+                    .iter()
+                    .all(|p| !p.contains(WALLET) && !p.contains("424242")),
+                "{paths:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_missed_window_is_a_gap_and_the_next_starts_where_the_record_does() {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut run, asked, routes) = ledger_over(dir.path(), &IDS[..2]).await;
+            run.boot().await.unwrap();
+            run.events_all().await.unwrap();
+            let trades: serde_json::Value = serde_json::from_slice(include_bytes!(
+                "../../../tests/fixtures/derive_xyz/ledger/get_trade_history.json"
+            ))
+            .unwrap();
+            let newest = trades["result"]["trades"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["timestamp"].as_i64().unwrap())
+                .max()
+                .unwrap();
+
+            // The trades window fails: a gap for each subaccount, and no
+            // window recorded in its place.
+            let good = history(include_bytes!(
+                "../../../tests/fixtures/derive_xyz/ledger/get_trade_history.json"
+            ));
+            set(
+                &routes,
+                GET_TRADE_HISTORY,
+                r#"{"id":"x","error":{"code":10000,"message":"x"}}"#.into(),
+            );
+            run.clock().advance_secs(300);
+            let pass = run.events_all().await.unwrap();
+            assert_eq!((pass.reads, pass.missed, pass.gaps), (3, 1, 2));
+            let fill_gaps: Vec<_> = gaps(dir.path())
+                .into_iter()
+                .filter(|(_, g)| g.series == galata_wire::Series::Fills)
+                .collect();
+            assert_eq!(fill_gaps.len(), 2);
+
+            // The next window starts at the newest trade the record holds, so
+            // the missed span is read again.
+            set(&routes, GET_TRADE_HISTORY, good);
+            run.clock().advance_secs(300);
+            let pass = run.events_all().await.unwrap();
+            assert_eq!(pass.missed, 0);
+            assert_eq!(
+                last_body(&asked, GET_TRADE_HISTORY)["from_timestamp"],
+                newest
+            );
+            // Orders change after they appear: their window always reaches back.
+            assert_eq!(
+                last_body(&asked, GET_ORDER_HISTORY)["from_timestamp"],
+                (NOW + 600_000_000 - crate::ledger::run::FIRST_REACH_MICROS) / 1_000
+            );
         }
 
         fn set(routes: &Routes, path: &str, body: String) {
@@ -985,6 +1281,27 @@ mod tests {
             assert_eq!(
                 tickers.value(0),
                 held["positions"][0]["instrument_name"].as_str().unwrap()
+            );
+            // Its open order, the newest read's set; the other subaccount
+            // rests none, a file saying so.
+            let resting = |alias: &str| -> usize {
+                galata_segments::read_segment(&path_of(&tape, "derive-xyz", alias, Kind::Orders))
+                    .unwrap()
+                    .iter()
+                    .map(|b| b.num_rows())
+                    .sum()
+            };
+            assert_eq!(resting("owner_s2"), 1);
+            assert_eq!(resting("owner_s1"), 0);
+            let (at, orders) = newest(&tape, "derive-xyz", "owner_s2", Kind::Orders)
+                .unwrap()
+                .unwrap();
+            assert_eq!(at, second);
+            let ids = column(&orders, "order_id");
+            let ids = ids.as_any().downcast_ref::<StringArray>().unwrap();
+            assert_eq!(
+                ids.value(0),
+                held["open_orders"][0]["order_id"].as_str().unwrap()
             );
             let (at, collateral) = newest(&tape, "derive-xyz", "owner_s2", Kind::Collateral)
                 .unwrap()

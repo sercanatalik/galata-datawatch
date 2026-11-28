@@ -23,6 +23,22 @@
 //! the answer holds and no discovery has bound yet has no alias, and no rows
 //! until the next snapshot after it is bound.
 //!
+//! Each subaccount's **open orders ride the same answer** (`open_orders`), so
+//! they cost no request and a missed snapshot is a gap in them too: design D4
+//! of `add-account-vocabulary-orders`.
+//!
+//! # A wallet's history
+//!
+//! Its orders, trades, funding and value history are each read wallet-wide,
+//! **a whole window at a time**: every page of the window, composed in one
+//! payload beside the aliases, as a snapshot is. A window with a page that did
+//! not answer is not recorded at all, so a cursor read from the record never
+//! passes a page nobody read.
+//!
+//! ```text
+//!   {"aliases": {…}, "answer": {"period": <s, value history only>, "pages": [<answer>, …]}}
+//! ```
+//!
 //! **Every figure is read leniently**: a figure that is absent, null or not a
 //! decimal is absent from its row, so a field the venue renames costs that
 //! figure and not the snapshot. The venue's v3 API had renamed fields within
@@ -30,7 +46,10 @@
 
 use std::collections::BTreeMap;
 
-use galata_wire::{Account, Collateral, Envelope, Event, MarginState, Num, PositionState, Venue};
+use galata_wire::{
+    Account, Collateral, Envelope, Event, Fill, FundingPayment, MarginState, Num, Order, PnlPoint,
+    PositionState, Side, Ticker, Venue, millis_to_micros,
+};
 use serde_json::Value;
 
 use crate::ledger::Listed;
@@ -46,6 +65,55 @@ pub const SNAPSHOT_CHANNEL: &str = "private/get_all_portfolios";
 /// The channel a wallet's subaccount listing is recorded under: the method
 /// that answered it, `private/get_subaccounts`.
 pub const LISTING_CHANNEL: &str = "private/get_subaccounts";
+/// The channel a window of a wallet's orders is recorded under.
+pub const ORDER_HISTORY_CHANNEL: &str = "private/get_order_history";
+/// The channel a window of a wallet's trades is recorded under.
+pub const TRADE_HISTORY_CHANNEL: &str = "private/get_trade_history";
+/// The channel a window of a wallet's funding is recorded under.
+pub const FUNDING_HISTORY_CHANNEL: &str = "private/get_funding_history";
+/// The channel a window of a wallet's value history is recorded under.
+pub const VALUE_HISTORY_CHANNEL: &str = "private/get_subaccount_value_history";
+
+/// The list each history method's answer holds its rows under (measured
+/// 2026-11-27).
+fn history_list(channel: &str) -> Option<&'static str> {
+    Some(match channel {
+        ORDER_HISTORY_CHANNEL => "orders",
+        TRADE_HISTORY_CHANNEL => "trades",
+        FUNDING_HISTORY_CHANNEL => "events",
+        VALUE_HISTORY_CHANNEL => "subaccount_value_history",
+        _ => return None,
+    })
+}
+
+/// A window of a wallet's history, every page verbatim, and the period a
+/// value history was asked at, which its answer does not state.
+pub fn history_window(period_secs: Option<i64>, pages: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pages.iter().map(|p| p.len() + 1).sum::<usize>() + 32);
+    out.extend_from_slice(b"{\"period\":");
+    match period_secs {
+        Some(p) => out.extend_from_slice(p.to_string().as_bytes()),
+        None => out.extend_from_slice(b"null"),
+    }
+    out.extend_from_slice(b",\"pages\":[");
+    for (i, page) in pages.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(page);
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
+/// How many pages a history answer says its window holds; one where it says
+/// nothing.
+pub fn num_pages(answer: &[u8]) -> u32 {
+    serde_json::from_slice::<Value>(answer)
+        .ok()
+        .and_then(|v| v["result"]["pagination"]["num_pages"].as_u64())
+        .map_or(1, |n| u32::try_from(n).unwrap_or(u32::MAX).max(1))
+}
 
 /// The subaccounts a `private/get_subaccounts` answer names, each by its
 /// identifier, held so that it cannot print itself. The venue names none.
@@ -104,10 +172,12 @@ pub fn wallet_bytes(
 ) -> Vec<u8> {
     let mut named = serde_json::Map::new();
     if let Ok(parsed) = serde_json::from_slice::<Value>(answer) {
-        for portfolio in portfolios(&parsed) {
-            if let Some(id) = portfolio.get("subaccount_id").and_then(identifier)
-                && let Some(alias) = aliases.get(&fingerprint(key, &id))
-            {
+        // Every subaccount the answer names, wherever: a portfolio, or a row
+        // of a history window.
+        let mut ids = std::collections::BTreeSet::new();
+        subaccount_ids(&parsed, &mut ids);
+        for id in ids {
+            if let Some(alias) = aliases.get(&fingerprint(key, &id)) {
                 named.insert(id, Value::String(alias.to_string()));
             }
         }
@@ -119,6 +189,24 @@ pub fn wallet_bytes(
     out.extend_from_slice(answer);
     out.push(b'}');
     out
+}
+
+/// Every `subaccount_id` an answer holds, at any depth.
+fn subaccount_ids(v: &Value, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, x) in map {
+                if k == "subaccount_id"
+                    && let Some(id) = identifier(x)
+                {
+                    out.insert(id);
+                }
+                subaccount_ids(x, out);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|x| subaccount_ids(x, out)),
+        _ => {}
+    }
 }
 
 /// A figure as the venue states it: a decimal string or number, or absent.
@@ -138,8 +226,47 @@ fn text(v: Option<&Value>) -> Option<String> {
     }
 }
 
+/// One of Derive's orders, as its open orders and its order history state
+/// them alike (measured 2026-11-27), **each field as stated** but one: the
+/// size remaining is `amount` less `filled_amount`, both stated (design D2).
+/// The order's signer and signature are not carried: the signer is a session
+/// key's address. `None` for a row naming no order id, market or side, which
+/// no order lacks.
+pub(crate) fn order_of(o: &Value) -> Option<Order> {
+    let side = match o.get("direction").and_then(Value::as_str)? {
+        "buy" => Side::Bid,
+        "sell" => Side::Ask,
+        _ => return None,
+    };
+    let amount = num(o.get("amount"));
+    let filled = num(o.get("filled_amount"));
+    Some(Order {
+        dex: None,
+        market: text(o.get("instrument_name"))?,
+        side,
+        order_id: text(o.get("order_id"))?,
+        client_id: text(o.get("label")).filter(|l| !l.is_empty()),
+        order_type: text(o.get("order_type")).unwrap_or_default(),
+        trigger_type: text(o.get("trigger_type")),
+        is_trigger: None,
+        position_tpsl: None,
+        size: amount,
+        remaining: amount.zip(filled).map(|(a, f)| a - f),
+        limit_price: num(o.get("limit_price")),
+        trigger_price: num(o.get("trigger_price")),
+        trigger_condition: text(o.get("trigger_price_type")),
+        reduce_only: o.get("reduce_only").and_then(Value::as_bool),
+        time_in_force: text(o.get("time_in_force")),
+        status: text(o.get("order_status")),
+        placed_micros: o
+            .get("creation_timestamp")
+            .and_then(Value::as_i64)
+            .map(millis_to_micros),
+    })
+}
+
 /// The rows of a wallet's snapshot: per bound subaccount, its margin, each
-/// position and each collateral, every figure as stated.
+/// position, each collateral and each open order, every figure as stated.
 pub fn wallet_rows(
     venue: &Venue,
     recv_micros: i64,
@@ -236,6 +363,138 @@ pub fn wallet_rows(
                 pending_interest: f("pending_interest"),
             })));
         }
+        // The subaccount's complete set of open orders at this read.
+        for order in list(portfolio, "open_orders") {
+            if let Some(order) = order_of(order) {
+                out.push(envelope(Event::Order(order)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// One of Derive's trades as a fill, each field as stated. Its transaction
+/// hash is not carried: on a block explorer it resolves to the wallet.
+fn trade_of(t: &Value) -> Option<Fill> {
+    let side = match t.get("direction").and_then(Value::as_str)? {
+        "buy" => Side::Bid,
+        "sell" => Side::Ask,
+        _ => return None,
+    };
+    Some(Fill {
+        dex: None,
+        market: text(t.get("instrument_name"))?,
+        side,
+        price: num(t.get("trade_price"))?,
+        size: num(t.get("trade_amount"))?,
+        start_position: None,
+        direction: None,
+        closed_pnl: num(t.get("realized_pnl")),
+        fee: num(t.get("trade_fee")),
+        fee_token: None,
+        builder_fee: None,
+        crossed: t
+            .get("liquidity_role")
+            .and_then(Value::as_str)
+            .map(|role| role == "taker"),
+        order_id: text(t.get("order_id"))?,
+        trade_id: text(t.get("trade_id"))?,
+        twap_id: None,
+    })
+}
+
+/// One of Derive's funding events, **in its documented shape**: none exists
+/// for the owner's accounts to measure (2026-11-27). The venue states the
+/// amount, signed, and neither the position nor the rate.
+fn funding_of(e: &Value) -> Option<FundingPayment> {
+    Some(FundingPayment {
+        dex: None,
+        ticker: Ticker::new(text(e.get("instrument_name"))?).ok()?,
+        usdc: num(e.get("funding"))?,
+        size: None,
+        rate: None,
+        samples: None,
+    })
+}
+
+/// The rows of a window of a wallet's history, each bound to its
+/// subaccount's alias, at the venue's own time for it: an order's last
+/// update, a trade's or a payment's time, a value point's. A row of a
+/// subaccount no discovery has bound is left for the next window after it is.
+pub fn history_rows(
+    venue: &Venue,
+    channel: &str,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let shape = |detail: &str| NormaliseError::Shape {
+        kind: "history",
+        detail: detail.into(),
+    };
+    let list = history_list(channel).ok_or_else(|| shape("not a history channel"))?;
+    let composed: Value =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let aliases = composed
+        .get("aliases")
+        .and_then(Value::as_object)
+        .ok_or_else(|| shape("a window without its aliases"))?;
+    let window = composed
+        .get("answer")
+        .ok_or_else(|| shape("a window without its answer"))?;
+    let period = window.get("period").and_then(Value::as_i64);
+    let pages = window
+        .get("pages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| shape("a window without its pages"))?;
+    let mut out = Vec::new();
+    for page in pages {
+        let rows = page["result"]
+            .get(list)
+            .and_then(Value::as_array)
+            .ok_or_else(|| shape("a page without its list"))?;
+        for row in rows {
+            let Some(alias) = row
+                .get("subaccount_id")
+                .and_then(identifier)
+                .and_then(|id| aliases.get(&id))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let at = |field: &str| row.get(field).and_then(Value::as_i64).map(millis_to_micros);
+            let (event, at_micros) = match channel {
+                ORDER_HISTORY_CHANNEL => match order_of(row) {
+                    Some(o) => (Event::OrderUpdate(o), at("last_update_timestamp")),
+                    None => continue,
+                },
+                TRADE_HISTORY_CHANNEL => match trade_of(row) {
+                    Some(f) => (Event::Fill(f), at("timestamp")),
+                    None => continue,
+                },
+                FUNDING_HISTORY_CHANNEL => match funding_of(row) {
+                    Some(p) => (Event::FundingPayment(p), at("timestamp")),
+                    None => continue,
+                },
+                _ => (
+                    Event::PnlPoint(PnlPoint {
+                        // Derive names no window: the period asked is it.
+                        window: period.map_or_else(String::new, |p| p.to_string()),
+                        account_value: num(row.get("subaccount_value")),
+                        pnl: None,
+                        initial_margin: num(row.get("initial_margin")),
+                        maintenance_margin: num(row.get("maintenance_margin")),
+                    }),
+                    at("timestamp"),
+                ),
+            };
+            out.push(Envelope::for_account(
+                venue.clone(),
+                Account::new(alias)?,
+                at_micros,
+                recv_micros,
+                event,
+            ));
+        }
     }
     Ok(out)
 }
@@ -277,6 +536,23 @@ impl Normalise for LedgerNormaliser {
                 wallet_rows(&self.venue, payload.recv_micros, &payload.payload)
             }
             LISTING_CHANNEL => Ok(Vec::new()),
+            ORDER_HISTORY_CHANNEL
+            | TRADE_HISTORY_CHANNEL
+            | FUNDING_HISTORY_CHANNEL
+            | VALUE_HISTORY_CHANNEL => {
+                let PayloadAddress::Account(_) = &payload.address else {
+                    return Err(NormaliseError::Shape {
+                        kind: "history",
+                        detail: "a window not addressed to an account".into(),
+                    });
+                };
+                history_rows(
+                    &self.venue,
+                    &payload.channel,
+                    payload.recv_micros,
+                    &payload.payload,
+                )
+            }
             other => Err(NormaliseError::UnknownChannel(other.to_string())),
         }
     }
@@ -539,13 +815,245 @@ mod tests {
             n.map(|n| n.to_string())
         }
 
+        const ORDERS: &[u8] =
+            include_bytes!("../../../tests/fixtures/derive_xyz/ledger/get_order_history.json");
+        const TRADES: &[u8] =
+            include_bytes!("../../../tests/fixtures/derive_xyz/ledger/get_trade_history.json");
+        const FUNDING: &[u8] =
+            include_bytes!("../../../tests/fixtures/derive_xyz/ledger/get_funding_history.json");
+        const VALUES: &[u8] = include_bytes!(
+            "../../../tests/fixtures/derive_xyz/ledger/get_subaccount_value_history.json"
+        );
+
+        /// A one-page window of `channel`, composed as the ledger archives it,
+        /// the fixture's subaccounts bound to `owner_s1` to `_s3`.
+        fn window(channel: &str, period: Option<i64>, page: &[u8]) -> Vec<Envelope> {
+            let aliases = (1..=3)
+                .map(|n| {
+                    (
+                        fingerprint(&key(), &(1000 + n).to_string()),
+                        Account::new(format!("owner_s{n}")).unwrap(),
+                    )
+                })
+                .collect();
+            let composed =
+                wallet_bytes(&key(), &aliases, &history_window(period, &[page.to_vec()]));
+            history_rows(&Venue::new(VENUE).unwrap(), channel, 42, &composed).unwrap()
+        }
+
+        /// No row names an address or a subaccount's identifier.
+        fn names_neither(rows: &[Envelope]) {
+            for row in rows {
+                let json = serde_json::to_string(row).unwrap();
+                assert!(!json.contains("0x"), "{json}");
+                assert!(!json.contains("subaccount"), "{json}");
+                assert!(
+                    !json.contains("tx_hash") && !json.contains("signer"),
+                    "{json}"
+                );
+            }
+        }
+
+        #[test]
+        fn an_order_window_gives_each_order_at_its_latest_status() {
+            let answer: Value = serde_json::from_slice(ORDERS).unwrap();
+            let listed = answer["result"]["orders"].as_array().unwrap();
+            let rows = window(ORDER_HISTORY_CHANNEL, None, ORDERS);
+            assert_eq!(rows.len(), listed.len());
+            for (row, o) in rows.iter().zip(listed) {
+                let Event::OrderUpdate(u) = &row.event else {
+                    panic!("{:?}", row.event)
+                };
+                assert_eq!(u.order_id, o["order_id"].as_str().unwrap());
+                assert_eq!(u.status.as_deref(), o["order_status"].as_str());
+                assert_eq!(
+                    row.at_micros,
+                    Some(millis_to_micros(
+                        o["last_update_timestamp"].as_i64().unwrap()
+                    )),
+                    "the time of its latest status"
+                );
+                let alias = format!("owner_s{}", o["subaccount_id"].as_u64().unwrap() - 1000);
+                assert_eq!(row.account().map(|a| a.to_string()), Some(alias));
+            }
+            names_neither(&rows);
+        }
+
+        #[test]
+        fn a_trade_window_gives_each_fill_as_stated() {
+            let answer: Value = serde_json::from_slice(TRADES).unwrap();
+            let listed = answer["result"]["trades"].as_array().unwrap();
+            let rows = window(TRADE_HISTORY_CHANNEL, None, TRADES);
+            assert_eq!(rows.len(), listed.len());
+            for (row, t) in rows.iter().zip(listed) {
+                let Event::Fill(f) = &row.event else {
+                    panic!("{:?}", row.event)
+                };
+                assert_eq!(f.market, t["instrument_name"].as_str().unwrap());
+                assert_eq!(digits(&Some(f.price)), stated(&t["trade_price"]));
+                assert_eq!(digits(&Some(f.size)), stated(&t["trade_amount"]));
+                assert_eq!(digits(&f.fee), stated(&t["trade_fee"]));
+                assert_eq!(digits(&f.closed_pnl), stated(&t["realized_pnl"]));
+                assert_eq!(f.crossed, Some(t["liquidity_role"] == "taker"));
+                assert_eq!(f.trade_id, t["trade_id"].as_str().unwrap());
+                assert_eq!(f.order_id, t["order_id"].as_str().unwrap());
+                assert_eq!(
+                    row.at_micros,
+                    Some(millis_to_micros(t["timestamp"].as_i64().unwrap()))
+                );
+            }
+            names_neither(&rows);
+        }
+
+        #[test]
+        fn a_funding_window_with_no_event_is_no_row() {
+            assert!(window(FUNDING_HISTORY_CHANNEL, None, FUNDING).is_empty());
+        }
+
+        #[test]
+        fn a_funding_event_in_its_documented_shape_is_a_payment() {
+            // None exists for the owner's accounts to measure: Derive's
+            // documented shape (2026-11-27).
+            let page = br#"{"id":"x","result":{"events":[{"funding":"-0.25","instrument_name":"ETH-PERP","pnl":"1.5","subaccount_id":1002,"timestamp":1790000000000}],"pagination":{"count":1,"num_pages":1}}}"#;
+            let rows = window(FUNDING_HISTORY_CHANNEL, None, page);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].account().map(|a| a.as_str()), Some("owner_s2"));
+            let Event::FundingPayment(p) = &rows[0].event else {
+                panic!("{:?}", rows[0].event)
+            };
+            assert_eq!(p.ticker.as_str(), "ETH-PERP");
+            assert_eq!(p.usdc.to_string(), "-0.25", "signed as the venue signs it");
+            assert_eq!((p.size, p.rate), (None, None), "neither is stated");
+        }
+
+        #[test]
+        fn a_value_window_gives_each_subaccounts_points_under_the_period() {
+            let answer: Value = serde_json::from_slice(VALUES).unwrap();
+            let listed = answer["result"]["subaccount_value_history"]
+                .as_array()
+                .unwrap();
+            let rows = window(VALUE_HISTORY_CHANNEL, Some(3_600), VALUES);
+            assert_eq!(rows.len(), listed.len());
+            for (row, v) in rows.iter().zip(listed) {
+                let Event::PnlPoint(p) = &row.event else {
+                    panic!("{:?}", row.event)
+                };
+                assert_eq!(p.window, "3600");
+                assert_eq!(digits(&p.account_value), stated(&v["subaccount_value"]));
+                assert_eq!(digits(&p.initial_margin), stated(&v["initial_margin"]));
+                assert_eq!(
+                    digits(&p.maintenance_margin),
+                    stated(&v["maintenance_margin"])
+                );
+                assert_eq!(p.pnl, None, "Derive states no PnL; none is computed");
+            }
+            let subaccounts: std::collections::BTreeSet<String> = rows
+                .iter()
+                .filter_map(|r| r.account().map(|a| a.to_string()))
+                .collect();
+            assert_eq!(subaccounts.len(), 2, "both subaccounts the window holds");
+            names_neither(&rows);
+        }
+
+        #[test]
+        fn a_window_of_an_unbound_subaccount_has_no_rows_and_a_bare_page_is_refused() {
+            let composed = wallet_bytes(
+                &key(),
+                &BTreeMap::new(),
+                &history_window(None, &[TRADES.to_vec()]),
+            );
+            let venue = Venue::new(VENUE).unwrap();
+            assert!(
+                history_rows(&venue, TRADE_HISTORY_CHANNEL, 1, &composed)
+                    .unwrap()
+                    .is_empty()
+            );
+            let bare = wallet_bytes(
+                &key(),
+                &BTreeMap::new(),
+                &history_window(None, &[b"{}".to_vec()]),
+            );
+            assert!(history_rows(&venue, TRADE_HISTORY_CHANNEL, 1, &bare).is_err());
+        }
+
+        #[test]
+        fn a_page_says_how_many_its_window_holds() {
+            assert_eq!(num_pages(TRADES), 1);
+            assert_eq!(
+                num_pages(br#"{"result":{"trades":[],"pagination":{"count":250,"num_pages":3}}}"#),
+                3
+            );
+            assert_eq!(num_pages(b"{}"), 1, "one where it says nothing");
+        }
+
+        #[test]
+        fn a_subaccounts_resting_order_comes_from_the_same_answer() {
+            let answer: Value = serde_json::from_slice(PORTFOLIOS).unwrap();
+            let resting = &answer["result"][2]["open_orders"][0];
+            let rows = read(PORTFOLIOS);
+            let orders: Vec<&Envelope> = rows
+                .iter()
+                .filter(|e| matches!(e.event, Event::Order(_)))
+                .collect();
+            assert_eq!(orders.len(), 1, "the one open order the answer holds");
+            let row = orders[0];
+            assert_eq!(row.account().map(|a| a.as_str()), Some("owner_s3"));
+            assert_eq!(row.recv_micros, 42, "the snapshot's own read");
+            let Event::Order(o) = &row.event else {
+                unreachable!()
+            };
+            assert_eq!(o.market, resting["instrument_name"].as_str().unwrap());
+            assert_eq!(o.side, galata_wire::Side::Ask, "a sell");
+            assert_eq!(o.order_id, resting["order_id"].as_str().unwrap());
+            assert_eq!(o.order_type, "limit");
+            assert_eq!(o.status.as_deref(), Some("open"));
+            assert_eq!(o.time_in_force.as_deref(), Some("gtc"));
+            assert_eq!(digits(&o.size), stated(&resting["amount"]));
+            assert_eq!(digits(&o.limit_price), stated(&resting["limit_price"]));
+            let amount: Num = resting["amount"].as_str().unwrap().parse().unwrap();
+            let filled: Num = resting["filled_amount"].as_str().unwrap().parse().unwrap();
+            assert_eq!(o.remaining, Some(amount - filled));
+            assert_eq!(
+                o.placed_micros,
+                Some(millis_to_micros(
+                    resting["creation_timestamp"].as_i64().unwrap()
+                ))
+            );
+            assert_eq!(o.client_id, None, "an empty label is none");
+            // No address in the row: the order's signer is a session key's.
+            let json = serde_json::to_string(row).unwrap();
+            assert!(!json.contains("0x"), "{json}");
+            assert!(!json.contains("signer") && !json.contains("signature"));
+        }
+
+        #[test]
+        fn an_order_without_an_id_market_or_side_is_no_order() {
+            let whole = serde_json::json!({
+                "order_id": "a1", "instrument_name": "ETH-PERP", "direction": "buy",
+                "order_type": "limit", "amount": "1", "filled_amount": "0.25"
+            });
+            assert_eq!(
+                order_of(&whole).unwrap().remaining,
+                Some("0.75".parse().unwrap())
+            );
+            for missing in ["order_id", "instrument_name", "direction"] {
+                let mut row = whole.clone();
+                row.as_object_mut().unwrap().remove(missing);
+                assert!(order_of(&row).is_none(), "{missing}");
+            }
+        }
+
         #[test]
         fn every_figure_is_carried_digit_for_digit() {
             let answer: Value = serde_json::from_slice(PORTFOLIOS).unwrap();
             let held = &answer["result"][2];
             let rows = read(PORTFOLIOS);
             let events = of(&rows, "owner_s3");
-            assert_eq!(events.len(), 3, "margin, one position, one collateral");
+            assert_eq!(
+                events.len(),
+                4,
+                "margin, one position, one collateral, one open order"
+            );
 
             let Event::MarginState(m) = &events[0] else {
                 panic!("{:?}", events[0])
@@ -646,7 +1154,7 @@ mod tests {
             held["positions"][0]["delta"] = Value::String("not a number".into());
             let rows = read(answer.to_string().as_bytes());
             let events = of(&rows, "owner_s3");
-            assert_eq!(events.len(), 3, "the snapshot survives");
+            assert_eq!(events.len(), 4, "the snapshot survives, its open order too");
             let (Event::MarginState(m), Event::PositionState(p)) = (&events[0], &events[1]) else {
                 panic!("{events:?}")
             };
@@ -666,7 +1174,7 @@ mod tests {
                 rows.iter()
                     .all(|e| e.account().unwrap().as_str() == "owner_s3")
             );
-            assert_eq!(rows.len(), 3);
+            assert_eq!(rows.len(), 4, "margin, position, collateral, open order");
 
             assert!(wallet_rows(&Venue::new(VENUE).unwrap(), 0, PORTFOLIOS).is_err());
         }

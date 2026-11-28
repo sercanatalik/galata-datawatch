@@ -354,7 +354,8 @@ instruments = [
 #   venue = "hyperliquid"
 #   # The variable holding the account's address: never the address.
 #   address_var = "GALATA_LEDGER_HL_MAIN"
-#   # The dexes to read margin and positions on; "" is the main one.
+#   # The dexes to read margin, positions and open orders on; "" is the
+#   # main one.
 #   dexes = ["", "xyz"]
 #
 #   # A Derive wallet, behind the `derive-xyz` feature (README, "Derive: a

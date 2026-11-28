@@ -214,6 +214,11 @@ pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
             balances: 2.0,
             borrow_lend: 20.0,
             reference: 20.0,
+            // `frontendOpenOrders` per dex each snapshot; `historicalOrders`
+            // and `portfolio` each events pass: 20 each, as other documented
+            // info requests (`add-account-vocabulary-orders`, design D3).
+            open_orders: 20.0,
+            history: 40.0,
             // Per dex, by address alone, unauthenticated.
             has_dexes: true,
             reads_with_key: false,
@@ -232,12 +237,18 @@ pub fn ledger_cost(venue: &str) -> Option<crate::config::LedgerCost> {
             // lookup, `public/get_wallets_from_session_key`, is unsigned and
             // names no wallet, so it is not the wallet's to pay for.
             discovery: 2.0,
-            // No mode, no account-wide reads, no history.
+            // No mode, no account-wide reads, no paged events walk.
             mode: 0.0,
             events: 0.0,
             balances: 0.0,
             borrow_lend: 0.0,
             reference: 0.0,
+            // The open orders ride the snapshot's answer (design D4 of
+            // `add-account-vocabulary-orders`); the order, trade, funding and
+            // value history are four wallet-wide windows each events pass,
+            // one page each as measured on 2026-11-27.
+            open_orders: 0.0,
+            history: 4.0,
             // A wallet read whole, every request signed by a session key.
             has_dexes: false,
             reads_with_key: true,

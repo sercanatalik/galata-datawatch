@@ -98,7 +98,9 @@ struct WireFill {
     twap_id: Option<u64>,
 }
 
-/// A fills page to its rows.
+/// A fills page to its rows, spot fills among them: a spot pair (`@107`)
+/// keeps the name the venue gives it, where a perp's dex prefix is composed
+/// away.
 pub fn fill_rows(
     venue: &Venue,
     account: &Account,
@@ -109,7 +111,10 @@ pub fn fill_rows(
     fills
         .into_iter()
         .map(|f| {
-            let (dex, ticker) = dex_and_ticker(&f.coin)?;
+            let (dex, market) = match f.coin.split_once(':') {
+                Some((dex, bare)) => (Some(dex.to_string()), bare.to_string()),
+                None => (None, f.coin),
+            };
             let side = match f.side.as_str() {
                 "B" => Side::Bid,
                 "A" => Side::Ask,
@@ -127,7 +132,7 @@ pub fn fill_rows(
                 recv_micros,
                 Event::Fill(Fill {
                     dex,
-                    ticker,
+                    market,
                     side,
                     price: f.px,
                     size: f.sz,
@@ -138,8 +143,8 @@ pub fn fill_rows(
                     fee_token: f.fee_token,
                     builder_fee: f.builder_fee,
                     crossed: f.crossed,
-                    order_id: f.oid,
-                    trade_id: f.tid,
+                    order_id: f.oid.to_string(),
+                    trade_id: f.tid.to_string(),
                     twap_id: f.twap_id,
                 }),
             ))
@@ -183,8 +188,8 @@ pub fn funding_rows(
                     dex,
                     ticker,
                     usdc: r.delta.usdc,
-                    size: r.delta.szi,
-                    rate: r.delta.funding_rate,
+                    size: Some(r.delta.szi),
+                    rate: Some(r.delta.funding_rate),
                     samples: r.delta.n_samples,
                 }),
             ))
@@ -424,15 +429,44 @@ mod tests {
         let Event::Fill(f) = &rows[0].event else {
             panic!()
         };
-        assert_eq!((f.trade_id, f.order_id), (88, 77));
+        assert_eq!((f.trade_id.as_str(), f.order_id.as_str()), ("88", "77"));
         assert_eq!(f.dex.as_deref(), Some("xyz"));
-        assert_eq!(f.ticker.as_str(), "GOLD");
+        assert_eq!(f.market, "GOLD");
         assert_eq!(f.side, Side::Ask);
         assert_eq!(rows[0].at_micros, Some(1_790_332_213_000_000));
         assert!(
             !serde_json::to_string(&rows[0])
                 .unwrap()
                 .contains("deadbeef")
+        );
+    }
+
+    #[test]
+    fn a_page_with_a_spot_fill_normalises_whole() {
+        // A spot pair is no ticker: one spot fill used to fail its whole page
+        // (90 of 335 recorded pages, measured 2026-11-28).
+        let page = br#"[{"coin":"@107","px":"25.1","sz":"2.0","side":"B","time":1790332213000,"startPosition":"0.0","dir":"Buy","closedPnl":"0.0","hash":"0xdeadbeef","oid":5,"crossed":true,"fee":"0.01","builderFee":"0.0","tid":6,"feeToken":"HYPE","twapId":null},{"coin":"PURR/USDC","px":"0.2","sz":"10.0","side":"A","time":1790332214000,"startPosition":"10.0","dir":"Sell","closedPnl":"0.1","hash":"0xdeadbeef","oid":7,"crossed":false,"fee":"0.0","builderFee":"0.0","tid":8,"feeToken":"USDC","twapId":null},{"coin":"BTC","px":"81213.5","sz":"0.01","side":"B","time":1790332215000,"startPosition":"0.0","dir":"Open Long","closedPnl":"0.0","hash":"0xdeadbeef","oid":9,"crossed":true,"fee":"0.3","builderFee":"0.0","tid":10,"feeToken":"USDC","twapId":null}]"#;
+        let rows = fill_rows(
+            &Venue::new("hyperliquid").unwrap(),
+            &Account::new("main").unwrap(),
+            1,
+            page,
+        )
+        .unwrap();
+        let markets: Vec<(Option<String>, String)> = rows
+            .iter()
+            .map(|r| match &r.event {
+                Event::Fill(f) => (f.dex.clone(), f.market.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            markets,
+            [
+                (None, "@107".to_string()),
+                (None, "PURR/USDC".to_string()),
+                (None, "BTC".to_string())
+            ]
         );
     }
 

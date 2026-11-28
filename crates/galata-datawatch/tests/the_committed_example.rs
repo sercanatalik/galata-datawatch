@@ -156,9 +156,11 @@ fn a_derive_wallet_loads_at_the_deployments_cadences() {
         &LedgerResolver { without: None },
     )
     .unwrap();
-    // One request a snapshot and two a discovery: 0.4 a minute, against 75.
+    // One request a snapshot, two a discovery and four history windows an
+    // events pass: 1.2 a minute, against 75.
     let cost = adapters::ledger_cost("derive-xyz").unwrap();
     assert_eq!((cost.snapshot, cost.discovery), (1.0, 2.0));
+    assert_eq!((cost.open_orders, cost.history), (0.0, 4.0));
     assert!(cost.reads_with_key && !cost.has_dexes);
 }
 

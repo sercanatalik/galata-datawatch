@@ -58,6 +58,15 @@ pub enum Series {
     /// A wallet's subaccounts, read whole each snapshot by the ledger: their
     /// margin, with their positions and collateral riding along.
     MarginState,
+    /// An account's open orders, read whole at each snapshot by the ledger
+    /// where the venue answers them apart (Hyperliquid). Where they ride
+    /// another answer (Derive's portfolio), a gap there is a gap in them.
+    Orders,
+    /// An account's order history, read by the ledger at the events cadence.
+    OrderUpdates,
+    /// The account-value and PnL history the venue states, read by the ledger
+    /// at the events cadence.
+    PnlHistory,
 }
 
 /// A dataset a store writes, and the last token of a market-data subject.
@@ -143,6 +152,12 @@ pub enum Kind {
     PositionState,
     /// One collateral asset of a subaccount, riding a margin-state read.
     Collateral,
+    /// [`Series::Orders`]: an account's open orders, a complete set per read.
+    Orders,
+    /// [`Series::OrderUpdates`]: each change of an order's status, once.
+    OrderUpdates,
+    /// [`Series::PnlHistory`]: the venue's account-value and PnL points, once.
+    PnlHistory,
 }
 
 /// The partition level a dataset sits under, above `date=`.
@@ -175,7 +190,7 @@ impl Addressing {
 impl Series {
     /// Every series, for a loader that must refuse an unknown one by listing
     /// the known ones.
-    pub const ALL: [Series; 14] = [
+    pub const ALL: [Series; 17] = [
         Series::Trades,
         Series::Book,
         Series::Candles,
@@ -190,6 +205,9 @@ impl Series {
         Series::Balances,
         Series::BorrowLend,
         Series::MarginState,
+        Series::Orders,
+        Series::OrderUpdates,
+        Series::PnlHistory,
     ];
 
     /// The discriminator written to disk and to a subject.
@@ -209,6 +227,9 @@ impl Series {
             Series::Balances => "balances",
             Series::BorrowLend => "borrow_lend",
             Series::MarginState => "margin_state",
+            Series::Orders => "orders",
+            Series::OrderUpdates => "order_updates",
+            Series::PnlHistory => "pnl_history",
         }
     }
 
@@ -229,6 +250,9 @@ impl Series {
             Series::Balances => Kind::Balances,
             Series::BorrowLend => Kind::BorrowLend,
             Series::MarginState => Kind::MarginState,
+            Series::Orders => Kind::Orders,
+            Series::OrderUpdates => Kind::OrderUpdates,
+            Series::PnlHistory => Kind::PnlHistory,
         }
     }
 }
@@ -264,7 +288,7 @@ impl Kind {
     /// variant without extending this array is a length mismatch and the build
     /// fails — which is the check a consumer cannot have, offered to it as a
     /// list it can iterate.
-    pub const ALL: [Kind; 29] = [
+    pub const ALL: [Kind; 32] = [
         Kind::Trades,
         Kind::Book,
         Kind::Candles,
@@ -294,6 +318,9 @@ impl Kind {
         Kind::MarginState,
         Kind::PositionState,
         Kind::Collateral,
+        Kind::Orders,
+        Kind::OrderUpdates,
+        Kind::PnlHistory,
     ];
 
     /// How this dataset is addressed above `date=`.
@@ -329,7 +356,10 @@ impl Kind {
             | Kind::TokenMargin
             | Kind::MarginState
             | Kind::PositionState
-            | Kind::Collateral => Addressing::Account,
+            | Kind::Collateral
+            | Kind::Orders
+            | Kind::OrderUpdates
+            | Kind::PnlHistory => Addressing::Account,
             Kind::Signals => Addressing::Market,
         }
     }
@@ -366,6 +396,9 @@ impl Kind {
             Kind::MarginState => "margin_state",
             Kind::PositionState => "position_state",
             Kind::Collateral => "collateral",
+            Kind::Orders => "orders",
+            Kind::OrderUpdates => "order_updates",
+            Kind::PnlHistory => "pnl_history",
         }
     }
 }
@@ -402,7 +435,7 @@ mod tests {
         for kind in Kind::ALL {
             let _ = kind.addressing().key();
         }
-        assert_eq!(Kind::ALL.len(), 29);
+        assert_eq!(Kind::ALL.len(), 32);
     }
 
     #[test]
@@ -486,6 +519,9 @@ mod tests {
             Kind::MarginState,
             Kind::PositionState,
             Kind::Collateral,
+            Kind::Orders,
+            Kind::OrderUpdates,
+            Kind::PnlHistory,
         ] {
             assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
         }

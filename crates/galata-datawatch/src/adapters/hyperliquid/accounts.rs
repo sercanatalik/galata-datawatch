@@ -61,6 +61,11 @@ impl AccountVenue for HyperliquidAccounts {
             Ask::Mode => ledger::MODE_CHANNEL,
             Ask::Balances => ledger::BALANCES_CHANNEL,
             Ask::BorrowLend => ledger::BORROW_LEND_CHANNEL,
+            Ask::OpenOrders => ledger::OPEN_ORDERS_CHANNEL,
+            Ask::OrderHistory => ledger::ORDER_HISTORY_CHANNEL,
+            Ask::Portfolio => ledger::PORTFOLIO_CHANNEL,
+            // A wallet's history, which only a venue read by wallet asks.
+            Ask::TradeHistory | Ask::FundingHistory | Ask::ValueHistory => "not-asked",
         }
     }
 
@@ -68,13 +73,45 @@ impl AccountVenue for HyperliquidAccounts {
         &[
             (Ask::Balances, Series::Balances),
             (Ask::BorrowLend, Series::BorrowLend),
+            (Ask::OpenOrders, Series::Orders),
         ]
     }
 
-    async fn account_wide(&self, ask: Ask, address: &Secret) -> Result<Vec<u8>, Refusal> {
+    fn history_asks(&self) -> &'static [(Ask, Series)] {
+        &[
+            (Ask::OrderHistory, Series::OrderUpdates),
+            (Ask::Portfolio, Series::PnlHistory),
+        ]
+    }
+
+    async fn account_wide(
+        &self,
+        ask: Ask,
+        address: &Secret,
+        dexes: &[String],
+    ) -> Result<Vec<u8>, Refusal> {
         match ask {
             Ask::Balances => self.client.spot_clearinghouse_state(address).await,
             Ask::BorrowLend => self.client.borrow_lend_user_state(address).await,
+            // Every dex in one answer, measured 2026-11-27.
+            Ask::OrderHistory => self.client.historical_orders(address).await,
+            Ask::Portfolio => self.client.portfolio(address).await,
+            // One request per declared dex, composed into one complete set. A
+            // dex that does not answer fails the whole read, so no set is ever
+            // recorded missing a dex (design D3 of
+            // `add-account-vocabulary-orders`).
+            Ask::OpenOrders => {
+                let mut answers = Vec::with_capacity(dexes.len());
+                for dex in dexes {
+                    let answer = self
+                        .client
+                        .frontend_open_orders(address, dex)
+                        .await
+                        .map_err(refused)?;
+                    answers.push((dex.as_str(), answer));
+                }
+                return Ok(ledger::open_orders_bytes(&answers));
+            }
             // Not an account-wide read: the loop never asks one.
             _ => return Err(Refusal::Unreachable),
         }
@@ -86,6 +123,11 @@ impl AccountVenue for HyperliquidAccounts {
     }
 
     fn compose_wide(&self, ask: Ask, reference: Option<&[u8]>, answer: &[u8]) -> Vec<u8> {
+        // Composed already where composed, and naming no token index: only
+        // the spot and borrowing answers travel with the reference's names.
+        if !matches!(ask, Ask::Balances | Ask::BorrowLend) {
+            return answer.to_vec();
+        }
         let key = self.channel(ask);
         ledger::wide_bytes(key, ledger::names_for(reference, answer).as_ref(), answer)
     }

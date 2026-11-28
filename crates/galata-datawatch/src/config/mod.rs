@@ -634,6 +634,12 @@ pub struct LedgerCost {
     /// One read of the reference data that names the balances' tokens, once
     /// per discovery run for the venue, not per account.
     pub reference: f64,
+    /// One read of an account's open orders on one dex, each snapshot. Zero
+    /// where they ride the snapshot's own answer.
+    pub open_orders: f64,
+    /// The whole reads made of an account at the events cadence (its order
+    /// history and PnL history), together, before any page past the first.
+    pub history: f64,
 }
 
 impl Ledger {
@@ -653,7 +659,7 @@ impl Ledger {
             .values()
             .filter(|a| a.venue == venue)
             .map(|a| {
-                a.dexes.len().max(1) as f64 * cost.snapshot * per_snapshot
+                a.dexes.len().max(1) as f64 * (cost.snapshot + cost.open_orders) * per_snapshot
                     // Account-wide: once per account, whatever its dexes.
                     + (cost.balances + cost.borrow_lend) * per_snapshot
                     + (cost.discovery + cost.mode) * per_discovery
@@ -661,6 +667,8 @@ impl Ledger {
                     // Their per-item weight is paid at run time and paced
                     // within the share, as discovered accounts are.
                     + 3.0 * cost.events * per_events
+                    // Read whole, at the same cadence.
+                    + cost.history * per_events
             })
             .sum();
         // The reference is the venue's, read once a run for all its accounts.
@@ -1425,6 +1433,8 @@ mod tests {
                     balances: 2.0,
                     borrow_lend: 20.0,
                     reference: 20.0,
+                    open_orders: 20.0,
+                    history: 40.0,
                     has_dexes: true,
                     reads_with_key: false,
                 }),
@@ -1438,6 +1448,8 @@ mod tests {
                     balances: 0.0,
                     borrow_lend: 0.0,
                     reference: 0.0,
+                    open_orders: 0.0,
+                    history: 4.0,
                     has_dexes: false,
                     reads_with_key: true,
                 }),
@@ -1590,7 +1602,7 @@ instruments = [
     const LEDGER: &str = r#"
 [ledger]
 root = "var/ledger"
-snapshot_secs = 10
+snapshot_secs = 30
 discover_secs = 600
 events_secs = 300
 fold_position_tolerance = 0.0
@@ -1693,7 +1705,7 @@ dexes = ["", "xyz"]
         // for events every second is 3 x 20 x 60 = 3,600 a minute alone.
         let err = with_ledger(
             &LEDGER
-                .replace("snapshot_secs = 10", "snapshot_secs = 300")
+                .replace("snapshot_secs = 30", "snapshot_secs = 300")
                 .replace("events_secs = 300", "events_secs = 1"),
         )
         .unwrap_err()
@@ -1702,7 +1714,7 @@ dexes = ["", "xyz"]
             err.contains("events") || err.contains("weight a minute"),
             "{err}"
         );
-        assert!(with_ledger(&LEDGER.replace("snapshot_secs = 10", "snapshot_secs = 300")).is_ok());
+        assert!(with_ledger(&LEDGER.replace("snapshot_secs = 30", "snapshot_secs = 300")).is_ok());
     }
 
     #[test]
@@ -1738,7 +1750,7 @@ dexes = ["", "xyz"]
 
     #[test]
     fn a_missing_snapshot_cadence_is_refused() {
-        let err = with_ledger(&LEDGER.replace("snapshot_secs = 10\n", ""))
+        let err = with_ledger(&LEDGER.replace("snapshot_secs = 30\n", ""))
             .unwrap_err()
             .to_string();
         assert!(err.contains("snapshot_secs"), "{err}");
@@ -1761,19 +1773,20 @@ dexes = ["", "xyz"]
 
     #[test]
     fn a_cadence_the_share_cannot_afford_is_refused_with_both_figures() {
-        // Two dexes every second at weight 2 is 240 a minute for snapshots;
-        // the account's spot (2) and borrow and lend (20) reads every second
-        // are 1,320; one master's discovery and mode every 600 s is 4; three
-        // events requests every 300 s is 12; the venue's spotMeta every 600 s
-        // is 2. 1,578 against the 1% share's 12.
+        // Two dexes every second at weight 2 is 240 a minute for snapshots,
+        // and their open orders at 20 another 2,400; the account's spot (2)
+        // and borrow and lend (20) reads every second are 1,320; one master's
+        // discovery and mode every 600 s is 4; three events requests every
+        // 300 s is 12, and the order and PnL history 8; the venue's spotMeta
+        // every 600 s is 2. 3,986 against the 1% share's 12.
         let err = with_ledger(
             &LEDGER
-                .replace("snapshot_secs = 10", "snapshot_secs = 1")
+                .replace("snapshot_secs = 30", "snapshot_secs = 1")
                 .replace("ledger_share = 0.25", "ledger_share = 0.01"),
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("1578.0"), "the cost: {err}");
+        assert!(err.contains("3986.0"), "the cost: {err}");
         assert!(err.contains("12.0"), "the allowance: {err}");
     }
 
@@ -1910,16 +1923,38 @@ market = "mainnet"
 
     #[test]
     fn the_balance_reads_count_against_the_share() {
-        // At a 10 s snapshot the declared set costs 40 a minute without the
-        // account-wide reads (24 snapshots, 4 discovery, 12 events) and 174
-        // with them (+132 spot and borrow, +2 spotMeta): inside a 25% share,
-        // and over a 10% one, which only the balance reads take it past.
+        // At a 30 s snapshot the declared set costs 32 a minute without the
+        // account-wide reads (8 snapshots, 4 discovery, 12 events, 8 order and
+        // PnL history) and 158 with them (+44 spot and borrow, +80 open orders
+        // on two dexes, +2 spotMeta): inside a 25% share, and over a 10% one,
+        // which only the account-wide reads take it past.
         assert!(with_ledger(LEDGER).is_ok());
         let err = with_ledger(&LEDGER.replace("ledger_share = 0.25", "ledger_share = 0.1"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("174.0"), "the cost: {err}");
+        assert!(err.contains("158.0"), "the cost: {err}");
         assert!(err.contains("120.0"), "the allowance: {err}");
+    }
+
+    #[test]
+    fn the_order_and_pnl_reads_count_against_the_share_at_the_deployments_cadences() {
+        // Snapshots every 300 s on two dexes, discovery every 600 s, events
+        // every 300 s: 8 a minute for open orders (2 dexes x 20 x 0.2) and 8
+        // for the order and PnL history (40 x 0.2) join the 23.2 the ledger
+        // cost before them, 39.2 in all, inside the 300 a 25% share allows.
+        let at = LEDGER.replace("snapshot_secs = 30", "snapshot_secs = 300");
+        let config = with_ledger(&at).unwrap();
+        let ledger = config.ledger.as_ref().unwrap();
+        let cost = Fake.ledger_cost("hyperliquid").unwrap();
+        let spent = ledger.declared_cost("hyperliquid", &cost);
+        assert!((spent - 39.2).abs() < 1e-9, "{spent}");
+        let before = LedgerCost {
+            open_orders: 0.0,
+            history: 0.0,
+            ..cost
+        };
+        assert!((ledger.declared_cost("hyperliquid", &before) - 23.2).abs() < 1e-9);
+        assert!(spent <= ledger.ledger_share * cost.budget_per_minute);
     }
 
     #[test]

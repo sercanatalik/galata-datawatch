@@ -246,6 +246,44 @@ impl Client {
         .await
     }
 
+    /// An account's open orders on one dex, with their trigger details, raw.
+    /// `dex` is empty for the main one. Weighs 20.
+    #[cfg(feature = "ledger")]
+    pub async fn frontend_open_orders(
+        &self,
+        address: &crate::config::Secret,
+        dex: &str,
+    ) -> Result<Vec<u8>, FetchError> {
+        let mut body = serde_json::json!({
+            "type": "frontendOpenOrders",
+            "user": address.expose(),
+        });
+        // As `clearinghouseState`: the main dex is asked without the key.
+        if !dex.is_empty() {
+            body["dex"] = serde_json::Value::String(dex.to_string());
+        }
+        self.post(&body).await
+    }
+
+    /// An account's most recent orders, one row per change of status, raw:
+    /// every dex in one answer, as measured on 2026-11-27. Weighs 20.
+    #[cfg(feature = "ledger")]
+    pub async fn historical_orders(
+        &self,
+        address: &crate::config::Secret,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({ "type": "historicalOrders", "user": address.expose() }))
+            .await
+    }
+
+    /// An account's value and PnL history in each window the venue states,
+    /// raw. Weighs 20.
+    #[cfg(feature = "ledger")]
+    pub async fn portfolio(&self, address: &crate::config::Secret) -> Result<Vec<u8>, FetchError> {
+        self.post(&serde_json::json!({ "type": "portfolio", "user": address.expose() }))
+            .await
+    }
+
     /// The spot tokens' reference data, raw: what names a token index in the
     /// two answers above. Asks about no account. Weighs 20.
     #[cfg(feature = "ledger")]

@@ -11,6 +11,10 @@
 //!                     `portfolio_margin` row and a `token_margin` row per token
 //!   borrow     { names, borrowLendUserState }
 //!                 ──▶ a `borrow_lend` row per token + one `lend_health` row
+//!   orders     { dexes: [{ dex, frontendOpenOrders }, …] }
+//!                 ──▶ an `orders` row per resting order, every dex in one set
+//!   history    historicalOrders ──▶ an `order_updates` row per status change
+//!   portfolio  portfolio     ──▶ a `pnl_history` row per window and time
 //! ```
 //!
 //! **A snapshot is recorded as one payload holding two answers**, each byte for
@@ -27,8 +31,8 @@
 //! `null`, not `[]`, when there are none.
 
 use galata_wire::{
-    Account, AccountMode, Envelope, Event, Margin, Num, Position, Ticker, Token, Venue,
-    millis_to_micros,
+    Account, AccountMode, Envelope, Event, Margin, Num, Order, Position, Side, Ticker, Token,
+    Venue, millis_to_micros,
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -49,6 +53,239 @@ pub const MODE_CHANNEL: &str = "userAbstraction";
 pub const BALANCES_CHANNEL: &str = "spotClearinghouseState";
 /// The channel a composed borrow and lend answer is recorded under.
 pub const BORROW_LEND_CHANNEL: &str = "borrowLendUserState";
+/// The channel an account's open orders, every dex composed, are recorded
+/// under.
+pub const OPEN_ORDERS_CHANNEL: &str = "frontendOpenOrders";
+/// The channel an account's order history is recorded under, verbatim.
+pub const ORDER_HISTORY_CHANNEL: &str = "historicalOrders";
+/// The channel an account's value and PnL history is recorded under,
+/// verbatim.
+pub const PORTFOLIO_CHANNEL: &str = "portfolio";
+
+/// Compose an account's open orders: **every declared dex's answer verbatim**,
+/// one payload, so that it is recorded only as a complete set. A dex that did
+/// not answer leaves no payload at all, never a set missing that dex.
+pub fn open_orders_bytes(answers: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(answers.iter().map(|(_, a)| a.len() + 48).sum::<usize>() + 12);
+    out.extend_from_slice(b"{\"dexes\":[");
+    for (i, (dex, answer)) in answers.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"dex\":");
+        out.extend_from_slice(serde_json::to_string(dex).unwrap_or_default().as_bytes());
+        out.extend_from_slice(b",\"frontendOpenOrders\":");
+        out.extend_from_slice(answer);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
+#[derive(Deserialize)]
+struct OpenOrdersComposed<'a> {
+    #[serde(borrow)]
+    dexes: Vec<DexOrders<'a>>,
+}
+
+#[derive(Deserialize)]
+struct DexOrders<'a> {
+    #[serde(borrow, rename = "frontendOpenOrders")]
+    answer: &'a RawValue,
+}
+
+/// One order as Hyperliquid's `frontendOpenOrders` states it, and as
+/// `historicalOrders` states each order under its status (measured
+/// 2026-11-27).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VenueOrder {
+    coin: String,
+    side: String,
+    limit_px: Option<Num>,
+    sz: Option<Num>,
+    oid: u64,
+    timestamp: Option<i64>,
+    trigger_condition: Option<String>,
+    is_trigger: Option<bool>,
+    trigger_px: Option<Num>,
+    is_position_tpsl: Option<bool>,
+    reduce_only: Option<bool>,
+    order_type: String,
+    orig_sz: Option<Num>,
+    tif: Option<String>,
+    cloid: Option<String>,
+}
+
+/// A venue order to the vocabulary's, **each field as stated**, with two
+/// readings of the venue's own spelling of *none*: a trigger price of zero and
+/// a trigger condition of `N/A` are absent (measured 2026-11-27: every plain
+/// order states both). A dex prefix is composed away and kept apart; a spot
+/// pair's name (`@107`) is kept as the venue gives it. Attached take-profit
+/// and stop children are not orders of their own until the venue rests them.
+pub(crate) fn order_of(o: VenueOrder, status: Option<String>) -> Result<Order, NormaliseError> {
+    let side = match o.side.as_str() {
+        "B" => Side::Bid,
+        "A" => Side::Ask,
+        other => {
+            return Err(NormaliseError::Shape {
+                kind: "order",
+                detail: format!("side {other:?} is neither A nor B"),
+            });
+        }
+    };
+    let (dex, market) = match o.coin.split_once(':') {
+        Some((dex, bare)) => (Some(dex.to_string()), bare.to_string()),
+        None => (None, o.coin),
+    };
+    Ok(Order {
+        dex,
+        market,
+        side,
+        order_id: o.oid.to_string(),
+        client_id: o.cloid,
+        order_type: o.order_type,
+        // The type's own words carry it: `Take Profit Market`, `Stop Limit`.
+        trigger_type: None,
+        is_trigger: o.is_trigger,
+        position_tpsl: o.is_position_tpsl,
+        size: o.orig_sz,
+        remaining: o.sz,
+        limit_price: o.limit_px,
+        trigger_price: o.trigger_px.filter(|px| !px.is_zero()),
+        trigger_condition: o.trigger_condition.filter(|c| c != "N/A"),
+        reduce_only: o.reduce_only,
+        time_in_force: o.tif,
+        status,
+        placed_micros: o.timestamp.map(millis_to_micros),
+    })
+}
+
+/// One row of `historicalOrders`: an order as it stood at a change of its
+/// status (measured 2026-11-27).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryRow {
+    order: VenueOrder,
+    status: String,
+    status_timestamp: i64,
+}
+
+/// An order history answer to one `order_updates` row per change of status,
+/// each at the time the venue gives the change, **every one the answer holds**:
+/// the venue repeats its recent history on every read, and identity keeps each
+/// once (`crate::ledger::events::identity`). Every dex is in the one answer.
+pub fn order_update_rows(
+    venue: &Venue,
+    account: &Account,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let rows: Vec<HistoryRow> =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Shape {
+            kind: "historicalOrders",
+            detail: e.to_string(),
+        })?;
+    rows.into_iter()
+        .map(|r| {
+            Ok(Envelope::for_account(
+                venue.clone(),
+                account.clone(),
+                Some(millis_to_micros(r.status_timestamp)),
+                recv_micros,
+                Event::OrderUpdate(order_of(r.order, Some(r.status))?),
+            ))
+        })
+        .collect()
+}
+
+/// One window of `portfolio`: its value and PnL points, `[time ms, value]`.
+/// Its volume is a figure for the window, not a point, and is left in the
+/// record.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Window {
+    #[serde(default)]
+    account_value_history: Vec<(i64, Num)>,
+    #[serde(default)]
+    pnl_history: Vec<(i64, Num)>,
+}
+
+/// A portfolio answer to one `pnl_history` row per window and time, **each
+/// window the venue states and only those**: `day`, `week`, `month`,
+/// `allTime` and their `perp` forms, as measured on 2026-11-27. A time with a
+/// value and a PnL is one row holding both; nothing is computed, so a time
+/// the venue gives one of them for has the other absent.
+pub fn pnl_rows(
+    venue: &Venue,
+    account: &Account,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let windows: Vec<(String, Window)> =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Shape {
+            kind: "portfolio",
+            detail: e.to_string(),
+        })?;
+    let mut out = Vec::new();
+    for (name, window) in windows {
+        let mut points: std::collections::BTreeMap<i64, (Option<Num>, Option<Num>)> =
+            std::collections::BTreeMap::new();
+        for (at, value) in window.account_value_history {
+            points.entry(at).or_default().0 = Some(value);
+        }
+        for (at, pnl) in window.pnl_history {
+            points.entry(at).or_default().1 = Some(pnl);
+        }
+        for (at, (account_value, pnl)) in points {
+            out.push(Envelope::for_account(
+                venue.clone(),
+                account.clone(),
+                Some(millis_to_micros(at)),
+                recv_micros,
+                Event::PnlPoint(galata_wire::PnlPoint {
+                    window: name.clone(),
+                    account_value,
+                    pnl,
+                    initial_margin: None,
+                    maintenance_margin: None,
+                }),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// A composed open-orders payload to one `orders` row per resting order, on
+/// every dex: the complete set as of `recv_micros`. The answers state no
+/// time of their own; an empty set is no rows.
+pub fn open_order_rows(
+    venue: &Venue,
+    account: &Account,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let composed: OpenOrdersComposed<'_> =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let mut out = Vec::new();
+    for dex in composed.dexes {
+        let orders: Vec<VenueOrder> =
+            serde_json::from_str(dex.answer.get()).map_err(|e| NormaliseError::Shape {
+                kind: "frontendOpenOrders",
+                detail: e.to_string(),
+            })?;
+        for o in orders {
+            out.push(Envelope::for_account(
+                venue.clone(),
+                account.clone(),
+                None,
+                recv_micros,
+                Event::Order(order_of(o, None)?),
+            ));
+        }
+    }
+    Ok(out)
+}
 
 /// The token indices an account-wide answer refers to: a spot answer's
 /// balances and its three per-token lists, a borrow and lend answer's
@@ -600,6 +837,21 @@ impl Normalise for LedgerNormaliser {
                 snapshot_rows(&self.venue, &account, payload.recv_micros, &payload.payload)
             }
             LISTING_CHANNEL | ROLE_CHANNEL | MODE_CHANNEL => Ok(Vec::new()),
+            OPEN_ORDERS_CHANNEL | ORDER_HISTORY_CHANNEL | PORTFOLIO_CHANNEL => {
+                let PayloadAddress::Account(address) = &payload.address else {
+                    return Err(NormaliseError::Shape {
+                        kind: "orders and PnL",
+                        detail: "an answer not addressed to an account".into(),
+                    });
+                };
+                let account = Account::new(address.account.as_str())?;
+                let (venue, recv, bytes) = (&self.venue, payload.recv_micros, &payload.payload);
+                match payload.channel.as_str() {
+                    OPEN_ORDERS_CHANNEL => open_order_rows(venue, &account, recv, bytes),
+                    ORDER_HISTORY_CHANNEL => order_update_rows(venue, &account, recv, bytes),
+                    _ => pnl_rows(venue, &account, recv, bytes),
+                }
+            }
             BALANCES_CHANNEL | BORROW_LEND_CHANNEL => {
                 let PayloadAddress::Account(address) = &payload.address else {
                     return Err(NormaliseError::Shape {
@@ -1038,5 +1290,297 @@ mod tests {
                 "{channel}"
             );
         }
+    }
+
+    /// The scrubbed answers of 2026-11-27 (`design/measured.md`).
+    const OPEN_ORDERS_EMPTY: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-open-orders-empty.json");
+    const HISTORICAL_ORDERS: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-historical-orders.json");
+
+    /// Resting orders with `frontendOpenOrders`' row shape, which is
+    /// `historicalOrders`' `order`: the fixture's own rows, one per status
+    /// seen as open, and a spot order whose pair names no token.
+    fn resting_answer() -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(HISTORICAL_ORDERS).unwrap();
+        let mut open: Vec<serde_json::Value> = Vec::new();
+        for want in ["Limit", "Take Profit Market"] {
+            let row = rows
+                .iter()
+                .find(|r| r["status"] == "open" && r["order"]["orderType"] == want)
+                .unwrap();
+            open.push(row["order"].clone());
+        }
+        let mut spot = open[0].clone();
+        spot["coin"] = "@107".into();
+        open.push(spot);
+        serde_json::to_vec(&open).unwrap()
+    }
+
+    fn open_orders(answers: &[(&str, Vec<u8>)]) -> Vec<Envelope> {
+        let normaliser = LedgerNormaliser::new().unwrap();
+        let payload = Payload {
+            seq: 1,
+            recv_micros: 77,
+            address: PayloadAddress::Account(crate::record::AccountAddress {
+                venue: "hyperliquid".into(),
+                account: "main".into(),
+                fingerprint: "0123456789abcdef".into(),
+            }),
+            channel: OPEN_ORDERS_CHANNEL.into(),
+            kind: "orders".into(),
+            symbol: None,
+            origin: galata_wire::Origin::Fetched,
+            payload: open_orders_bytes(answers),
+        };
+        normaliser.normalise(&payload).unwrap()
+    }
+
+    fn order(row: &Envelope) -> &Order {
+        match &row.event {
+            Event::Order(o) => o,
+            other => panic!("not a resting order: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nothing_resting_on_any_dex_is_an_empty_set() {
+        let rows = open_orders(&[
+            ("", OPEN_ORDERS_EMPTY.to_vec()),
+            ("xyz", OPEN_ORDERS_EMPTY.to_vec()),
+        ]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn each_resting_order_carries_its_details_as_stated() {
+        let rows = open_orders(&[("", OPEN_ORDERS_EMPTY.to_vec()), ("xyz", resting_answer())]);
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(row.kind(), galata_wire::Kind::Orders);
+            assert_eq!(row.recv_micros, 77, "the set's read");
+            assert_eq!(row.at_micros, None, "the answer states no time");
+            assert_eq!(row.account().map(|a| a.as_str()), Some("main"));
+        }
+
+        // A plain limit: its zero trigger price and `N/A` are the venue's
+        // way of saying it has no trigger.
+        let limit = order(&rows[0]);
+        assert_eq!(limit.order_type, "Limit");
+        assert_eq!(
+            (limit.trigger_price, limit.trigger_condition.as_deref()),
+            (None, None)
+        );
+        assert_eq!(limit.is_trigger, Some(false));
+        assert_eq!(limit.time_in_force.as_deref(), Some("Gtc"));
+        assert!(limit.size.is_some() && limit.remaining.is_some() && limit.limit_price.is_some());
+        assert!(limit.placed_micros.is_some());
+        assert_eq!(limit.status, None, "an open-orders row states no status");
+
+        // A resting take-profit: its type, trigger price and condition, and
+        // that it closes the position, each as stated.
+        let tp = order(&rows[1]);
+        assert_eq!(tp.order_type, "Take Profit Market");
+        assert_eq!(tp.is_trigger, Some(true));
+        assert_eq!(tp.position_tpsl, Some(true));
+        assert_eq!(tp.reduce_only, Some(true));
+        let px = tp.trigger_price.expect("a trigger price");
+        assert_eq!(
+            tp.trigger_condition.as_deref(),
+            Some(format!("Price above {px}").as_str())
+        );
+        assert!(
+            tp.order_id.parse::<u64>().is_ok(),
+            "the venue's oid, as text"
+        );
+
+        // A spot pair, kept as the venue names it.
+        let spot = order(&rows[2]);
+        assert_eq!((spot.dex.as_deref(), spot.market.as_str()), (None, "@107"));
+    }
+
+    #[test]
+    fn a_dex_prefix_is_kept_apart_from_the_market() {
+        let rows = open_orders(&[("xyz", resting_answer())]);
+        let fixture: Vec<serde_json::Value> = serde_json::from_slice(HISTORICAL_ORDERS).unwrap();
+        let coin = fixture
+            .iter()
+            .find(|r| r["status"] == "open" && r["order"]["orderType"] == "Limit")
+            .unwrap()["order"]["coin"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let limit = order(&rows[0]);
+        match coin.split_once(':') {
+            Some((dex, bare)) => {
+                assert_eq!(limit.dex.as_deref(), Some(dex));
+                assert_eq!(limit.market, bare);
+            }
+            None => assert_eq!(
+                (limit.dex.as_deref(), limit.market.as_str()),
+                (None, coin.as_str())
+            ),
+        }
+    }
+
+    #[test]
+    fn a_side_that_is_neither_a_nor_b_is_refused() {
+        let normaliser = LedgerNormaliser::new().unwrap();
+        let mut answer: Vec<serde_json::Value> = serde_json::from_slice(&resting_answer()).unwrap();
+        answer[0]["side"] = "S".into();
+        let payload = Payload {
+            seq: 1,
+            recv_micros: 1,
+            address: PayloadAddress::Account(crate::record::AccountAddress {
+                venue: "hyperliquid".into(),
+                account: "main".into(),
+                fingerprint: "0123456789abcdef".into(),
+            }),
+            channel: OPEN_ORDERS_CHANNEL.into(),
+            kind: "orders".into(),
+            symbol: None,
+            origin: galata_wire::Origin::Fetched,
+            payload: open_orders_bytes(&[("", serde_json::to_vec(&answer).unwrap())]),
+        };
+        assert!(normaliser.normalise(&payload).is_err());
+    }
+
+    const PORTFOLIO: &[u8] =
+        include_bytes!("../../../tests/fixtures/hyperliquid/ledger-portfolio.json");
+
+    fn main() -> Account {
+        Account::new("main").unwrap()
+    }
+
+    fn venue() -> Venue {
+        Venue::new("hyperliquid").unwrap()
+    }
+
+    #[test]
+    fn every_row_of_the_history_is_an_update_at_its_status_time() {
+        let fixture: Vec<serde_json::Value> = serde_json::from_slice(HISTORICAL_ORDERS).unwrap();
+        let rows = order_update_rows(&venue(), &main(), 5, HISTORICAL_ORDERS).unwrap();
+        assert_eq!(rows.len(), fixture.len());
+        for (row, stated) in rows.iter().zip(&fixture) {
+            assert_eq!(row.kind(), galata_wire::Kind::OrderUpdates);
+            assert_eq!(
+                row.at_micros,
+                Some(millis_to_micros(
+                    stated["statusTimestamp"].as_i64().unwrap()
+                ))
+            );
+            let Event::OrderUpdate(o) = &row.event else {
+                panic!("not an update")
+            };
+            assert_eq!(o.status.as_deref(), stated["status"].as_str());
+            assert_eq!(o.order_id, stated["order"]["oid"].to_string());
+        }
+    }
+
+    #[test]
+    fn a_take_profit_that_triggers_and_fills_is_three_updates_each_with_its_type() {
+        // The scrubbed history holds one: placed, triggered, filled.
+        let rows = order_update_rows(&venue(), &main(), 5, HISTORICAL_ORDERS).unwrap();
+        let mut by_order: std::collections::BTreeMap<&str, Vec<(&Order, i64)>> =
+            std::collections::BTreeMap::new();
+        for row in &rows {
+            if let Event::OrderUpdate(o) = &row.event {
+                by_order
+                    .entry(o.order_id.as_str())
+                    .or_default()
+                    .push((o, row.at_micros.unwrap()));
+            }
+        }
+        let (_, mut updates) = by_order
+            .into_iter()
+            .find(|(_, u)| {
+                u.iter()
+                    .any(|(o, _)| o.status.as_deref() == Some("triggered"))
+            })
+            .expect("a take-profit that triggered");
+        updates.sort_by_key(|(_, at)| *at);
+        let status = |i: usize| updates[i].0.status.as_deref().unwrap();
+        assert_eq!(updates.len(), 3);
+        assert_eq!(status(0), "open");
+        // A market take-profit fills as it triggers: the venue stamps both in
+        // the same millisecond (measured 2026-11-27), and both are kept, the
+        // status being part of an update's identity.
+        assert_eq!(updates[1].1, updates[2].1);
+        let mut last: Vec<&str> = vec![status(1), status(2)];
+        last.sort();
+        assert_eq!(last, ["filled", "triggered"]);
+        for (o, _) in &updates {
+            assert_eq!(o.order_type, "Take Profit Market", "the type on each");
+            assert_eq!(o.position_tpsl, Some(true));
+        }
+        // Waiting on its trigger, it states the price; once filled, the venue
+        // states the trigger as done.
+        assert!(updates[0].0.trigger_price.is_some());
+        let filled = updates
+            .iter()
+            .find(|(o, _)| o.status.as_deref() == Some("filled"))
+            .unwrap();
+        assert_eq!(filled.0.trigger_condition.as_deref(), Some("Triggered"));
+    }
+
+    #[test]
+    fn every_window_the_venue_states_is_recorded_and_none_computed() {
+        let fixture: Vec<(String, serde_json::Value)> = serde_json::from_slice(PORTFOLIO).unwrap();
+        let rows = pnl_rows(&venue(), &main(), 5, PORTFOLIO).unwrap();
+        let points = |r: &Envelope| match &r.event {
+            Event::PnlPoint(p) => p.clone(),
+            other => panic!("not a point: {other:?}"),
+        };
+        // Each window, under its own name, with as many points as it states.
+        for (name, window) in &fixture {
+            let mine: Vec<&Envelope> = rows.iter().filter(|r| points(r).window == *name).collect();
+            let stated = window["accountValueHistory"].as_array().unwrap();
+            assert_eq!(mine.len(), stated.len(), "{name}");
+            // The first point as the venue states it, to the digit.
+            let first = points(mine[0]);
+            assert_eq!(
+                first.account_value.unwrap().to_string(),
+                stated[0][1].as_str().unwrap()
+            );
+            assert_eq!(
+                mine[0].at_micros,
+                Some(millis_to_micros(stated[0][0].as_i64().unwrap()))
+            );
+        }
+        let windows: std::collections::BTreeSet<String> =
+            rows.iter().map(|r| points(r).window).collect();
+        assert_eq!(
+            windows.len(),
+            fixture.len(),
+            "no window added, none dropped"
+        );
+        // Nothing but what the venue states.
+        for row in &rows {
+            let p = points(row);
+            assert!(p.initial_margin.is_none() && p.maintenance_margin.is_none());
+        }
+    }
+
+    #[test]
+    fn a_time_with_only_a_value_has_no_pnl() {
+        let answer = br#"[["day",{"accountValueHistory":[[1000,"10.5"],[2000,"11.0"]],"pnlHistory":[[2000,"0.5"]],"vlm":"0.0"}]]"#;
+        let rows = pnl_rows(&venue(), &main(), 5, answer).unwrap();
+        let pairs: Vec<(Option<String>, Option<String>)> = rows
+            .iter()
+            .map(|r| match &r.event {
+                Event::PnlPoint(p) => (
+                    p.account_value.map(|v| v.to_string()),
+                    p.pnl.map(|v| v.to_string()),
+                ),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (Some("10.5".into()), None),
+                (Some("11.0".into()), Some("0.5".into()))
+            ]
+        );
     }
 }

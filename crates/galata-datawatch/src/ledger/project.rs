@@ -21,6 +21,14 @@
 //! duplicates, and needs no replacement rule. An empty kind is still a file,
 //! with zero rows: *this account has no fills* is a statement a reader can
 //! find.
+//!
+//! **`orders` is the newest read's set, and only that.** An open order is
+//! state, and a read that found none leaves no row to be newest: kept with
+//! every earlier set, the last non-empty one would read as resting still. So
+//! the caller states when the open orders were last read, the file holds that
+//! read's rows, zero where it found none, and **no file** is written for an
+//! account whose open orders were never read, so that *nothing rests* and
+//! *nothing known* stay apart.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,16 +41,16 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use galata_wire::{
     Collateral, Counterparty, Effect, Envelope, Event, Fill, FundingPayment, Kind, Margin,
-    MarginState, Num, Position, PositionState,
+    MarginState, Num, Order, PnlPoint, Position, PositionState,
 };
 
 use crate::ledger::accounts::LedgerError;
 
 /// The kinds this projection writes: every kind the fold reads, and the
 /// account's state read beside them — its balances, its borrowing and the
-/// margin figures the venue states with them. The fold pass reads all of these
-/// and folds only its own.
-pub const PROJECTED: [Kind; 10] = [
+/// margin figures the venue states with them, and its open orders. The fold
+/// pass reads all of these and folds only its own.
+pub const PROJECTED: [Kind; 13] = [
     Kind::Fills,
     Kind::FundingPayments,
     Kind::Margin,
@@ -53,11 +61,24 @@ pub const PROJECTED: [Kind; 10] = [
     Kind::LendHealth,
     Kind::PortfolioMargin,
     Kind::TokenMargin,
+    Kind::Orders,
+    Kind::OrderUpdates,
+    Kind::PnlHistory,
 ];
 
 /// The kinds projected for a venue read by wallet (Derive): each subaccount's
-/// margin, positions and collateral, as the venue states them.
-pub const WALLET_PROJECTED: [Kind; 3] = [Kind::MarginState, Kind::PositionState, Kind::Collateral];
+/// margin, positions, collateral and open orders, as the venue states them,
+/// and its order updates, fills, funding and value history.
+pub const WALLET_PROJECTED: [Kind; 8] = [
+    Kind::MarginState,
+    Kind::PositionState,
+    Kind::Collateral,
+    Kind::Orders,
+    Kind::OrderUpdates,
+    Kind::Fills,
+    Kind::FundingPayments,
+    Kind::PnlHistory,
+];
 
 /// An account's newest rows of one kind, and the time they were stated: the
 /// rows of the latest read. **The time is the read's receipt**, since these
@@ -157,16 +178,21 @@ pub fn write(
     account: &str,
     rows: &[Envelope],
 ) -> Result<Vec<PathBuf>, ProjectError> {
-    write_kinds(root, venue, account, rows, &PROJECTED)
+    write_kinds(root, venue, account, rows, &PROJECTED, None)
 }
 
 /// Write the given kinds for one account, each file whole.
+///
+/// `orders_read_micros` is the receipt of the newest answer that stated the
+/// account's open orders ([`crate::ledger::events::History::read_at`]);
+/// `None` where none was read, and then no `orders` file is written.
 pub fn write_kinds(
     root: &Path,
     venue: &str,
     account: &str,
     rows: &[Envelope],
     kinds: &[Kind],
+    orders_read_micros: Option<i64>,
 ) -> Result<Vec<PathBuf>, ProjectError> {
     crate::ledger::accounts::check_root(root)?;
     let mut written = Vec::new();
@@ -175,6 +201,14 @@ pub fn write_kinds(
         let of_kind: Vec<&Envelope> = if kind == Kind::LedgerUpdates {
             expanded = per_effect(rows);
             expanded.iter().map(|e| e.as_ref()).collect()
+        } else if kind == Kind::Orders {
+            // The newest read's set only, and nothing where none was read.
+            let Some(read) = orders_read_micros else {
+                continue;
+            };
+            rows.iter()
+                .filter(|e| e.kind() == kind && e.recv_micros == read)
+                .collect()
         } else {
             rows.iter().filter(|e| e.kind() == kind).collect()
         };
@@ -195,6 +229,7 @@ pub fn write_by_account(
     venue: &str,
     rows: &[Envelope],
     kinds: &[Kind],
+    orders_read_micros: Option<i64>,
 ) -> Result<Vec<PathBuf>, ProjectError> {
     let mut by_account: std::collections::BTreeMap<&str, Vec<Envelope>> =
         std::collections::BTreeMap::new();
@@ -208,7 +243,16 @@ pub fn write_by_account(
     }
     let mut written = Vec::new();
     for (account, rows) in by_account {
-        written.extend(write_kinds(root, venue, account, &rows, kinds)?);
+        // One wallet answer states every subaccount's open orders, so one
+        // receipt is each subaccount's read.
+        written.extend(write_kinds(
+            root,
+            venue,
+            account,
+            &rows,
+            kinds,
+            orders_read_micros,
+        )?);
     }
     Ok(written)
 }
@@ -246,16 +290,18 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("fee_token", DataType::Utf8, true),
             Field::new("builder_fee", MONEY, true),
             Field::new("crossed", DataType::Boolean, true),
-            Field::new("order_id", DataType::UInt64, false),
+            // Text: Derive's are UUIDs.
+            Field::new("order_id", DataType::Utf8, false),
             // Not unique alone: identity is (trade_id, order_id).
-            Field::new("trade_id", DataType::UInt64, false),
+            Field::new("trade_id", DataType::Utf8, false),
             Field::new("twap_id", DataType::UInt64, true),
         ]),
         Kind::FundingPayments => fields.extend([
             // As the venue signs it: negative when the position paid.
             Field::new("usdc", MONEY, false),
-            Field::new("size", MONEY, false),
-            Field::new("rate", MONEY, false),
+            // Null where the venue states none (Derive).
+            Field::new("size", MONEY, true),
+            Field::new("rate", MONEY, true),
             Field::new("samples", DataType::UInt32, true),
         ]),
         Kind::Margin => fields.extend([
@@ -391,9 +437,46 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
             Field::new("cumulative_interest", MONEY, true),
             Field::new("pending_interest", MONEY, true),
         ]),
+        // One order per row: a resting one in `orders`, one as it stood at a
+        // change of its status in `order_updates`, whose `at_micros` is the
+        // venue's time for that change. Type, trigger and status are the
+        // venue's own words; `ticker` above is the instrument.
+        Kind::Orders | Kind::OrderUpdates => fields.extend(order_fields()),
+        // One point of a window the venue states; `at_micros` is its time.
+        Kind::PnlHistory => fields.extend([
+            Field::new("window", DataType::Utf8, false),
+            Field::new("account_value", MONEY, true),
+            Field::new("pnl", MONEY, true),
+            Field::new("initial_margin", MONEY, true),
+            Field::new("maintenance_margin", MONEY, true),
+        ]),
         _ => return None,
     }
     Some(Arc::new(Schema::new(fields)))
+}
+
+/// An order's columns, the same in `orders` and `order_updates`.
+fn order_fields() -> [Field; 16] {
+    [
+        // `bid` buys, `ask` sells.
+        Field::new("side", DataType::Utf8, false),
+        // Text: Derive's are UUIDs.
+        Field::new("order_id", DataType::Utf8, false),
+        Field::new("client_id", DataType::Utf8, true),
+        Field::new("order_type", DataType::Utf8, false),
+        Field::new("trigger_type", DataType::Utf8, true),
+        Field::new("is_trigger", DataType::Boolean, true),
+        Field::new("position_tpsl", DataType::Boolean, true),
+        Field::new("size", MONEY, true),
+        Field::new("remaining", MONEY, true),
+        Field::new("limit_price", MONEY, true),
+        Field::new("trigger_price", MONEY, true),
+        Field::new("trigger_condition", DataType::Utf8, true),
+        Field::new("reduce_only", DataType::Boolean, true),
+        Field::new("time_in_force", DataType::Utf8, true),
+        Field::new("status", DataType::Utf8, true),
+        Field::new("placed_micros", DataType::Int64, true),
+    ]
 }
 
 // **Borrowing accessors**, as plain functions so their lifetimes are the
@@ -461,6 +544,25 @@ fn token_margin_of(e: &Envelope) -> Option<&galata_wire::TokenMargin> {
     }
 }
 
+fn order_of(e: &Envelope) -> Option<&Order> {
+    match &e.event {
+        Event::Order(o) | Event::OrderUpdate(o) => Some(o),
+        _ => None,
+    }
+}
+fn pnl_point_of(e: &Envelope) -> Option<&PnlPoint> {
+    match &e.event {
+        Event::PnlPoint(p) => Some(p),
+        _ => None,
+    }
+}
+
+fn bools(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<bool>) -> ArrayRef {
+    let mut b = BooleanBuilder::with_capacity(rows.len());
+    rows.iter().for_each(|e| b.append_option(f(e)));
+    Arc::new(b.finish())
+}
+
 fn u32s(rows: &[&Envelope], f: impl Fn(&Envelope) -> Option<u32>) -> ArrayRef {
     let mut b = UInt32Builder::with_capacity(rows.len());
     rows.iter().for_each(|e| b.append_option(f(e)));
@@ -473,6 +575,7 @@ fn dex_of(e: &Envelope) -> Option<&str> {
         Event::FundingPayment(p) => p.dex.as_deref(),
         Event::Margin(m) => m.dex.as_deref(),
         Event::Position(p) => p.dex.as_deref(),
+        Event::Order(o) | Event::OrderUpdate(o) => o.dex.as_deref(),
         // Expanded to one effect per row by `per_effect`.
         Event::LedgerUpdate(u) => match &u.effect {
             Effect::Known(effects) => effects.first().and_then(|d| d.dex.as_deref()),
@@ -486,10 +589,11 @@ fn dex_of(e: &Envelope) -> Option<&str> {
 /// instrument address of its own.
 fn ticker_of(e: &Envelope) -> Option<&str> {
     match &e.event {
-        Event::Fill(f) => Some(f.ticker.as_str()),
+        Event::Fill(f) => Some(f.market.as_str()),
         Event::FundingPayment(p) => Some(p.ticker.as_str()),
         Event::Position(p) => Some(p.ticker.as_str()),
         Event::PositionState(p) => Some(p.instrument.as_str()),
+        Event::Order(o) | Event::OrderUpdate(o) => Some(o.market.as_str()),
         _ => None,
     }
 }
@@ -556,8 +660,8 @@ fn batch_for(
                     .for_each(|e| b.append_option(fill_of(e).and_then(|x| x.crossed)));
                 Arc::new(b.finish())
             });
-            columns.push(u64s(rows, |e| fill_of(e).map(|x| x.order_id)));
-            columns.push(u64s(rows, |e| fill_of(e).map(|x| x.trade_id)));
+            columns.push(text(rows, |e| fill_of(e).map(|x| x.order_id.as_str())));
+            columns.push(text(rows, |e| fill_of(e).map(|x| x.trade_id.as_str())));
             columns.push(u64s(rows, |e| fill_of(e).and_then(|x| x.twap_id)));
         }
         Kind::FundingPayments => {
@@ -565,8 +669,8 @@ fn batch_for(
                 move |e: &Envelope| funding_of(e).and_then(g)
             };
             columns.push(dec(rows, each(|x| Some(x.usdc)))?);
-            columns.push(dec(rows, each(|x| Some(x.size)))?);
-            columns.push(dec(rows, each(|x| Some(x.rate)))?);
+            columns.push(dec(rows, each(|x| x.size))?);
+            columns.push(dec(rows, each(|x| x.rate))?);
             columns.push({
                 let mut b = UInt32Builder::with_capacity(rows.len());
                 rows.iter()
@@ -783,6 +887,44 @@ fn batch_for(
             columns.push(dec(rows, each(|x| x.cumulative_interest))?);
             columns.push(dec(rows, each(|x| x.pending_interest))?);
         }
+        Kind::Orders | Kind::OrderUpdates => {
+            let each = |g: fn(&Order) -> Option<Num>| move |e: &Envelope| order_of(e).and_then(g);
+            columns.push(text(rows, |e| order_of(e).map(|x| x.side.as_str())));
+            columns.push(text(rows, |e| order_of(e).map(|x| x.order_id.as_str())));
+            columns.push(text(rows, |e| {
+                order_of(e).and_then(|x| x.client_id.as_deref())
+            }));
+            columns.push(text(rows, |e| order_of(e).map(|x| x.order_type.as_str())));
+            columns.push(text(rows, |e| {
+                order_of(e).and_then(|x| x.trigger_type.as_deref())
+            }));
+            columns.push(bools(rows, |e| order_of(e).and_then(|x| x.is_trigger)));
+            columns.push(bools(rows, |e| order_of(e).and_then(|x| x.position_tpsl)));
+            columns.push(dec(rows, each(|x| x.size))?);
+            columns.push(dec(rows, each(|x| x.remaining))?);
+            columns.push(dec(rows, each(|x| x.limit_price))?);
+            columns.push(dec(rows, each(|x| x.trigger_price))?);
+            columns.push(text(rows, |e| {
+                order_of(e).and_then(|x| x.trigger_condition.as_deref())
+            }));
+            columns.push(bools(rows, |e| order_of(e).and_then(|x| x.reduce_only)));
+            columns.push(text(rows, |e| {
+                order_of(e).and_then(|x| x.time_in_force.as_deref())
+            }));
+            columns.push(text(rows, |e| {
+                order_of(e).and_then(|x| x.status.as_deref())
+            }));
+            columns.push(int(rows, |e| order_of(e).and_then(|x| x.placed_micros)));
+        }
+        Kind::PnlHistory => {
+            let each =
+                |g: fn(&PnlPoint) -> Option<Num>| move |e: &Envelope| pnl_point_of(e).and_then(g);
+            columns.push(text(rows, |e| pnl_point_of(e).map(|x| x.window.as_str())));
+            columns.push(dec(rows, each(|x| x.account_value))?);
+            columns.push(dec(rows, each(|x| x.pnl))?);
+            columns.push(dec(rows, each(|x| x.initial_margin))?);
+            columns.push(dec(rows, each(|x| x.maintenance_margin))?);
+        }
         _ => unreachable!("only projected kinds are built"),
     }
     RecordBatch::try_new(schema, columns).map_err(|e| ProjectError::Arrow {
@@ -885,6 +1027,7 @@ mod tests {
     use std::str::FromStr;
 
     fn fill(trade_id: u64, order_id: u64, recv: i64) -> Envelope {
+        let (trade_id, order_id) = (trade_id.to_string(), order_id.to_string());
         Envelope::new(
             Venue::new("hyperliquid").unwrap(),
             Ticker::new("BTC").unwrap(),
@@ -892,7 +1035,7 @@ mod tests {
             recv,
             Event::Fill(Fill {
                 dex: None,
-                ticker: Ticker::new("BTC").unwrap(),
+                market: "BTC".into(),
                 side: Side::Bid,
                 price: Num::from_str("81213.5").unwrap(),
                 size: Num::from_str("0.01").unwrap(),
@@ -941,9 +1084,9 @@ mod tests {
             .column_by_name("order_id")
             .unwrap()
             .as_any()
-            .downcast_ref::<arrow::array::UInt64Array>()
+            .downcast_ref::<arrow::array::StringArray>()
             .unwrap();
-        assert_eq!((orders.value(0), orders.value(1)), (100, 101));
+        assert_eq!((orders.value(0), orders.value(1)), ("100", "101"));
         let price = batch
             .column_by_name("price")
             .unwrap()
@@ -952,6 +1095,158 @@ mod tests {
             .unwrap();
         // Exactly 81213.5 at scale 18.
         assert_eq!(price.value(0), 81_213_500_000_000_000_000_000);
+    }
+
+    fn resting(order_id: &str, recv: i64) -> Envelope {
+        Envelope::for_account(
+            Venue::new("hyperliquid").unwrap(),
+            galata_wire::Account::new("main").unwrap(),
+            None,
+            recv,
+            Event::Order(Order {
+                dex: Some("xyz".into()),
+                market: "GOLD".into(),
+                side: Side::Ask,
+                order_id: order_id.into(),
+                client_id: None,
+                order_type: "Stop Market".into(),
+                trigger_type: None,
+                is_trigger: Some(true),
+                position_tpsl: Some(false),
+                size: Some(Num::from_str("0.5").unwrap()),
+                remaining: Some(Num::from_str("0.5").unwrap()),
+                limit_price: Some(Num::from_str("4100").unwrap()),
+                trigger_price: Some(Num::from_str("4120.5").unwrap()),
+                trigger_condition: Some("Price below 4120.5".into()),
+                reduce_only: Some(true),
+                time_in_force: None,
+                status: None,
+                placed_micros: Some(3),
+            }),
+        )
+    }
+
+    fn rows_of(root: &Path, kind: Kind) -> usize {
+        galata_segments::read_segment(&path_of(root, "hyperliquid", "main", kind))
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum()
+    }
+
+    #[test]
+    fn the_open_orders_are_the_newest_reads_set() {
+        let root = owner_only();
+        // Two reads: two orders at 10, one of them still resting at 20.
+        let rows = vec![resting("1", 10), resting("2", 10), resting("2", 20)];
+        write_kinds(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &rows,
+            &[Kind::Orders],
+            Some(20),
+        )
+        .unwrap();
+        let batch = read_kind(root.path(), Kind::Orders);
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(strings(&batch, "order_id"), [Some("2".to_string())]);
+        assert_eq!(strings(&batch, "dex"), [Some("xyz".to_string())]);
+        assert_eq!(strings(&batch, "ticker"), [Some("GOLD".to_string())]);
+        assert_eq!(
+            strings(&batch, "order_type"),
+            [Some("Stop Market".to_string())]
+        );
+        assert_eq!(
+            strings(&batch, "trigger_condition"),
+            [Some("Price below 4120.5".to_string())]
+        );
+        assert_eq!(
+            decimals(&batch, "trigger_price"),
+            [Some(4_120_500_000_000_000_000_000)]
+        );
+    }
+
+    #[test]
+    fn a_read_that_found_nothing_resting_is_a_file_of_zero_rows() {
+        // The newest read stated no open order: the earlier set must not read
+        // as resting still.
+        let root = owner_only();
+        let rows = vec![resting("1", 10), resting("2", 10)];
+        write_kinds(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &rows,
+            &[Kind::Orders],
+            Some(30),
+        )
+        .unwrap();
+        assert_eq!(rows_of(root.path(), Kind::Orders), 0);
+    }
+
+    #[test]
+    fn open_orders_never_read_write_no_file() {
+        // Nothing known is not nothing resting.
+        let root = owner_only();
+        let rows = vec![resting("1", 10)];
+        let written = write_kinds(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &rows,
+            &[Kind::Orders],
+            None,
+        )
+        .unwrap();
+        assert!(written.is_empty());
+        assert!(!path_of(root.path(), "hyperliquid", "main", Kind::Orders).exists());
+    }
+
+    #[test]
+    fn order_updates_and_pnl_points_are_written_as_given() {
+        // Each held once by identity before it arrives here (`events::read`);
+        // the projection writes every one, typed.
+        let root = owner_only();
+        let mut update = resting("7", 10);
+        if let Event::Order(o) = update.event.clone() {
+            update.event = Event::OrderUpdate(Order {
+                status: Some("triggered".into()),
+                ..o
+            });
+            update.at_micros = Some(9);
+        }
+        let point = Envelope::for_account(
+            Venue::new("hyperliquid").unwrap(),
+            galata_wire::Account::new("main").unwrap(),
+            Some(8),
+            10,
+            Event::PnlPoint(PnlPoint {
+                window: "perpWeek".into(),
+                account_value: Some(Num::from_str("1520.25").unwrap()),
+                pnl: Some(Num::from_str("-12.5").unwrap()),
+                initial_margin: None,
+                maintenance_margin: None,
+            }),
+        );
+        write_kinds(
+            root.path(),
+            "hyperliquid",
+            "main",
+            &[update, point],
+            &[Kind::OrderUpdates, Kind::PnlHistory],
+            None,
+        )
+        .unwrap();
+        let updates = read_kind(root.path(), Kind::OrderUpdates);
+        assert_eq!(strings(&updates, "status"), [Some("triggered".to_string())]);
+        let points = read_kind(root.path(), Kind::PnlHistory);
+        assert_eq!(strings(&points, "window"), [Some("perpWeek".to_string())]);
+        assert_eq!(
+            decimals(&points, "pnl"),
+            [Some(-12_500_000_000_000_000_000)]
+        );
+        assert_eq!(decimals(&points, "maintenance_margin"), [None]);
     }
 
     #[test]

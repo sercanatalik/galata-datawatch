@@ -450,9 +450,12 @@ session key ([below](#derive-a-wallet-read-with-a-session-key)).
                         per account             spotClearinghouseState ──▶ balances,
                                                                          portfolio_margin, token_margin
                         per account             borrowLendUserState  ──▶ borrow_lend, lend_health
+                        per account, every dex  frontendOpenOrders   ──▶ orders, ONE set per read
   every discover_secs   per master              subAccounts, userRole, userAbstraction
                         for the venue           spotMeta: names the tokens the two above refer to
   every events_secs     per account             fills, funding payments, ledger updates
+                        per account             historicalOrders     ──▶ order_updates
+                        per account             portfolio            ──▶ pnl_history, every window
 
   var/ledger/          THE RECORD, owner-only (0700): venue=/account=<alias>/kind=/date=
   var/ledger-tape/     ITS PROJECTION, owner-only: venue=/account=<alias>/kind=/rows.parquet
@@ -467,9 +470,24 @@ session key ([below](#derive-a-wallet-read-with-a-session-key)).
   and the portfolio figures carry their read's receipt as their time. A reader
   takes an account's newest rows of a kind with `ledger::project::newest`, so
   it never mixes one read's balance with another's.
+- **Orders are state and events** (`add-account-vocabulary-orders`):
+  - `orders` is the open orders of the newest read, every declared dex in one
+    set, recorded only when every dex answered. A read that found none is a
+    file of zero rows. Open orders never read are no file at all, so *nothing
+    rests* and *nothing known* stay apart.
+  - `order_updates` is each change of an order's status, once. Its identity is
+    the order id, the status and the venue's time for the change.
+  - `pnl_history` is each point of each window the venue states (`day`,
+    `week`, `month`, `allTime` and their `perp` forms), once, by window and
+    time.
+  - Order type, trigger and status are the venue's own words, never mapped.
+- **A market is named as the venue names it**: an order's and a fill's market
+  is text, so a spot pair (`@107`, `PURR/USDC`) is kept. The fold counts spot
+  fills apart (`spot_fills`), since a spot trade moves no perp position.
 - **Its cost is declared**: each read's weight counts against `ledger_share`
   of the venue's budget, and a configuration that cannot afford its cadences
-  is refused at load.
+  is refused at load. Open orders cost 20 a dex each snapshot, and the order
+  and PnL history 40 an account each events pass.
 - **An address never names anything**: accounts are aliases (`main`, and
   `main_s1` for a discovered sub-account) in every path, subject and log.
 
@@ -496,7 +514,12 @@ session_key_warn_days = 14
                                   private/session_keys                 its scopes and expiry
                                   private/get_subaccounts              subaccounts, bound to owner_s1, owner_s2, …
   every snapshot_secs             private/get_all_portfolios           ──▶ margin_state, position_state, collateral,
-                                  ONE request per wallet                   per subaccount
+                                  ONE request per wallet                   orders, per subaccount
+  every events_secs               private/get_order_history            ──▶ order_updates
+                                  private/get_trade_history            ──▶ fills
+                                  private/get_funding_history          ──▶ funding_payments
+                                  private/get_subaccount_value_history ──▶ pnl_history, window "3600"
+                                  each wallet-wide, a whole window
 ```
 
 - **The key.** Make one with `scripts/make-derive-session-key.sh`, which hands
@@ -523,9 +546,20 @@ session_key_warn_days = 14
   archived answers, and the subaccount is `owner_s1` in every path and status.
   The wallet's answer is recorded under the wallet, and projected under each
   subaccount.
+- **Its history is read a whole window at a time**: every page of the window,
+  recorded under the wallet only when every page answered. A window with a
+  missing page is a gap for each subaccount.
+  - Trades, funding and value points are read from the newest the record
+    holds, so a missed window is read again by the next.
+  - Orders reach back 30 days every time, since Derive states an order once,
+    at its latest status, and it changes after it appears. A change superseded
+    between two reads is not seen.
+  - The value history is asked hourly, and its points are each subaccount's
+    value and margins as stated. Derive states no PnL, and none is computed.
 - **Its cost**: Derive allows 300 reads a minute per wallet, shared with the
   owner's own use. A rate refusal's stated wait holds the venue, and a
-  snapshot due inside it is a throttled gap.
+  snapshot due inside it is a throttled gap. The four history windows cost a
+  read each, a page each as measured.
 
 ---
 

@@ -29,6 +29,14 @@ pub const GET_SUBACCOUNTS: &str = super::ledger::LISTING_CHANNEL;
 pub const GET_ALL_PORTFOLIOS: &str = super::ledger::SNAPSHOT_CHANNEL;
 /// The wallets a session key is registered to. Unsigned.
 pub const WALLETS_OF_KEY: &str = "public/get_wallets_from_session_key";
+/// A wallet's orders, each at its latest status, over a window, by page.
+pub const GET_ORDER_HISTORY: &str = super::ledger::ORDER_HISTORY_CHANNEL;
+/// A wallet's trades over a window, by page.
+pub const GET_TRADE_HISTORY: &str = super::ledger::TRADE_HISTORY_CHANNEL;
+/// A wallet's funding payments over a window, by page.
+pub const GET_FUNDING_HISTORY: &str = super::ledger::FUNDING_HISTORY_CHANNEL;
+/// A wallet's subaccounts' value and margins at each period, by page.
+pub const GET_VALUE_HISTORY: &str = super::ledger::VALUE_HISTORY_CHANNEL;
 
 /// The venue's code for a request refused for its rate: `data` states the
 /// wait ("Retry after {ms} ms", read from Derive's documentation 2026-11-26).
@@ -198,6 +206,23 @@ impl PrivateClient {
             .await
     }
 
+    /// One page of a wallet's history, as the venue sent it: `method` is one of
+    /// the four history methods, and `window` its own parameters (each names
+    /// its bounds its own way, measured 2026-11-27: `from_timestamp` for
+    /// orders and trades, `start_timestamp` for funding and value). The
+    /// wallet is added here, as every signed request adds it.
+    pub async fn history(
+        &self,
+        method: &'static str,
+        key: &SessionKey,
+        wallet: &Secret,
+        now_micros: i64,
+        window: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Vec<u8>, PrivateError> {
+        self.signed_with(method, key, wallet, now_micros, window)
+            .await
+    }
+
     /// The wallets the key is registered to, as the venue sent them. Unsigned:
     /// the request names the key's public address alone.
     pub async fn wallets_of(&self, key: &SessionKey) -> Result<Vec<u8>, PrivateError> {
@@ -215,6 +240,18 @@ impl PrivateClient {
         wallet: &Secret,
         now_micros: i64,
     ) -> Result<Vec<u8>, PrivateError> {
+        self.signed_with(method, key, wallet, now_micros, serde_json::Map::new())
+            .await
+    }
+
+    async fn signed_with(
+        &self,
+        method: &'static str,
+        key: &SessionKey,
+        wallet: &Secret,
+        now_micros: i64,
+        mut body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Vec<u8>, PrivateError> {
         let time = (now_micros / 1_000).to_string();
         // **The one place the wallet leaves its `Secret`**: into the request,
         // to the venue. The URL goes to the client and nowhere else.
@@ -224,7 +261,13 @@ impl PrivateClient {
             .header("X-DeriveWallet", wallet.expose())
             .header("X-DeriveTimestamp", &time)
             .header("X-DeriveSignature", key.sign(&time))
-            .json(&serde_json::json!({ "wallet": wallet.expose() }));
+            .json(&{
+                body.insert(
+                    "wallet".into(),
+                    serde_json::Value::String(wallet.expose().to_string()),
+                );
+                body
+            });
         send(method, request).await
     }
 }

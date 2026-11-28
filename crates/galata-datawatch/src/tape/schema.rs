@@ -382,6 +382,9 @@ mod tests {
             Kind::MarginState,
             Kind::PositionState,
             Kind::Collateral,
+            Kind::Orders,
+            Kind::OrderUpdates,
+            Kind::PnlHistory,
         ];
         for kind in accounts {
             assert!(!projected(kind), "{kind}");

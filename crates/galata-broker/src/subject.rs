@@ -188,6 +188,25 @@ mod tests {
     }
 
     #[test]
+    fn the_order_and_pnl_kinds_are_addressed_by_alias() {
+        // Each kind the order vocabulary adds is a subject of its account's,
+        // under the accounts root, spelled as its dataset is.
+        let derive = Venue::new("derive-xyz").unwrap();
+        let alias = Account::new("owner_s3").unwrap();
+        for (kind, last) in [
+            (Kind::Orders, "orders"),
+            (Kind::OrderUpdates, "order_updates"),
+            (Kind::PnlHistory, "pnl_history"),
+        ] {
+            let subject = Subject::account(&derive, &alias, kind).unwrap();
+            assert_eq!(
+                subject.as_str(),
+                format!("accounts.derive-xyz.owner_s3.{last}")
+            );
+        }
+    }
+
+    #[test]
     fn an_address_where_an_alias_belongs_forms_no_subject() {
         // The token accepts it — `0x…` is alphanumeric — so the subject is
         // the last place it can be stopped before every subscriber reads it.

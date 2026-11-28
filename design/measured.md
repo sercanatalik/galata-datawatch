@@ -6297,3 +6297,88 @@ make it.
 - **At 0.001 or above,** every snapshot agrees and no Hyperliquid figure is
   labelled.
 - **At 0.0001,** 37 of the 174 HYPE snapshots would be labelled estimates.
+
+## The account's orders, trades and PnL, as each venue answers — 2026-11-27
+
+`add-account-vocabulary-orders` tasks 1.1 to 1.3. One read of each, for
+the owner's accounts, read-only:
+- **Hyperliquid**, by address: open orders on the main dex and `xyz`, order
+  history, and the portfolio's PnL history.
+- **Derive**, signed with the ledger's key, wallet-wide: order, trade and
+  funding history over 30 days, and value history over a day.
+
+The fixtures are scrubbed and saved beside the ledgers' own:
+- `tests/fixtures/hyperliquid/ledger-open-orders-empty.json`,
+  `ledger-historical-orders.json` and `ledger-portfolio.json`, flat as that
+  folder's are;
+- `tests/fixtures/derive_xyz/ledger/get_order_history.json`,
+  `get_trade_history.json`, `get_funding_history.json` and
+  `get_subaccount_value_history.json`.
+
+Replaced with stand-ins of the same shape: addresses, signatures, long hex,
+`cloid`s, subaccount ids, `oid`s (one stand-in per order, so an order's rows
+still share it), UUIDs, nonces, every non-zero amount, every coin and
+instrument name, and the price a trigger condition writes into words. Every
+time is shifted by one withheld offset, so order and gaps survive. A scan of
+the output found none of the 659 replaced originals.
+
+```text
+Hyperliquid
+  frontendOpenOrders {user, dex}   a list of orders; empty on both dexes at the read (nothing rested)
+  historicalOrders {user}          221 rows for 111 orders, one row per status change:
+                                     {order: {oid, cloid, coin, side, orderType, origSz, sz, limitPx,
+                                      triggerPx, triggerCondition, isTrigger, isPositionTpsl,
+                                      reduceOnly, tif, timestamp, children}, status, statusTimestamp}
+                                   statuses seen: open, filled, canceled, triggered,
+                                     reduceOnlyCanceled, reduceOnlyRejected
+                                   types seen: Limit, Market, Take Profit Market; tpsl absent
+  portfolio {user}                 8 windows: day, week, month, allTime and perp…; each holds
+                                     accountValueHistory and pnlHistory as [time ms, "value"], and vlm
+
+Derive, wallet-wide (subaccount_id 0 in the answer)
+  get_order_history                {orders, pagination {count, num_pages}}; 3 orders
+                                   ONE ROW PER ORDER, at its latest status (filled, cancelled), with
+                                     order_id, instrument_name, direction, order_type, time_in_force,
+                                     amount, filled_amount, limit_price, trigger_price, trigger_type,
+                                     trigger_price_type, order_status, cancel_reason,
+                                     creation_timestamp, last_update_timestamp, subaccount_id,
+                                     signer, nonce, signature
+  get_trade_history                {trades, pagination}; 2 trades, with trade_id, order_id,
+                                     subaccount_id, instrument_name, direction, trade_amount,
+                                     trade_price, trade_fee, realized_pnl, liquidity_role,
+                                     mark_price, index_price, timestamp, tx_hash
+  get_funding_history              {events, pagination}; none: the owner holds no perpetual
+  get_subaccount_value_history     {subaccount_value_history, pagination}; 16 points for 2
+                                     subaccounts over a day at period 3600, each {subaccount_id,
+                                     timestamp, subaccount_value, initial_margin,
+                                     maintenance_margin, margin_type, currency}
+                                   accepted wallet-wide, which the design assumed was not
+```
+
+**What this changes in the design:**
+- **Derive states an order once, at its latest status.** Hyperliquid states
+  every status change. So a Derive order update is a change the ledger sees
+  between two reads, identified by order id, status and
+  `last_update_timestamp`. A change that both happens and is superseded
+  between two reads is not seen by REST. Change 2's `{id}.orders` stream sees
+  it.
+- **Derive's value history takes the wallet**, so it is one request a
+  cadence, not one per subaccount.
+- **Hyperliquid's order history reaches the most recent orders only.** 221
+  rows reached back weeks for this account. The record begins at the first
+  read.
+- **No open order rested on Hyperliquid at the read.** A non-empty set's
+  rows have the shape of `historicalOrders`' `order`, which the tests use.
+- **No Derive funding event exists for this account.** The funding
+  normaliser's test uses Derive's documented event shape, stated so.
+- **Hyperliquid stamps a market take-profit's `triggered` and `filled`
+  in the same millisecond.** The two are told apart by status, which is
+  part of an update's identity, so both are kept.
+- **A Hyperliquid spot fill failed its whole fills page** (2026-11-28,
+  counted over the live record, values never read): 90 of 335 recorded
+  pages would not normalise, each refused because `@…` is no ticker. With
+  `Fill` naming its market as text, 426 of 426 pages normalise (the record
+  had grown while the walk asked the stuck range again).
+- **Hyperliquid's order history holds spot orders.** 8 of the 221 rows name
+  a spot pair (`@…` or `…/…`), which a ticker cannot hold, so an order names
+  its market as text.

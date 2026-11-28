@@ -1,0 +1,64 @@
+{
+ "id": "38500005-2225-7012-9279-075472136434",
+ "result": {
+  "pagination": {
+   "count": 2,
+   "num_pages": 1
+  },
+  "subaccount_id": 0,
+  "trades": [
+   {
+    "batch_status": "Settled",
+    "block_trade_id": null,
+    "direction": "sell",
+    "expected_rebate": "0",
+    "extra_fee": "0",
+    "index_price": "168.357805872426",
+    "instrument_name": "ETH-20261225-4000-C",
+    "is_transfer": false,
+    "label": "",
+    "liquidity_role": "maker",
+    "mark_price": "159.545402130100",
+    "op_uuid": "95551759-1312-2791-0200-790722419079",
+    "order_id": "39902576-1471-3014-1183-133744012765",
+    "quote_id": null,
+    "realized_pnl": "0",
+    "realized_pnl_excl_fees": "0",
+    "rfq_id": null,
+    "subaccount_id": 1001,
+    "timestamp": 1790370585567,
+    "trade_amount": "457",
+    "trade_fee": "307.59441514475",
+    "trade_id": "29073081-5053-0349-3632-131677690511",
+    "trade_price": "451.1",
+    "tx_hash": "0xabababababababababababababababababababababababababababababababab"
+   },
+   {
+    "batch_status": "Settled",
+    "block_trade_id": null,
+    "direction": "sell",
+    "expected_rebate": "0",
+    "extra_fee": "0",
+    "index_price": "1.783651315021",
+    "instrument_name": "ETH-20261225-4000-P",
+    "is_transfer": false,
+    "label": "",
+    "liquidity_role": "maker",
+    "mark_price": "322.834255407999",
+    "op_uuid": "55664140-2053-3453-3058-020120350464",
+    "order_id": "84101024-2748-8932-2953-431448359764",
+    "quote_id": null,
+    "realized_pnl": "0",
+    "realized_pnl_excl_fees": "0",
+    "rfq_id": null,
+    "subaccount_id": 1001,
+    "timestamp": 1790354628832,
+    "trade_amount": "755",
+    "trade_fee": "56.25444790593",
+    "trade_id": "13531607-8503-3314-6618-258132526705",
+    "trade_price": "241.3",
+    "tx_hash": "0xabababababababababababababababababababababababababababababababab"
+   }
+  ]
+ }
+}

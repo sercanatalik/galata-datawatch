@@ -258,6 +258,15 @@ pub enum Event {
     PositionState(PositionState),
     /// One collateral asset of a subaccount, with its margin contributions.
     Collateral(Collateral),
+    /// One order resting at the venue, in an account's complete set of them at
+    /// one read.
+    Order(Order),
+    /// One change of an order's status, as the venue states it: the order as
+    /// it stood then, its status always stated, its time the envelope's
+    /// `at_micros`.
+    OrderUpdate(Order),
+    /// One point of the account-value and PnL history the venue states.
+    PnlPoint(PnlPoint),
 }
 
 impl Event {
@@ -292,6 +301,9 @@ impl Event {
             Event::MarginState(_) => Kind::MarginState,
             Event::PositionState(_) => Kind::PositionState,
             Event::Collateral(_) => Kind::Collateral,
+            Event::Order(_) => Kind::Orders,
+            Event::OrderUpdate(_) => Kind::OrderUpdates,
+            Event::PnlPoint(_) => Kind::PnlHistory,
         }
     }
 }
@@ -998,8 +1010,12 @@ pub struct Position {
 pub struct Fill {
     /// The dex, where the venue has several. `None` is the main one.
     pub dex: Option<String>,
-    /// The instrument, the dex prefix composed away.
-    pub ticker: Ticker,
+    /// The market, as the venue names it, a dex prefix composed away: `BTC`,
+    /// `GOLD`, a Derive instrument, and a Hyperliquid spot pair as `@107` or
+    /// `PURR/USDC`. **Text, not a [`Ticker`]**, as [`Order::market`] is: a
+    /// spot pair is no token, and a page holding one spot fill used to fail
+    /// whole (90 of 335 recorded pages, measured 2026-11-28).
+    pub market: String,
     /// `Bid` bought, `Ask` sold.
     pub side: Side,
     /// What it filled at.
@@ -1020,11 +1036,12 @@ pub struct Fill {
     pub builder_fee: Option<Num>,
     /// Whether the order crossed the spread: took liquidity.
     pub crossed: Option<bool>,
-    /// The venue's order id.
-    pub order_id: u64,
-    /// The venue's trade id. **Not unique alone**: the two sides of one
-    /// trade share it, so identity is `(trade_id, order_id)`.
-    pub trade_id: u64,
+    /// The venue's order id, **as text**: Hyperliquid's is a number, Derive's
+    /// a UUID.
+    pub order_id: String,
+    /// The venue's trade id, as text. **Not unique alone**: the two sides of
+    /// one trade share it, so identity is `(trade_id, order_id)`.
+    pub trade_id: String,
     /// The TWAP order this fill belonged to, where one did.
     pub twap_id: Option<u64>,
 }
@@ -1039,10 +1056,11 @@ pub struct FundingPayment {
     /// **As the venue signs it**: negative when the position paid (measured
     /// on mainnet, 2026-09-25).
     pub usdc: Num,
-    /// The position it was paid on, signed.
-    pub size: Num,
-    /// The rate that settled.
-    pub rate: Num,
+    /// The position it was paid on, signed, where the venue states it: Derive
+    /// does not.
+    pub size: Option<Num>,
+    /// The rate that settled, where the venue states it: Derive does not.
+    pub rate: Option<Num>,
     /// How many samples the venue averaged, where it says.
     pub samples: Option<u32>,
 }
@@ -1330,6 +1348,83 @@ pub struct Collateral {
     pub pending_interest: Option<Num>,
 }
 
+/// One order of an account's, **as the venue states it**: a resting order in
+/// an open-orders set ([`Event::Order`]), or an order as it stood at a change
+/// of its status ([`Event::OrderUpdate`]).
+///
+/// The type and the status are the venue's own words, never mapped to a
+/// common list: a client tells a stop from a take-profit by reading them, as
+/// the watcher does. Every amount is a [`Num`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Order {
+    /// The dex, where the venue has several. `None` is the main one.
+    pub dex: Option<String>,
+    /// The market, as the venue names it, a dex prefix composed away: `GOLD`,
+    /// `ETH-20261225-4000-C`, and a Hyperliquid spot pair as `@107` or
+    /// `PURR/USDC`. **Text, not a [`Ticker`]**: a spot pair is no token, and
+    /// an account's row is never a partition or a subject, which is what a
+    /// ticker's spelling guards.
+    pub market: String,
+    /// `Bid` buys, `Ask` sells.
+    pub side: Side,
+    /// The venue's order id, **as text**: Hyperliquid's is a number, Derive's
+    /// a UUID. Neither names the account outside the venue.
+    pub order_id: String,
+    /// The id the client gave the order, where it gave one: Hyperliquid's
+    /// `cloid`, Derive's `label`.
+    pub client_id: Option<String>,
+    /// The order type, as the venue names it: `Limit`, `Take Profit Market`;
+    /// `limit`, `market`.
+    pub order_type: String,
+    /// The trigger type, where the venue states one apart from the order type:
+    /// Derive's `stoploss` or `takeprofit`.
+    pub trigger_type: Option<String>,
+    /// Whether the order waits on a trigger, where the venue says.
+    pub is_trigger: Option<bool>,
+    /// Whether it is a take-profit or stop on the whole position, where the
+    /// venue says (Hyperliquid's `isPositionTpsl`).
+    pub position_tpsl: Option<bool>,
+    /// The size as placed.
+    pub size: Option<Num>,
+    /// The size not yet filled.
+    pub remaining: Option<Num>,
+    /// The limit price.
+    pub limit_price: Option<Num>,
+    /// The price that triggers it, where it has one.
+    pub trigger_price: Option<Num>,
+    /// The trigger's condition, as the venue words it: Hyperliquid's
+    /// `Price above 61240`, Derive's trigger price type, `mark` or `index`.
+    pub trigger_condition: Option<String>,
+    /// Whether it only reduces a position.
+    pub reduce_only: Option<bool>,
+    /// Its time in force, as the venue names it.
+    pub time_in_force: Option<String>,
+    /// Its status, as the venue names it: always stated on an update, and on
+    /// a resting order where the read states one (Derive's `untriggered`).
+    pub status: Option<String>,
+    /// When it was placed, where the venue says.
+    pub placed_micros: Option<i64>,
+}
+
+/// One point of the account-value and PnL history **the venue states**, in
+/// one of its windows. Nothing here is computed: a window the venue does not
+/// state has no points. The point's time is the envelope's `at_micros`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PnlPoint {
+    /// The window or series, as the venue names it: Hyperliquid's `day`,
+    /// `week`, `month`, `allTime` and their `perp` forms; Derive's value
+    /// history, by the period asked.
+    pub window: String,
+    /// The account's value at the point.
+    pub account_value: Option<Num>,
+    /// The PnL over the window to the point, where the venue states one.
+    pub pnl: Option<Num>,
+    /// The initial margin at the point, where the venue states one.
+    pub initial_margin: Option<Num>,
+    /// The maintenance margin at the point, where the venue states one.
+    pub maintenance_margin: Option<Num>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,6 +1450,67 @@ mod tests {
 
     fn num(s: &str) -> Option<Num> {
         Some(Decimal::from_str(s).unwrap())
+    }
+
+    /// A resting stop-market sell on a dex, as the order vocabulary carries it.
+    fn stop_order(status: Option<&str>) -> Order {
+        Order {
+            dex: Some("xyz".into()),
+            market: "GOLD".into(),
+            side: Side::Ask,
+            order_id: "9000000001".into(),
+            client_id: None,
+            order_type: "Stop Market".into(),
+            trigger_type: None,
+            is_trigger: Some(true),
+            position_tpsl: Some(false),
+            size: num("0.5"),
+            remaining: num("0.5"),
+            limit_price: num("4100.0"),
+            trigger_price: num("4120.5"),
+            trigger_condition: Some("Price below 4120.5".into()),
+            reduce_only: Some(true),
+            time_in_force: None,
+            status: status.map(str::to_string),
+            placed_micros: Some(1_700_000_000_000_000),
+        }
+    }
+
+    #[test]
+    fn an_order_id_is_text_on_the_wire() {
+        // Derive's order ids are UUIDs; a number here would hold Hyperliquid's
+        // and refuse Derive's. Held on the WIRE, as the no-float test is.
+        let json = serde_json::to_value(stop_order(None)).unwrap();
+        assert!(json["order_id"].is_string(), "{json}");
+        let derive = Order {
+            order_id: "2c1f8a40-6d1e-4f0e-9b9a-0e5f3c2a7d11".into(),
+            ..stop_order(Some("untriggered"))
+        };
+        let back: Order = serde_json::from_value(serde_json::to_value(&derive).unwrap()).unwrap();
+        assert_eq!(back, derive);
+    }
+
+    #[test]
+    fn the_order_vocabulary_lands_in_its_own_datasets() {
+        let kinds = [
+            Event::Order(stop_order(None)).kind(),
+            Event::OrderUpdate(stop_order(Some("filled"))).kind(),
+            Event::PnlPoint(PnlPoint {
+                window: "day".into(),
+                account_value: None,
+                pnl: None,
+                initial_margin: None,
+                maintenance_margin: None,
+            })
+            .kind(),
+        ];
+        assert_eq!(kinds, [Kind::Orders, Kind::OrderUpdates, Kind::PnlHistory]);
+        for kind in kinds {
+            assert!(
+                matches!(kind.addressing(), crate::Addressing::Account),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
@@ -1666,7 +1822,7 @@ mod tests {
         let rows = [
             Event::Fill(Fill {
                 dex: Some("xyz".into()),
-                ticker: Ticker::new("GOLD").unwrap(),
+                market: "GOLD".into(),
                 side: Side::Bid,
                 price: Decimal::from_str("4301.5").unwrap(),
                 size: Decimal::from_str("0.5").unwrap(),
@@ -1677,16 +1833,16 @@ mod tests {
                 fee_token: Some("USDC".into()),
                 builder_fee: None,
                 crossed: Some(true),
-                order_id: 1,
-                trade_id: 2,
+                order_id: "1".into(),
+                trade_id: "2".into(),
                 twap_id: None,
             }),
             Event::FundingPayment(FundingPayment {
                 dex: None,
                 ticker: Ticker::new("BTC").unwrap(),
                 usdc: Decimal::from_str("-0.1239").unwrap(),
-                size: Decimal::from_str("0.01").unwrap(),
-                rate: Decimal::from_str("0.0000125").unwrap(),
+                size: num("0.01"),
+                rate: num("0.0000125"),
                 samples: Some(60),
             }),
             Event::LedgerUpdate(LedgerUpdate {
@@ -1706,15 +1862,31 @@ mod tests {
                 amount: None,
                 fee: None,
             }),
+            Event::Order(stop_order(None)),
+            Event::OrderUpdate(stop_order(Some("triggered"))),
+            Event::PnlPoint(PnlPoint {
+                window: "perpWeek".into(),
+                account_value: num("1520.25"),
+                pnl: num("-12.5"),
+                initial_margin: None,
+                maintenance_margin: None,
+            }),
+            Event::PnlPoint(PnlPoint {
+                window: "3600".into(),
+                account_value: num("980.1"),
+                pnl: None,
+                initial_margin: num("-120.5"),
+                maintenance_margin: num("-60.25"),
+            }),
         ];
+        // Order and trade ids are text, so a number under either name fails.
         let integers = [
             "seq",
             "at_micros",
             "recv_micros",
-            "order_id",
-            "trade_id",
             "twap_id",
             "samples",
+            "placed_micros",
         ];
         fn walk(v: &serde_json::Value, key: &str, ints: &[&str], bad: &mut Vec<String>) {
             match v {

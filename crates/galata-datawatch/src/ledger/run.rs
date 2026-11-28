@@ -53,6 +53,21 @@ pub enum Ask {
     Balances,
     /// What an account has borrowed and supplied: account-wide.
     BorrowLend,
+    /// An account's open orders on every dex it is declared on, as one
+    /// complete set: account-wide, though the venue may answer per dex.
+    OpenOrders,
+    /// An account's recent orders, one row per change of status: a whole
+    /// read at the events cadence.
+    OrderHistory,
+    /// An account's value and PnL history, per window: a whole read at the
+    /// events cadence.
+    Portfolio,
+    /// A wallet's trades over a window, read by wallet.
+    TradeHistory,
+    /// A wallet's funding payments over a window, read by wallet.
+    FundingHistory,
+    /// A wallet's subaccounts' value history over a window, read by wallet.
+    ValueHistory,
 }
 
 /// A read that did not answer: why, and how long the venue said to wait
@@ -101,11 +116,13 @@ pub trait AccountVenue: Send + Sync {
     /// The account-wide reads this venue makes at each snapshot, each with the
     /// series a miss is a gap in. Asked once per account, never per dex.
     fn account_wide_asks(&self) -> &'static [(Ask, Series)];
-    /// One account's answer to an account-wide `ask`, raw.
+    /// One account's answer to an account-wide `ask`, raw, on the `dexes` the
+    /// account is declared on where the venue answers that ask per dex.
     fn account_wide(
         &self,
         ask: Ask,
         address: &Secret,
+        dexes: &[String],
     ) -> impl Future<Output = Result<Vec<u8>, Refusal>> + Send;
     /// The venue's reference data that names what account-wide answers refer
     /// to by index, raw. Read at each discovery run.
@@ -183,10 +200,44 @@ pub trait AccountVenue: Send + Sync {
     ) -> impl Future<Output = Result<Vec<u8>, Refused>> + Send {
         async { Err(Refusal::Unreachable.into()) }
     }
+    /// The whole reads this venue makes of each account at the **events**
+    /// cadence, each with the series a miss is a gap in: answers that repeat
+    /// what they held before, kept once by identity rather than walked from a
+    /// cursor. Asked through [`AccountVenue::account_wide`].
+    fn history_asks(&self) -> &'static [(Ask, Series)] {
+        &[]
+    }
+    /// The history a venue [read by wallet](AccountVenue::reads_by_wallet)
+    /// keeps, at the events cadence, each with the series a miss is a gap in
+    /// and whether it is read **from its cursor** (`true`: rows that never
+    /// change, the newest held being where the next window starts) or over a
+    /// fixed reach back (`false`: rows that change after they first appear).
+    fn wallet_history_asks(&self) -> &'static [(Ask, Series, bool)] {
+        &[]
+    }
+    /// One whole window of a wallet's history for `ask`, from `from_micros`
+    /// to `now_micros`, every page composed, raw. **Refused if any page did
+    /// not answer**: a window is recorded whole or not at all, so the cursor
+    /// the record gives never passes an unread page.
+    fn wallet_history(
+        &self,
+        _master: &ResolvedAccount,
+        _ask: Ask,
+        _from_micros: i64,
+        _now_micros: i64,
+    ) -> impl Future<Output = Result<Vec<u8>, Refused>> + Send {
+        async { Err(Refusal::Unreachable.into()) }
+    }
     /// The kinds the ledger projects for this venue's accounts, and reads
     /// back for the fold.
     fn projected_kinds(&self) -> &'static [Kind] {
         &crate::ledger::project::PROJECTED
+    }
+    /// The answer that states this venue's open orders: their own read where
+    /// the venue answers them apart, or the answer they ride. Its newest
+    /// receipt is the open-orders set the projection writes.
+    fn orders_answer(&self) -> Kind {
+        Kind::Orders
     }
     /// A wallet payload: the answer verbatim, with the alias each subaccount
     /// it names is bound to. `aliases` is keyed by the subaccount's
@@ -370,9 +421,11 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
 pub struct EventsPass {
     /// Pages recorded.
     pub pages: u32,
+    /// Whole reads recorded ([`AccountVenue::history_asks`]).
+    pub reads: u32,
     /// Asks that did not answer.
     pub missed: u32,
-    /// `beyond_reach` gaps recorded.
+    /// Gaps recorded: `beyond_reach`, or a whole read missed.
     pub gaps: u32,
     /// Walks stopped because a full page did not advance.
     pub stalled: u32,
@@ -508,6 +561,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 continue;
             }
             let rows = history.rows();
+            let orders_read = history.read_at(self.venue.orders_answer());
             // The same rows, projected. Best effort, as the report's own write
             // is: a projection that cannot be written must not stop the ledger
             // recording, which is what it projects.
@@ -519,6 +573,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                         account.venue.as_str(),
                         rows,
                         kinds,
+                        orders_read,
                     )
                 } else {
                     crate::ledger::project::write_kinds(
@@ -527,15 +582,33 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                         account.alias.as_str(),
                         rows,
                         kinds,
+                        orders_read,
                     )
                 }
             {
                 tracing::warn!(account = account.alias.as_str(), %error, "the ledger was not projected");
             }
-            report.accounts.insert(
-                account.alias.to_string(),
-                crate::ledger::fold::fold(rows, &tolerances),
-            );
+            if by_wallet {
+                // A wallet's rows are its subaccounts': each folded on its
+                // own, so no book holds two subaccounts' fills.
+                let mut by_sub: BTreeMap<&str, Vec<Envelope>> = BTreeMap::new();
+                for row in rows {
+                    if let Some(sub) = row.account() {
+                        by_sub.entry(sub.as_str()).or_default().push(row.clone());
+                    }
+                }
+                for (sub, rows) in by_sub {
+                    report.accounts.insert(
+                        sub.to_string(),
+                        crate::ledger::fold::fold(&rows, &tolerances),
+                    );
+                }
+            } else {
+                report.accounts.insert(
+                    account.alias.to_string(),
+                    crate::ledger::fold::fold(rows, &tolerances),
+                );
+            }
         }
         if let Ok(json) = serde_json::to_string_pretty(&report) {
             let _ = file.write(&json);
@@ -573,6 +646,11 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             Ask::Listing | Ask::Role => galata_wire::Kind::Accounts,
             Ask::Balances => Series::Balances.kind(),
             Ask::BorrowLend => Series::BorrowLend.kind(),
+            Ask::OpenOrders => Series::Orders.kind(),
+            Ask::OrderHistory => Series::OrderUpdates.kind(),
+            Ask::Portfolio | Ask::ValueHistory => Series::PnlHistory.kind(),
+            Ask::TradeHistory => Series::Fills.kind(),
+            Ask::FundingHistory => Series::FundingPayments.kind(),
         };
         let payload = Payload {
             seq: 0,
@@ -1031,7 +1109,11 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             let asked = self.clock.now_micros();
             let key = (account.alias.clone(), series);
             let interval = self.cadences.snapshot_micros;
-            match self.venue.account_wide(ask, account.address()).await {
+            match self
+                .venue
+                .account_wide(ask, account.address(), &account.dexes)
+                .await
+            {
                 Ok(answer) => {
                     let bytes = self
                         .venue
@@ -1065,6 +1147,163 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                     {
                         self.record_gap_for(account, series, None, from_micros, to_micros, cause)?;
                         pass.gaps += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One account's whole reads at the events cadence, each on its own
+    /// cadence: an answer is archived verbatim, and a miss is a gap in that
+    /// read's series, as an account-wide read's is. What the answer repeats of
+    /// an earlier one is kept once by identity when it is read back.
+    async fn history_reads(
+        &mut self,
+        account: &ResolvedAccount,
+        pass: &mut EventsPass,
+    ) -> Result<(), LedgerError> {
+        for &(ask, series) in self.venue.history_asks() {
+            let asked = self.clock.now_micros();
+            let key = (account.alias.clone(), series);
+            let interval = self.cadences.events_micros;
+            match self
+                .venue
+                .account_wide(ask, account.address(), &account.dexes)
+                .await
+            {
+                Ok(answer) => {
+                    let bytes = self
+                        .venue
+                        .compose_wide(ask, self.reference.as_deref(), &answer);
+                    self.record(account, ask, bytes).map_err(record_error)?;
+                    self.wide_polls
+                        .entry(key)
+                        .or_insert_with(|| Cadence::new(interval))
+                        .answered(asked);
+                    self.status
+                        .accounts
+                        .entry(account.alias.to_string())
+                        .or_default()
+                        .account_wide_micros
+                        .insert(series.to_string(), asked);
+                    pass.reads += 1;
+                }
+                Err(refusal) => {
+                    pass.missed += 1;
+                    pass.throttled |= refusal == Refusal::Throttled;
+                    let missed = self
+                        .wide_polls
+                        .entry(key)
+                        .or_insert_with(|| Cadence::new(interval))
+                        .missed(asked, refusal.cause());
+                    if let Polled::Missed {
+                        from_micros,
+                        to_micros,
+                        cause,
+                    } = missed
+                    {
+                        self.record_gap_for(account, series, None, from_micros, to_micros, cause)?;
+                        pass.gaps += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One wallet's history at the events cadence: each kind a whole window,
+    /// from the newest the record holds of it (or [`FIRST_REACH_MICROS`] back,
+    /// where it holds none, or for a kind whose rows change), archived under
+    /// the wallet beside its subaccounts' aliases. A miss is a gap in that
+    /// kind for each subaccount, and the next window starts where the record
+    /// does, so it is caught up.
+    async fn wallet_history_reads(
+        &mut self,
+        master: &ResolvedAccount,
+        pass: &mut EventsPass,
+    ) -> Result<(), LedgerError> {
+        let ours = self.ours();
+        let kinds = self.venue.projected_kinds();
+        let history = self.histories.entry(master.alias.clone()).or_default();
+        history.extend(
+            self.archive.root(),
+            master.venue.as_str(),
+            master.alias.as_str(),
+            kinds,
+            self.venue.normaliser(),
+            &ours,
+        )?;
+        let newest: BTreeMap<Kind, i64> = [
+            Kind::OrderUpdates,
+            Kind::Fills,
+            Kind::FundingPayments,
+            Kind::PnlHistory,
+        ]
+        .into_iter()
+        .filter_map(|k| crate::ledger::events::newest(history.rows(), k).map(|at| (k, at)))
+        .collect();
+        let subs: Vec<ResolvedAccount> = self
+            .subs
+            .iter()
+            .filter(|(alias, (under, _))| {
+                *under == master.alias && self.polled_subs.contains(*alias)
+            })
+            .map(|(_, (_, sub))| sub.clone())
+            .collect();
+        let aliases: BTreeMap<String, Account> = subs
+            .iter()
+            .map(|sub| (sub.fingerprint.clone(), sub.alias.clone()))
+            .collect();
+        for &(ask, series, from_cursor) in self.venue.wallet_history_asks() {
+            let asked = self.clock.now_micros();
+            let reach = asked - FIRST_REACH_MICROS;
+            let from = match newest.get(&series.kind()) {
+                Some(&at) if from_cursor => at,
+                _ => reach,
+            };
+            let key = (master.alias.clone(), series);
+            let interval = self.cadences.events_micros;
+            let answer = if self.held(asked) {
+                Err(Refused::from(Refusal::Throttled))
+            } else {
+                self.venue.wallet_history(master, ask, from, asked).await
+            };
+            match answer {
+                Ok(answer) => {
+                    let bytes = self.venue.compose_wallet(&aliases, &answer);
+                    self.record(master, ask, bytes).map_err(record_error)?;
+                    self.wide_polls
+                        .entry(key)
+                        .or_insert_with(|| Cadence::new(interval))
+                        .answered(asked);
+                    self.status
+                        .accounts
+                        .entry(master.alias.to_string())
+                        .or_default()
+                        .account_wide_micros
+                        .insert(series.to_string(), asked);
+                    pass.reads += 1;
+                }
+                Err(refused) => {
+                    self.hold(refused, asked);
+                    pass.missed += 1;
+                    pass.throttled |= refused.refusal == Refusal::Throttled;
+                    let missed = self
+                        .wide_polls
+                        .entry(key)
+                        .or_insert_with(|| Cadence::new(interval))
+                        .missed(asked, refused.refusal.cause());
+                    if let Polled::Missed {
+                        from_micros,
+                        to_micros,
+                        cause,
+                    } = missed
+                    {
+                        for sub in &subs {
+                            self.record_gap_for(sub, series, None, from_micros, to_micros, cause)?;
+                            pass.gaps += 1;
+                        }
                     }
                 }
             }
@@ -1360,7 +1599,19 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         if crate::ledger::events::EVENT_KINDS
             .iter()
             .all(|kind| self.venue.events_channel(*kind).is_none())
+            && self.venue.history_asks().is_empty()
+            && self.venue.wallet_history_asks().is_empty()
         {
+            return Ok(pass);
+        }
+        if self.venue.reads_by_wallet() {
+            for master in self.masters.clone() {
+                self.wallet_history_reads(&master, &mut pass).await?;
+            }
+            if !pass.throttled {
+                self.backoff.reset();
+            }
+            self.write_status();
             return Ok(pass);
         }
         for account in self.polled() {
@@ -1368,6 +1619,7 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             for kind in crate::ledger::events::EVENT_KINDS {
                 self.walk(&account, kind, &mut pass).await?;
             }
+            self.history_reads(&account, &mut pass).await?;
             for kind in crate::ledger::events::EVENT_KINDS {
                 if self.reached.contains(&(account.alias.clone(), kind)) {
                     continue;
@@ -1461,6 +1713,11 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     }
 }
 
+/// How far back a wallet's history is read where the record holds none of
+/// it, and how far back every window of a kind whose rows change reaches:
+/// thirty days, the window measured on 2026-11-27.
+pub const FIRST_REACH_MICROS: i64 = 30 * 86_400 * 1_000_000;
+
 /// The series a gap in one kind of history is about.
 fn kind_series(kind: Kind) -> Series {
     match kind {
@@ -1504,6 +1761,14 @@ mod tests {
         asked: Mutex<Vec<(String, Kind, i64)>>,
         balances: Mutex<Result<Vec<u8>, Refusal>>,
         borrow_lend: Mutex<Result<Vec<u8>, Refusal>>,
+        /// What each dex answers for open orders.
+        open_orders: Mutex<Result<Vec<u8>, Refusal>>,
+        /// What one dex answers instead, where the test says.
+        open_orders_on: Mutex<BTreeMap<String, Result<Vec<u8>, Refusal>>>,
+        /// What the order history answers.
+        order_history: Mutex<Result<Vec<u8>, Refusal>>,
+        /// What the portfolio answers.
+        portfolio: Mutex<Result<Vec<u8>, Refusal>>,
         /// Every account-wide ask: (address, ask).
         wide_asked: Mutex<Vec<(String, Ask)>>,
         /// What each key check answers, in order; `Ok(None)` after.
@@ -1532,6 +1797,10 @@ mod tests {
                 asked: Mutex::new(Vec::new()),
                 balances: Mutex::new(Ok(SPOT.to_vec())),
                 borrow_lend: Mutex::new(Ok(LEND.to_vec())),
+                open_orders: Mutex::new(Ok(b"[]".to_vec())),
+                open_orders_on: Mutex::new(BTreeMap::new()),
+                order_history: Mutex::new(Ok(b"[]".to_vec())),
+                portfolio: Mutex::new(Ok(b"[]".to_vec())),
                 wide_asked: Mutex::new(Vec::new()),
                 keys: Mutex::new(std::collections::VecDeque::new()),
                 listings: Mutex::new(0),
@@ -1580,21 +1849,50 @@ mod tests {
                 Ask::Mode => hl::MODE_CHANNEL,
                 Ask::Balances => hl::BALANCES_CHANNEL,
                 Ask::BorrowLend => hl::BORROW_LEND_CHANNEL,
+                Ask::OpenOrders => hl::OPEN_ORDERS_CHANNEL,
+                Ask::OrderHistory => hl::ORDER_HISTORY_CHANNEL,
+                Ask::Portfolio => hl::PORTFOLIO_CHANNEL,
+                Ask::TradeHistory | Ask::FundingHistory | Ask::ValueHistory => "not-asked",
             }
         }
         fn account_wide_asks(&self) -> &'static [(Ask, Series)] {
             &[
                 (Ask::Balances, Series::Balances),
                 (Ask::BorrowLend, Series::BorrowLend),
+                (Ask::OpenOrders, Series::Orders),
             ]
         }
-        async fn account_wide(&self, ask: Ask, address: &Secret) -> Result<Vec<u8>, Refusal> {
+        fn history_asks(&self) -> &'static [(Ask, Series)] {
+            &[
+                (Ask::OrderHistory, Series::OrderUpdates),
+                (Ask::Portfolio, Series::PnlHistory),
+            ]
+        }
+        async fn account_wide(
+            &self,
+            ask: Ask,
+            address: &Secret,
+            dexes: &[String],
+        ) -> Result<Vec<u8>, Refusal> {
             self.wide_asked
                 .lock()
                 .unwrap()
                 .push((address.expose().to_string(), ask));
             match ask {
                 Ask::Balances => self.balances.lock().unwrap().clone(),
+                Ask::OrderHistory => self.order_history.lock().unwrap().clone(),
+                Ask::Portfolio => self.portfolio.lock().unwrap().clone(),
+                Ask::OpenOrders => {
+                    let mut answers = Vec::new();
+                    for dex in dexes {
+                        let answer = match self.open_orders_on.lock().unwrap().get(dex) {
+                            Some(answer) => answer.clone(),
+                            None => self.open_orders.lock().unwrap().clone(),
+                        };
+                        answers.push((dex.as_str(), answer?));
+                    }
+                    Ok(hl::open_orders_bytes(&answers))
+                }
                 _ => self.borrow_lend.lock().unwrap().clone(),
             }
         }
@@ -1602,6 +1900,9 @@ mod tests {
             Ok(META.to_vec())
         }
         fn compose_wide(&self, ask: Ask, reference: Option<&[u8]>, answer: &[u8]) -> Vec<u8> {
+            if !matches!(ask, Ask::Balances | Ask::BorrowLend) {
+                return answer.to_vec();
+            }
             hl::wide_bytes(
                 self.channel(ask),
                 hl::names_for(reference, answer).as_ref(),
@@ -1755,9 +2056,12 @@ mod tests {
         assert_eq!(rows(Kind::FundingPayments), 0, "none, and a file saying so");
         for kind in crate::ledger::project::PROJECTED {
             let path = crate::ledger::project::path_of(&tape, "hyperliquid", "main", kind);
-            assert!(
+            // No snapshot pass ran, so nothing read the open orders: no file,
+            // rather than one saying nothing rests.
+            assert_eq!(
                 path.exists(),
-                "every kind the fold reads is projected: {kind}"
+                kind != Kind::Orders,
+                "every kind the fold reads is projected, the open orders once read: {kind}"
             );
         }
         let everything = projected_paths(&tape);
@@ -2362,7 +2666,10 @@ mod tests {
         run.boot().await.unwrap();
         let pass = run.snapshot_all().await.unwrap();
         assert_eq!(pass.answered, 4, "two accounts on two dexes");
-        assert_eq!(pass.wide_answered, 4, "two reads for each of two accounts");
+        assert_eq!(
+            pass.wide_answered, 6,
+            "three reads for each of two accounts"
+        );
 
         // Account-wide: each account asked once per read, never per dex.
         let asked = run.venue.wide_asked.lock().unwrap().clone();
@@ -2408,7 +2715,7 @@ mod tests {
         // Ten seconds on, a second pass: the same again.
         run.clock.advance_secs(10);
         let pass = run.snapshot_all().await.unwrap();
-        assert_eq!(pass.wide_answered, 4);
+        assert_eq!(pass.wide_answered, 6);
         assert_eq!(payloads(&root, "balances").len(), 4);
         assert_eq!(payloads(&root, "borrow_lend").len(), 4);
     }
@@ -2422,7 +2729,7 @@ mod tests {
         run.clock.advance_secs(10);
         *run.venue.borrow_lend.lock().unwrap() = Err(Refusal::Unreachable);
         let pass = run.snapshot_all().await.unwrap();
-        assert_eq!(pass.wide_answered, 1, "the spot read");
+        assert_eq!(pass.wide_answered, 2, "the spot and open-orders reads");
         assert_eq!(pass.wide_missed, 1, "the borrow and lend read");
         assert_eq!(pass.gaps, 1);
 
@@ -2540,6 +2847,219 @@ mod tests {
             vec![10, 20],
             "nested from the last answer, as snapshots are"
         );
+    }
+
+    /// One resting order with `frontendOpenOrders`' row shape: the scrubbed
+    /// history's first open order (measured 2026-11-27).
+    fn resting_orders() -> Vec<u8> {
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/hyperliquid/ledger-historical-orders.json"
+        ))
+        .unwrap();
+        let open = rows.iter().find(|r| r["status"] == "open").unwrap();
+        serde_json::to_vec(&[open["order"].clone()]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_missed_open_orders_read_is_a_gap_and_no_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.clock.advance_secs(10);
+        *run.venue.open_orders.lock().unwrap() = Err(Refusal::Unreachable);
+        let pass = run.snapshot_all().await.unwrap();
+        assert_eq!(pass.wide_missed, 1, "the open-orders read");
+
+        // Only the first pass's set: nothing stands in for the missed one.
+        let sets = payloads(&root, "orders");
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].channel, hl::OPEN_ORDERS_CHANNEL);
+        let gaps: Vec<Gap> = gaps(&root)
+            .into_iter()
+            .filter(|g| g.series == Series::Orders)
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].dex, None, "the account's set, every dex in it");
+        assert_eq!(gaps[0].cause, GapCause::PollFailed);
+        assert_eq!(gaps[0].to_micros - gaps[0].from_micros, 10 * SECOND);
+    }
+
+    #[tokio::test]
+    async fn one_dex_that_does_not_answer_leaves_no_set() {
+        // The set is every declared dex's, or none: the account in this
+        // ledger is declared on the main dex and `xyz`, and `xyz` refuses
+        // while the main dex states a resting order.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        *run.venue.open_orders.lock().unwrap() = Ok(resting_orders());
+        run.venue
+            .open_orders_on
+            .lock()
+            .unwrap()
+            .insert("xyz".into(), Err(Refusal::Throttled));
+        run.snapshot_all().await.unwrap();
+        assert!(
+            payloads(&root, "orders").is_empty(),
+            "no set holding the main dex's order alone"
+        );
+    }
+
+    /// A ledger that folds and projects, and where it projects to.
+    fn projecting(
+        dir: &std::path::Path,
+    ) -> (
+        LedgerRun<Scripted, TestClock>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let (run, root) = ledger(dir);
+        let tape = dir.join("ledger-tape");
+        std::fs::create_dir(&tape).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tape, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let file = StatusFile::named(&dir.join("status"), "ledger-fold-hyperliquid");
+        let run = run
+            .with_fold(
+                file,
+                crate::ledger::fold::Tolerances {
+                    position: "0".parse().unwrap(),
+                    relative: "0.00002".parse().unwrap(),
+                },
+            )
+            .with_projection(Some(tape.clone()));
+        (run, root, tape)
+    }
+
+    /// How many rows the main account's projection holds of a kind.
+    fn projected_rows(tape: &std::path::Path, kind: Kind) -> usize {
+        let path = crate::ledger::project::path_of(tape, "hyperliquid", "main", kind);
+        galata_segments::read_segment(&path)
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum()
+    }
+
+    const HISTORICAL_ORDERS: &[u8] =
+        include_bytes!("../../tests/fixtures/hyperliquid/ledger-historical-orders.json");
+    const PORTFOLIO: &[u8] =
+        include_bytes!("../../tests/fixtures/hyperliquid/ledger-portfolio.json");
+
+    #[tokio::test]
+    async fn a_second_read_of_the_same_order_history_adds_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root, tape) = projecting(dir.path());
+        *run.venue.order_history.lock().unwrap() = Ok(HISTORICAL_ORDERS.to_vec());
+        run.boot().await.unwrap();
+        let first = run.events_all().await.unwrap();
+        assert_eq!(first.reads, 2, "the history and the portfolio");
+        run.clock.advance_secs(300);
+        run.events_all().await.unwrap();
+        run.fold_all().unwrap();
+
+        // Both answers are in the record, verbatim; each update is one row.
+        let main_history = payloads(&root, "order_updates")
+            .into_iter()
+            .filter(|p| matches!(&p.address, PayloadAddress::Account(a) if a.account == "main"))
+            .count();
+        assert_eq!(main_history, 2);
+        let stated: Vec<serde_json::Value> = serde_json::from_slice(HISTORICAL_ORDERS).unwrap();
+        assert_eq!(projected_rows(&tape, Kind::OrderUpdates), stated.len());
+    }
+
+    #[tokio::test]
+    async fn a_new_pnl_point_is_the_only_one_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _root, tape) = projecting(dir.path());
+        *run.venue.portfolio.lock().unwrap() = Ok(PORTFOLIO.to_vec());
+        run.boot().await.unwrap();
+        run.events_all().await.unwrap();
+        run.fold_all().unwrap();
+        let before = projected_rows(&tape, Kind::PnlHistory);
+        let windows: Vec<(String, serde_json::Value)> = serde_json::from_slice(PORTFOLIO).unwrap();
+        let stated: usize = windows
+            .iter()
+            .map(|(_, w)| w["accountValueHistory"].as_array().unwrap().len())
+            .sum();
+        assert_eq!(before, stated, "every point of every window");
+
+        // The next read states the same again, and the day one point further.
+        let mut next = windows.clone();
+        let day = &mut next[0].1;
+        let last = day["accountValueHistory"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()[0]
+            .as_i64()
+            .unwrap();
+        for series in ["accountValueHistory", "pnlHistory"] {
+            day[series]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!([last + 60_000, "1.5"]));
+        }
+        *run.venue.portfolio.lock().unwrap() = Ok(serde_json::to_vec(&next).unwrap());
+        run.clock.advance_secs(300);
+        run.events_all().await.unwrap();
+        run.fold_all().unwrap();
+        assert_eq!(projected_rows(&tape, Kind::PnlHistory), before + 1);
+    }
+
+    #[tokio::test]
+    async fn a_missed_history_read_is_a_gap_in_its_own_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, root) = ledger(dir.path());
+        run.boot().await.unwrap();
+        run.events_all().await.unwrap();
+        run.clock.advance_secs(300);
+        *run.venue.order_history.lock().unwrap() = Err(Refusal::Unreachable);
+        let pass = run.events_all().await.unwrap();
+        assert_eq!(pass.reads, 1, "the portfolio still read");
+        let all = gaps(&root);
+        let missed: Vec<&Gap> = all
+            .iter()
+            .filter(|g| g.series == Series::OrderUpdates)
+            .collect();
+        assert_eq!(missed.len(), 1);
+        assert!(missed.iter().all(|g| g.dex.is_none()));
+        assert!(missed.iter().all(
+            |g| g.cause == GapCause::PollFailed && g.to_micros - g.from_micros == 300 * SECOND
+        ));
+        assert!(all.iter().all(|g| g.series != Series::PnlHistory));
+    }
+
+    #[tokio::test]
+    async fn a_read_that_finds_nothing_resting_supersedes_the_last_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _root, tape) = projecting(dir.path());
+        let resting = |tape: &std::path::Path| projected_rows(tape, Kind::Orders);
+        run.boot().await.unwrap();
+
+        // An order rests, on each of the account's two dexes' answers.
+        *run.venue.open_orders.lock().unwrap() = Ok(resting_orders());
+        run.snapshot_all().await.unwrap();
+        run.fold_all().unwrap();
+        assert!(resting(&tape) > 0);
+
+        // Then the venue states none: the newest set is empty, and the last
+        // one no longer reads as resting.
+        run.clock.advance_secs(10);
+        *run.venue.open_orders.lock().unwrap() = Ok(b"[]".to_vec());
+        run.snapshot_all().await.unwrap();
+        run.fold_all().unwrap();
+        assert_eq!(resting(&tape), 0);
+
+        // A read that fails changes nothing: the newest read stands.
+        run.clock.advance_secs(10);
+        *run.venue.open_orders.lock().unwrap() = Err(Refusal::Unreachable);
+        run.snapshot_all().await.unwrap();
+        run.fold_all().unwrap();
+        assert_eq!(resting(&tape), 0);
     }
 
     #[tokio::test]

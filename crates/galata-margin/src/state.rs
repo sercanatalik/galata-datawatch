@@ -626,6 +626,7 @@ mod tests {
             "owner_s3",
             &rows,
             &project::WALLET_PROJECTED,
+            None,
         )
         .unwrap();
         let s = read_derive(dir.path(), "owner_s3").unwrap();

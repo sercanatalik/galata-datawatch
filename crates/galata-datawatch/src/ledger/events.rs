@@ -14,6 +14,9 @@
 //! |---|---|
 //! | fill | `(trade_id, order_id)`: a trade id alone is shared by two sides |
 //! | funding payment, ledger update | venue time and the whole row |
+//! | order update | the account, order id, status and the status's time |
+//! | PnL point | the account, window and the point's time |
+//! | an account's state, open orders among it | its receipt and the whole row |
 //!
 //! A ledger update's identity is its time and content rather than its hash,
 //! because the hash is kept out of rows (it resolves to an address). Two
@@ -58,12 +61,37 @@ pub fn identity(envelope: &Envelope) -> String {
         // above, told apart by receipt — and by the subaccount, since one
         // wallet's history holds every subaccount's rows, and two flat ones
         // state the same figures.
-        Event::MarginState(_) | Event::PositionState(_) | Event::Collateral(_) => format!(
+        Event::MarginState(_)
+        | Event::PositionState(_)
+        | Event::Collateral(_)
+        | Event::Order(_) => format!(
             "{}:{}:recv:{}:{}",
             envelope.kind(),
             envelope.account().map(|a| a.as_str()).unwrap_or_default(),
             envelope.recv_micros,
             serde_json::to_string(&envelope.event).unwrap_or_default()
+        ),
+        // **A change of an order's status, once** (design D5 of
+        // `add-account-vocabulary-orders`): the venue states it again on every
+        // read of the history, by order id, status and the time it gives the
+        // change. The account, since a wallet's answer holds every
+        // subaccount's.
+        Event::OrderUpdate(o) => format!(
+            "{}:{}:{}:{}:{}",
+            envelope.kind(),
+            envelope.account().map(|a| a.as_str()).unwrap_or_default(),
+            o.order_id,
+            o.status.as_deref().unwrap_or_default(),
+            envelope.at_micros.unwrap_or_default(),
+        ),
+        // **A point of a window the venue states, once**: by window and time.
+        // A value the venue later revises at the same point keeps the first.
+        Event::PnlPoint(p) => format!(
+            "{}:{}:{}:{}",
+            envelope.kind(),
+            envelope.account().map(|a| a.as_str()).unwrap_or_default(),
+            p.window,
+            envelope.at_micros.unwrap_or_default(),
         ),
         other => format!(
             "{}:{}:{}",
@@ -112,6 +140,10 @@ pub struct History {
     /// The newest receipt read. The next read starts **at** it, inclusive:
     /// two payloads can share a microsecond, and identity drops the repeat.
     through_micros: Option<i64>,
+    /// The newest receipt of an answer of each kind that normalised, rows or
+    /// none: when a state was last read, which a read that found nothing
+    /// leaves no row to say.
+    read_at: BTreeMap<Kind, i64>,
     kinds: Vec<Kind>,
     ours: BTreeMap<String, Account>,
 }
@@ -120,6 +152,13 @@ impl History {
     /// The rows so far, venue time then receipt.
     pub fn rows(&self) -> &[Envelope] {
         &self.rows
+    }
+
+    /// The receipt of the newest answer of `kind` read, **whether it held
+    /// rows or none**: an open-orders answer that found nothing resting was
+    /// still read. `None` where no answer of that kind has normalised.
+    pub fn read_at(&self, kind: Kind) -> Option<i64> {
+        self.read_at.get(&kind).copied()
     }
 
     /// Read what the record gained since the last call, and merge it in.
@@ -156,6 +195,8 @@ impl History {
 
         let wanted: BTreeSet<&str> = kinds.iter().map(|k| k.as_str()).collect();
         let mut through = self.through_micros;
+        // Merged on success only, as the rows are: all or nothing.
+        let mut read_at = self.read_at.clone();
         let mut fresh = Vec::new();
         let mut fresh_ids: HashSet<String> = HashSet::new();
         for replayed in replayed {
@@ -169,6 +210,10 @@ impl History {
             let Ok(rows) = normaliser.normalise(payload) else {
                 continue;
             };
+            if let Ok(kind) = payload.kind.parse::<Kind>() {
+                let at = read_at.entry(kind).or_insert(payload.recv_micros);
+                *at = (*at).max(payload.recv_micros);
+            }
             for mut row in rows {
                 if !wanted.contains(row.kind().as_str()) {
                     continue;
@@ -190,6 +235,7 @@ impl History {
         let added = fresh.len();
         self.seen.extend(fresh_ids);
         self.through_micros = through;
+        self.read_at = read_at;
         if added > 0 {
             self.rows.extend(fresh);
             // Venue time, then receipt: the order the events happened in. The
@@ -239,6 +285,137 @@ pub fn beyond_reach(newest_recorded: i64, page_first: i64, page_full: bool) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use galata_wire::{Order, PnlPoint, Side, Venue};
+    use std::str::FromStr;
+
+    fn on(account: &str, at: Option<i64>, recv: i64, event: Event) -> Envelope {
+        Envelope::for_account(
+            Venue::new("derive-xyz").unwrap(),
+            Account::new(account).unwrap(),
+            at,
+            recv,
+            event,
+        )
+    }
+
+    fn order(id: &str, status: Option<&str>, remaining: &str) -> Order {
+        Order {
+            dex: None,
+            market: "ETH-20261225-4000-P".into(),
+            side: Side::Ask,
+            order_id: id.into(),
+            client_id: None,
+            order_type: "limit".into(),
+            trigger_type: Some("stoploss".into()),
+            is_trigger: None,
+            position_tpsl: None,
+            size: galata_wire::Num::from_str("2").ok(),
+            remaining: galata_wire::Num::from_str(remaining).ok(),
+            limit_price: galata_wire::Num::from_str("101.5").ok(),
+            trigger_price: galata_wire::Num::from_str("120").ok(),
+            trigger_condition: Some("mark".into()),
+            reduce_only: Some(true),
+            time_in_force: Some("gtc".into()),
+            status: status.map(str::to_string),
+            placed_micros: Some(1),
+        }
+    }
+
+    fn point(window: &str, value: &str) -> Event {
+        Event::PnlPoint(PnlPoint {
+            window: window.into(),
+            account_value: galata_wire::Num::from_str(value).ok(),
+            pnl: None,
+            initial_margin: None,
+            maintenance_margin: None,
+        })
+    }
+
+    #[test]
+    fn an_order_update_stated_again_is_one_row() {
+        // Read again on the next pass: another receipt, the same change.
+        let first = on(
+            "owner_s3",
+            Some(500),
+            10,
+            Event::OrderUpdate(order("a1", Some("open"), "2")),
+        );
+        let again = on(
+            "owner_s3",
+            Some(500),
+            99,
+            Event::OrderUpdate(order("a1", Some("open"), "2")),
+        );
+        assert_eq!(identity(&first), identity(&again));
+        // A new status, a new time, another order or another subaccount: a
+        // change of its own.
+        for other in [
+            on(
+                "owner_s3",
+                Some(500),
+                10,
+                Event::OrderUpdate(order("a1", Some("filled"), "0")),
+            ),
+            on(
+                "owner_s3",
+                Some(600),
+                10,
+                Event::OrderUpdate(order("a1", Some("open"), "1")),
+            ),
+            on(
+                "owner_s3",
+                Some(500),
+                10,
+                Event::OrderUpdate(order("b2", Some("open"), "2")),
+            ),
+            on(
+                "owner_s4",
+                Some(500),
+                10,
+                Event::OrderUpdate(order("a1", Some("open"), "2")),
+            ),
+        ] {
+            assert_ne!(identity(&first), identity(&other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_pnl_point_stated_again_is_one_row() {
+        let first = on("main", Some(1_000), 10, point("day", "1520.25"));
+        let again = on("main", Some(1_000), 70, point("day", "1520.25"));
+        assert_eq!(identity(&first), identity(&again));
+        // Revised at the same point, the first is kept: identity is the window
+        // and the time (design D5).
+        let revised = on("main", Some(1_000), 70, point("day", "1521"));
+        assert_eq!(identity(&first), identity(&revised));
+        for other in [
+            on("main", Some(2_000), 10, point("day", "1520.25")),
+            on("main", Some(1_000), 10, point("perpDay", "1520.25")),
+            on("main_s1", Some(1_000), 10, point("day", "1520.25")),
+        ] {
+            assert_ne!(identity(&first), identity(&other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn two_reads_of_one_resting_order_are_two_statements() {
+        // State, as a position is: each read says it rests, told apart by
+        // receipt, so the newest set can be found.
+        let one = on(
+            "owner_s3",
+            None,
+            10,
+            Event::Order(order("a1", Some("open"), "2")),
+        );
+        let two = on(
+            "owner_s3",
+            None,
+            20,
+            Event::Order(order("a1", Some("open"), "2")),
+        );
+        assert_ne!(identity(&one), identity(&two));
+        assert_eq!(identity(&one), identity(&one.clone()));
+    }
 
     #[test]
     fn fills_that_start_after_a_funding_payment_are_lost() {

@@ -1,0 +1,155 @@
+{
+ "id": "38500005-2225-7012-9279-075472136434",
+ "result": {
+  "pagination": {
+   "count": 16,
+   "num_pages": 1
+  },
+  "subaccount_value_history": [
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "107.184730706475",
+    "maintenance_margin": "803.902144221565",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "492.54816801027",
+    "timestamp": 1790392455499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "716.312201456301",
+    "maintenance_margin": "780.254542517856",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "81.3054030419",
+    "timestamp": 1790388855499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "313.482022910212",
+    "maintenance_margin": "616.326859210015",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "302.695150388689",
+    "timestamp": 1790385255499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "665.371304711120",
+    "maintenance_margin": "635.359710831114",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "556.951382170334",
+    "timestamp": 1790381655499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "728.125578140540",
+    "maintenance_margin": "731.011903172246",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "822.357126354641",
+    "timestamp": 1790378055499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "245.125424242602",
+    "maintenance_margin": "728.505445398447",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "508.084764303592",
+    "timestamp": 1790374455499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "212.680894015319",
+    "maintenance_margin": "982.063371787383",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "315.332596040561",
+    "timestamp": 1790370855499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "94.465080031987",
+    "maintenance_margin": "611.442484430204",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "209.132220247662",
+    "timestamp": 1790367255499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "362.311572453303",
+    "maintenance_margin": "411.233329435414",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "557.229744131076",
+    "timestamp": 1790363655499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "352.212140844551",
+    "maintenance_margin": "953.146445296309",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "23.435720012527",
+    "timestamp": 1790360055499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "342.45932345504",
+    "maintenance_margin": "467.300284302841",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "334.441773204531",
+    "timestamp": 1790356455499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "202.515411208261",
+    "maintenance_margin": "711.324467092285",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "347.224102054400",
+    "timestamp": 1790352855499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "26.213141267528",
+    "maintenance_margin": "844.630034058316",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "274.094130135561",
+    "timestamp": 1790349255499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "482.683221555492",
+    "maintenance_margin": "43.413697701713",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "228.915524543143",
+    "timestamp": 1790345655499
+   },
+   {
+    "currency": "ANT,NVDA,US100,US500,WTI,XAUT",
+    "initial_margin": "371.205042434264",
+    "maintenance_margin": "321.585554117301",
+    "margin_type": "PM2",
+    "subaccount_id": 1002,
+    "subaccount_value": "21.648249257592",
+    "timestamp": 1790342055499
+   },
+   {
+    "currency": "BTC,ETH",
+    "initial_margin": "132.582920420996",
+    "maintenance_margin": "228.515515003372",
+    "margin_type": "PM2",
+    "subaccount_id": 1001,
+    "subaccount_value": "56.690535934736",
+    "timestamp": 1790342055499
+   }
+  ]
+ }
+}

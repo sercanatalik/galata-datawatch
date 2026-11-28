@@ -66,8 +66,8 @@ pub struct Book {
     fees: Num,
     fees_unrecorded: u32,
     funding: Num,
-    seen: BTreeSet<(u64, u64)>,
-    poisoned_by: Option<(u64, u64)>,
+    seen: BTreeSet<(String, String)>,
+    poisoned_by: Option<(String, String)>,
     after_poison: u32,
 }
 
@@ -85,9 +85,9 @@ pub struct Break {
     /// The instrument.
     pub ticker: String,
     /// The fill whose `startPosition` disagreed: the first after the gap.
-    pub trade_id: u64,
+    pub trade_id: String,
     /// Its order.
-    pub order_id: u64,
+    pub order_id: String,
     /// When.
     pub at_micros: Option<i64>,
     /// The book's position before it.
@@ -104,9 +104,9 @@ pub struct Skew {
     /// The instrument.
     pub ticker: String,
     /// The fill.
-    pub trade_id: u64,
+    pub trade_id: String,
     /// Its order.
-    pub order_id: u64,
+    pub order_id: String,
     /// Realised by the fold, fees excluded.
     pub folded: Num,
     /// The venue's `closedPnl`.
@@ -151,8 +151,8 @@ pub struct BookReport {
     pub fees: Option<Num>,
     /// Funding, as the venue signs it: negative when paid.
     pub funding: Num,
-    /// The fill that poisoned this book, where one did.
-    pub poisoned_by: Option<(u64, u64)>,
+    /// The fill that poisoned this book, where one did: its trade and order.
+    pub poisoned_by: Option<(String, String)>,
     /// Fills counted after the poisoning, never applied.
     pub after_poison: u32,
 }
@@ -185,6 +185,10 @@ pub struct AccountFold {
     pub snapshot_agreements: u64,
     /// Per dex (`""` is the main one).
     pub cash: BTreeMap<String, CashFlow>,
+    /// Spot fills, not folded: a spot trade moves no perp position, and a
+    /// book of one would read as a difference from every snapshot.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spot_fills: u32,
     /// Why no equity figure is composed. Always stated: a composed equity
     /// needs a mark, which the venue's snapshot does not carry.
     pub equity_not_held: Vec<String>,
@@ -220,7 +224,19 @@ pub const FOLD_KINDS: [galata_wire::Kind; 5] = [
     galata_wire::Kind::Positions,
 ];
 
-type Key = (Option<String>, Ticker);
+/// A book's dex and market: a fill names its market as text, a position as a
+/// ticker, and the two meet as text.
+type Key = (Option<String>, String);
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Whether a fill is a perp's. Hyperliquid names a spot pair `@107` or
+/// `PURR/USDC`, which no ticker can hold; a perp's market always can.
+fn is_perp(fill: &Fill) -> bool {
+    Ticker::new(fill.market.as_str()).is_ok()
+}
 
 fn signed(fill: &Fill) -> Num {
     match fill.side {
@@ -259,10 +275,11 @@ pub fn fold(rows: &[Envelope], tolerances: &Tolerances) -> AccountFold {
     while i < ordered.len() {
         let row = ordered[i];
         match &row.event {
+            Event::Fill(fill) if !is_perp(fill) => out.spot_fills += 1,
             Event::Fill(fill) => apply(&mut books, &mut out, row, fill, tolerances),
             Event::FundingPayment(p) => {
                 books
-                    .entry((p.dex.clone(), p.ticker.clone()))
+                    .entry((p.dex.clone(), p.ticker.to_string()))
                     .or_default()
                     .funding += p.usdc;
             }
@@ -285,7 +302,7 @@ pub fn fold(rows: &[Envelope], tolerances: &Tolerances) -> AccountFold {
                 // The positions of this snapshot: the rows sharing its venue
                 // time and dex that follow it.
                 let at = row.at_micros.unwrap_or(row.recv_micros);
-                let mut held: BTreeMap<Ticker, (Num, Option<Num>)> = BTreeMap::new();
+                let mut held: BTreeMap<String, (Num, Option<Num>)> = BTreeMap::new();
                 let mut j = i + 1;
                 while j < ordered.len()
                     && ordered[j].at_micros.unwrap_or(ordered[j].recv_micros) == at
@@ -293,7 +310,7 @@ pub fn fold(rows: &[Envelope], tolerances: &Tolerances) -> AccountFold {
                     if let Event::Position(p) = &ordered[j].event
                         && p.dex == dex
                     {
-                        held.insert(p.ticker.clone(), (p.size, p.entry_price));
+                        held.insert(p.ticker.to_string(), (p.size, p.entry_price));
                     }
                     j += 1;
                 }
@@ -314,7 +331,7 @@ pub fn fold(rows: &[Envelope], tolerances: &Tolerances) -> AccountFold {
             realised_not_held: book.realised_not_held,
             fees: (book.fees_unrecorded == 0).then_some(book.fees),
             funding: book.funding,
-            poisoned_by: book.poisoned_by,
+            poisoned_by: book.poisoned_by.clone(),
             after_poison: book.after_poison,
         });
     }
@@ -338,19 +355,19 @@ fn apply(
     fill: &Fill,
     tolerances: &Tolerances,
 ) {
-    let key = (fill.dex.clone(), fill.ticker.clone());
+    let key = (fill.dex.clone(), fill.market.clone());
     let book = books.entry(key).or_default();
     // **The first fill, not the first row.** A funding payment ahead of the
     // first held fill — exactly when the fill history starts mid-position —
     // makes the book first, and must not turn the anchor into a break.
     let fresh = book.seen.is_empty();
-    let id = (fill.trade_id, fill.order_id);
+    let id = (fill.trade_id.clone(), fill.order_id.clone());
 
     if book.poisoned_by.is_some() {
         book.after_poison = book.after_poison.saturating_add(1);
         return;
     }
-    if !book.seen.insert(id) {
+    if !book.seen.insert(id.clone()) {
         return;
     }
     if fill.size.is_zero() || fill.price <= Num::ZERO {
@@ -374,9 +391,9 @@ fn apply(
         } else if (book.position - stated).abs() > tolerances.position {
             out.breaks.push(Break {
                 dex: fill.dex.clone(),
-                ticker: fill.ticker.to_string(),
-                trade_id: fill.trade_id,
-                order_id: fill.order_id,
+                ticker: fill.market.clone(),
+                trade_id: fill.trade_id.clone(),
+                order_id: fill.order_id.clone(),
                 at_micros: row.at_micros,
                 folded: book.position,
                 stated,
@@ -426,9 +443,9 @@ fn apply(
                 } else {
                     out.skews.push(Skew {
                         dex: fill.dex.clone(),
-                        ticker: fill.ticker.to_string(),
-                        trade_id: fill.trade_id,
-                        order_id: fill.order_id,
+                        ticker: fill.market.clone(),
+                        trade_id: fill.trade_id.clone(),
+                        order_id: fill.order_id.clone(),
                         folded: realised,
                         stated,
                         difference,
@@ -452,10 +469,10 @@ fn check_snapshot(
     out: &mut AccountFold,
     dex: &Option<String>,
     at: i64,
-    held: &BTreeMap<Ticker, (Num, Option<Num>)>,
+    held: &BTreeMap<String, (Num, Option<Num>)>,
     tolerances: &Tolerances,
 ) {
-    let mut tickers: BTreeSet<&Ticker> = held.keys().collect();
+    let mut tickers: BTreeSet<&String> = held.keys().collect();
     tickers.extend(
         books
             .iter()
@@ -531,7 +548,7 @@ mod tests {
             at,
             Event::Fill(Fill {
                 dex: None,
-                ticker: Ticker::new("BTC").unwrap(),
+                market: "BTC".into(),
                 side: if signed.is_sign_positive() {
                     Side::Bid
                 } else {
@@ -546,8 +563,8 @@ mod tests {
                 fee_token: None,
                 builder_fee: None,
                 crossed: None,
-                order_id: id,
-                trade_id: id,
+                order_id: id.to_string(),
+                trade_id: id.to_string(),
                 twap_id: None,
             }),
         )
@@ -563,6 +580,20 @@ mod tests {
     }
 
     #[test]
+    fn a_spot_fill_is_counted_and_not_folded() {
+        // A spot buy of `@107` moves no perp position: folded, it would open a
+        // book every snapshot reads as a difference.
+        let mut spot = fill(9, 1, "10", "2.5", "0");
+        if let Event::Fill(f) = &mut spot.event {
+            f.market = "@107".into();
+        }
+        let f = fold(&[spot, fill(1, 2, "1", "100", "0")], &tol());
+        assert_eq!(f.spot_fills, 1);
+        assert_eq!(f.books.len(), 1, "the perp's book only");
+        assert_eq!(f.books[0].ticker, "BTC");
+    }
+
+    #[test]
     fn funding_before_the_first_fill_does_not_turn_the_anchor_into_a_break() {
         // The fill history starts mid-position: the venue paid funding on a
         // position opened before the earliest fill it still holds.
@@ -572,8 +603,8 @@ mod tests {
                 dex: None,
                 ticker: Ticker::new("BTC").unwrap(),
                 usdc: n("-0.1"),
-                size: n("5"),
-                rate: n("0.0001"),
+                size: Some(n("5")),
+                rate: Some(n("0.0001")),
                 samples: None,
             }),
         );
@@ -659,7 +690,7 @@ mod tests {
     fn poisoning_is_scoped_to_its_book_and_nothing_resurrects_it() {
         let mut eth = fill(9, 1, "1", "10", "0");
         if let Event::Fill(f) = &mut eth.event {
-            f.ticker = Ticker::new("ETH").unwrap();
+            f.market = "ETH".into();
         }
         let f = fold(
             &[
@@ -670,7 +701,7 @@ mod tests {
             &tol(),
         );
         let btc = f.books.iter().find(|b| b.ticker == "BTC").unwrap();
-        assert_eq!(btc.poisoned_by, Some((1, 1)));
+        assert_eq!(btc.poisoned_by, Some(("1".into(), "1".into())));
         assert_eq!(btc.after_poison, 1, "counted, never applied");
         assert_eq!(btc.position, None);
         let eth = f.books.iter().find(|b| b.ticker == "ETH").unwrap();
@@ -708,7 +739,10 @@ mod tests {
         );
         assert_eq!(f.breaks.len(), 1);
         let b = &f.breaks[0];
-        assert_eq!((b.trade_id, b.folded, b.stated), (3, n("2"), n("3")));
+        assert_eq!(
+            (b.trade_id.as_str(), b.folded, b.stated),
+            ("3", n("2"), n("3"))
+        );
         assert_eq!(
             book(&f).position,
             Some(n("4")),
