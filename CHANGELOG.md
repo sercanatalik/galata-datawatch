@@ -214,6 +214,20 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 - `AccountMode::equity_not_held` says a unified or portfolio-margin account's
   collateral is "recorded as balances", where it said "out of scope".
 
+### Removed
+
+- **BREAKING: galata-tower is retired** (`retire-galata-tower`). The operator
+  UI is no longer a service of the deployment: `install-services.sh` and
+  `run-service.sh` know no `tower`, and `vet-config.sh`,
+  `required-secrets.sh` and `mint-service-tokens.sh` no longer serve it.
+  `scripts/lib/broker_addr.py`, which pointed it at the broker, is gone. Every
+  service now runs in a container of its own.
+- **BREAKING (`galata-broker`): the `reader` identity is removed.**
+  `grants::table` no longer grants `reader` `status.>`, and
+  `config/nats-authorization.conf` no longer declares it or reads
+  `GALATA_BROKER_PASSWORD_READER`. Its only user was the tower; status is read
+  through galata-markets' STATUS consumer.
+
 ### Fixed
 
 - **A quiet market's candles are no longer judged a subscription shortfall**

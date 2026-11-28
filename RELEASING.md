@@ -71,7 +71,7 @@ cargo publish --workspace --dry-run
 `check-tarball-builds.sh` is the one that matters most here: it compiles every
 crate **from its own tarball against its siblings' tarballs**, in default
 features and in the configurations a stranger takes — `--no-default-features`,
-which is what galata-tower uses, and the `--features <venue>` lines the README
+which galata-markets and galata-margin start from, and the `--features <venue>` lines the README
 advertises. Inside the workspace cargo prefers the path dependency, so a crate
 can compile here while using a sibling change its published manifest does not
 require. A crates.io version is permanent; that guard is the last chance to

@@ -2,7 +2,7 @@
 # that it runs in. Copy to var/containers.conf; var/, because the figures
 # belong to one machine.
 #
-# Every service but the tower runs in a container, and needs a line here: a
+# Every service runs in a container, and needs a line here: a
 # service with no line does not start, and the refusal names the service and
 # the missing limit (scripts/run-service.sh, README "Services in containers").
 # There is no native start to fall back to.

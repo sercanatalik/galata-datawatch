@@ -74,20 +74,16 @@ impl Grants {
 /// The table for a set of capturing venues and a set of venues whose ledger
 /// publishes.
 ///
-/// Two kinds of identity, because they are two kinds of component:
+/// **A capture process** publishes its own venue and its own status, and
+/// subscribes to **nothing** — it never consumes, and a component that only
+/// writes should not hold a handle that can read.
 ///
-/// - **a capture process** publishes its own venue and its own status, and
-///   subscribes to **nothing** — it never consumes, and a component that only
-///   writes should not hold a handle that can read;
-/// - **a reader** subscribes to status and publishes nothing. It is NOT
-///   granted `markets.>`, and that is the point of the two roots being
-///   separate: a dashboard takes `status.>` without also taking the firehose.
-///   Market data for a screen comes from the record, which holds it bounded,
-///   because *an identity that could read every venue's firehose is exactly
-///   what a password on an operator's laptop should not be*. The grant is the
-///   boundary; galata-tower's `check-no-market-reach.sh` holds the other side.
+/// There is no plain reader. One, `reader`, subscribed to `status.>` for
+/// galata-tower's screen; it was removed with the tower on 2026-11-28
+/// (`retire-galata-tower`). Status is read through galata-markets, which
+/// consumes the STATUS window.
 ///
-/// Beside them, two services: `bus-admin`, which administers the streams at
+/// Beside capture, two services: `bus-admin`, which administers the streams at
 /// the broker's start, and galata-markets ([`GALATA_MARKETS`]), which consumes
 /// the windows and serves clients over HTTP — so the firehose's one password
 /// stays in a container and never reaches an operator.
@@ -113,11 +109,6 @@ pub fn table(venues: &[&str], ledgers: &[&str]) -> Grants {
             subscribe: vec![format!("{}.>", ledger_inbox(venue))],
         });
     }
-    grants.push(Grant {
-        identity: "reader".into(),
-        publish: Vec::new(),
-        subscribe: vec!["status.>".into()],
-    });
     // **The one identity that administers streams**, used only by the broker's
     // own start (`galata-bus`) to apply `streams::table`. It may create, update
     // and read the declared streams by name — not delete one, not publish or
@@ -340,12 +331,13 @@ mod tests {
         );
     }
 
+    /// `reader` went with galata-tower (`retire-galata-tower`): its password
+    /// is deleted from the vault, so a grant for it would be a user the broker
+    /// declares with no password to supply.
     #[test]
-    fn a_reader_subscribes_and_never_publishes() {
-        let grants = table(&["hyperliquid"], &["hyperliquid"]);
-        let reader = grants.iter().find(|g| g.identity == "reader").unwrap();
-        assert!(reader.publish.is_empty());
-        assert_eq!(reader.subscribe, vec!["status.>"]);
+    fn the_retired_reader_is_granted_nothing() {
+        let grants = table(&["hyperliquid", "rh-chain"], &["hyperliquid", "derive-xyz"]);
+        assert!(grants.iter().all(|g| g.identity != "reader"));
     }
 
     #[test]
@@ -361,23 +353,6 @@ mod tests {
             !hl.publish.iter().any(|s| s.contains("rh-chain")),
             "{:?}",
             hl.publish
-        );
-    }
-
-    /// **The assertion, not the absence of one.** A reader granted the
-    /// firehose would pass every other test in this file; only naming the
-    /// thing it must not have catches it coming back.
-    #[test]
-    fn a_reader_is_granted_no_market_subject() {
-        let grants = table(&["hyperliquid", "rh-chain"], &["hyperliquid", "derive-xyz"]);
-        let reader = grants.iter().find(|g| g.identity == "reader").unwrap();
-        assert!(
-            !reader
-                .subscribe
-                .iter()
-                .any(|subject| subject.starts_with("markets.")),
-            "the reader's password sits in a process that serves a web page: {:?}",
-            reader.subscribe
         );
     }
 

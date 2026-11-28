@@ -27,12 +27,11 @@
 # and there is no way to ask it for another set. So the configurations anybody
 # else actually takes are built separately, from the same unpacked tarballs:
 #
-#   --no-default-features        what galata-tower takes, called "the whole
-#                                dependency argument" in its own manifest. It
-#                                takes these crates by PATH today and says they
-#                                "become registry dependencies when its Tier 10
-#                                lands" — so this shape had never been compiled
-#                                from a tarball at all.
+#   --no-default-features        the shape galata-markets and galata-margin
+#                                start from (`default-features = false`, then
+#                                their own features). First added for
+#                                galata-tower, since retired; it had never
+#                                been compiled from a tarball at all.
 #   --features <venue>           the line this crate's README tells a reader to
 #                                type: `cargo add galata-datawatch --features
 #                                rh-chain`.
@@ -155,12 +154,13 @@ fi
 target=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys
 print(json.load(sys.stdin)["target_directory"])')
 
-# **The purge is its own verb**, because galata-tower's `check-against-
-# tarballs.sh` packages this workspace too, and did so without it: cargo
-# treats a registry-sourced crate as immutable, so verifying galata-datawatch
-# reused a galata-segments 0.1.0 compiled from an EARLIER source at the same
-# version, and failed on functions the current source has. One purge, called
-# from both, rather than a copy in the tower that drifts from this one.
+# **The purge is its own verb**, because another checkout that packages this
+# workspace needs it too: galata-tower's `check-against-tarballs.sh` (the
+# tower is since retired) did so without it, and cargo treats a
+# registry-sourced crate as immutable, so verifying galata-datawatch reused a
+# galata-segments 0.1.0 compiled from an EARLIER source at the same version,
+# and failed on functions the current source has. One purge, callable from
+# outside, rather than a copy that drifts from this one.
 purge() {
     for spec in $members; do
         name="${spec%-*}"
@@ -277,7 +277,7 @@ done
 # The configurations somebody else takes. `under` is the crate being built;
 # the rest are patched in around it.
 shapes=(
-    "galata-datawatch|--no-default-features|the shape galata-tower takes"
+    "galata-datawatch|--no-default-features|the shape galata-markets and galata-margin start from"
     "galata-datawatch|--no-default-features --features hyperliquid|cargo add --features hyperliquid"
     "galata-datawatch|--no-default-features --features rh-chain|cargo add --features rh-chain, the README's own line"
 )

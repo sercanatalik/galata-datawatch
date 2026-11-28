@@ -372,8 +372,8 @@ fn declaration_of_hyperliquid() -> Option<crate::venue::Declaration> {
 /// Whether resolution may read secrets, or must withhold what needs one.
 ///
 /// Only a keyed venue reads the source: rh-chain's provider key and
-/// rh-crypto's API keys. Without either compiled in — the tower's build, or
-/// galata-markets' with only the public venues' normalisers — the field is
+/// rh-crypto's API keys. Without either compiled in — galata-markets' and
+/// galata-margin's builds, with only the public venues' normalisers — the field is
 /// allowed to go unread, and nowhere else.
 #[derive(Clone, Copy)]
 #[cfg_attr(

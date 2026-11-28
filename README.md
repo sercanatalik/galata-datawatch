@@ -90,7 +90,6 @@ flowchart LR
     VAULT["galata-vault<br/>config + secrets"]
     NATS{{"NATS<br/>markets.* · status.*"}}
     FLOWS["cereyan<br/>scheduled maintenance"]
-    TOWER["galata-tower<br/>operator UI"]
     RES["galata-research<br/>research + studies"]
 
     subgraph Next["Planned layers"]
@@ -105,8 +104,6 @@ flowchart LR
     CAP -- normalised events --> NATS
     FLOWS -- compact · rebuild · watch --> ARC
     ARC -- galata-tape-rebuild --> TAPE
-    ARC & TAPE --> TOWER
-    NATS -- "status.>" --> TOWER
     TAPE --> RES --> SIG --> RISK --> EXEC
     NATS -. live .-> SIG
 ```
@@ -115,7 +112,6 @@ flowchart LR
 |---|---|---|
 | **galata-datawatch** | capture, the archive, the tape, the broker vocabulary | this one |
 | **galata-vault** | end-to-end-encrypted configuration and secrets; the single source of both | [sercanatalik/galata-vault](https://github.com/sercanatalik/galata-vault) |
-| **galata-tower** | operator UI: axum read API and a React screen in one binary | [sercanatalik/galata-tower](https://github.com/sercanatalik/galata-tower) |
 | **cereyan** | the scheduler that runs compaction, tape rebuilds and health checks | [sercanatalik/cereyan](https://github.com/sercanatalik/cereyan) |
 | **NATS** | the live bus that downstream strategy processes subscribe to | [nats.io](https://nats.io) |
 | **galata-research** | the record as polars or DuckDB with its semantics applied once, and marimo studies judged by DSR and PBO | [sercanatalik/galata-research](https://github.com/sercanatalik/galata-research) |
@@ -1030,12 +1026,10 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
   The fitted horizons (5m, 1h, 4h) declare constant correlation (CCC), the
   operator's choice, with the evidence in `signals.toml`. Each also writes
   `constancy`, Engle and Sheppard's test that its correlation has stayed
-  constant over the last 30 days: a small p is CCC failing. The tower shows
-  it, and `galata-watch` flags two consecutive windows below
+  constant over the last 30 days: a small p is CCC failing. `galata-watch` flags two consecutive windows below
   `[watch] max_constancy_p` as a correlation regime flag. `monitor` is the
   sequential alternative, Wied and Galeano's monitor over calendar epochs,
-  whose false-alarm chance is bounded per epoch. The tower shows it, and
-  `galata-watch` reports its alarm, with the pair and the date of the change,
+  whose false-alarm chance is bounded per epoch. `galata-watch` reports its alarm, with the pair and the date of the change,
   when `[watch] monitor_alarms = true`. A fitted horizon
   also stores `correlation_target`, the R̄ its model reverts to (under CCC,
   its correlation), and `galata-watch` reconciles it against `derive`'s equal-weight ρ over
@@ -1088,20 +1082,18 @@ rendered from one tracked template and restarted whenever they exit.
 
 | Service | Listens on | Reads |
 |---|---|---|
-| `nats` | `127.0.0.1:4222` | all three broker passwords |
+| `nats` | `127.0.0.1:4222` | every broker identity's password |
 | `capture:<venue>` | outbound only | its venue's configuration and credentials |
-| `tower` | `127.0.0.1:8777` | the `reader` broker password |
 | `flows` (cereyan) | `127.0.0.1:4200` | nothing |
 | `markets` | this Mac's tailnet name, port 8780 | the `markets` broker password and its clients' tokens |
 
 ```sh
 cargo build --release --workspace --bins           # every binary, never one: the lane runs them in place
-(cd ../galata-tower && cargo build --release)
-scripts/install-services.sh                        # nats, capture:hyperliquid, tower, flows, markets
+scripts/install-services.sh                        # nats, capture:hyperliquid, flows, markets
 scripts/install-services.sh capture:rh-chain       # add a venue
-scripts/install-services.sh --uninstall tower      # remove one
+scripts/install-services.sh --uninstall flows      # remove one
 scripts/install-services.sh --status               # every com.galata.* agent, whether it would restart, twins, token expiry, stale builds
-scripts/run-service.sh --check tower               # a start's preconditions, token included; starts nothing
+scripts/run-service.sh --check markets             # a start's preconditions, token included; starts nothing
 scripts/vet-config.sh new.toml                   # would every deployed binary accept this document? ask first
 ```
 
@@ -1162,13 +1154,13 @@ Logs are written to `var/logs/<service>.log`.
 
 ### Services in containers
 
-Every service but the tower runs in a container of its own, under Apple's
+Every service runs in a container of its own, under Apple's
 [`container`](https://github.com/apple/container) (1.7 or later, started
 once by hand so it can install its kernel). Its line in
 `var/containers.conf` states its CPUs and memory. A service with no line does
 not start, and the refusal names the service and the missing limit: there is
-no native start to fall back to. The tower runs natively until it is
-retired.
+no native start to fall back to. The one native service, galata-tower, was
+retired on 2026-11-28.
 
 ```sh
 scripts/build-images.sh                                  # galata-datawatch, galata-nats, galata-flows
@@ -1199,8 +1191,7 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
   port is published on the tailnet address, which a container and another
   machine both reach; `tailscale serve` does not answer a container. While
   the tailnet is down the broker is refused, not published elsewhere. Set
-  `[broker] url` to `nats://<this Mac's tailnet name>:4222` when it moves;
-  the tower reads the same line.
+  `[broker] url` to `nats://<this Mac's tailnet name>:4222` when it moves.
 - **The broker keeps its streams on a volume of its own**, `galata-nats-store`
   at `/data`, made at its first start and handed once to the image's user.
   Nothing else reads it: it is a cache of what the archive and the ledger
@@ -1316,7 +1307,7 @@ each tier, is [`design/roadmap.md`](design/roadmap.md).
 | 3 | **The tape**, the bounded reader, compaction, rebuild and retention tools | done |
 | 4 | **The broker**: NATS publisher/subscriber, identities and grants | done |
 | 5 | **The vault**: configuration and secrets from galata-vault | done |
-| 6 | **galata-tower**: the operator UI over the record | done |
+| 6 | **galata-tower**: the operator UI over the record | done; retired 2026-11-28 |
 | 7 | **`rh-chain`**: Robinhood Chain via finalized `eth_getLogs`, with reorgs recorded as rows | done |
 | 8 | **`rh-crypto`**: the signed REST poll | built; first live poll pending credentials |
 | 9 | **Scheduling**: the cereyan lane, `galata-watch`, launchd services | done |
@@ -1374,8 +1365,6 @@ These layers are design intent, not shipped code. Each one moves through
 
 - [**galata-research**](https://github.com/sercanatalik/galata-research): the
   research environment over this record.
-- [**galata-tower**](https://github.com/sercanatalik/galata-tower): the
-  operator UI for this record.
 - [**galata-vault**](https://github.com/sercanatalik/galata-vault):
   end-to-end-encrypted configuration and secrets.
 - [**cereyan**](https://github.com/sercanatalik/cereyan): the scheduler that

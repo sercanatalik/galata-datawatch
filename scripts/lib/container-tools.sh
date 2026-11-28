@@ -17,7 +17,7 @@
 # **The limits are stated, never defaulted.** A container given no limit gets
 # 4 CPUs and 1 GiB (measured 2026-11-24, Apple container 1.7.1), which is too
 # much for the broker and too little for a tape rebuild that holds a range in
-# memory. So every service but the tower has a line in var/containers.conf
+# memory. So every service has a line in var/containers.conf
 # stating what it may use, and a service with no line does not start:
 #
 #   # service              cpus  memory

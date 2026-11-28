@@ -5,7 +5,7 @@
 #   install-services.sh [--uninstall] [service ...]
 #   install-services.sh --status
 #
-#   services: nats  capture:<venue>  ledger:<venue>  tower  flows  markets
+#   services: nats  capture:<venue>  ledger:<venue>  flows  markets
 #             (default: all four below, with capture:hyperliquid; a ledger is
 #             installed only when named, since it needs accounts in the vault
 #             first)
@@ -13,6 +13,10 @@
 # **Not the vault.** It was a service here once (`gv-server local`). The
 # deployment's vault is now the hosted one, which galata-vault runs itself;
 # `--uninstall vault` still removes the old agent, and nothing installs it.
+#
+# **Not the tower.** galata-tower, the operator UI, was the one native
+# service; it was retired on 2026-11-28 (`retire-galata-tower`), and every
+# service now runs in a container of its own.
 #
 # Legacy's shape (scripts/install-compact-job.sh), for long-running jobs:
 # render the tracked template into ~/Library/LaunchAgents (untracked — it is
@@ -29,7 +33,6 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOWER="${GALATA_TOWER_ROOT:-$(cd "$ROOT/.." && pwd)/galata-tower}"
 # shellcheck source=scripts/lib/vault-tools.sh
 source "$ROOT/scripts/lib/vault-tools.sh"
 # shellcheck source=scripts/lib/container-tools.sh
@@ -47,8 +50,8 @@ refuse() { echo "install-services: REFUSED — $1" >&2; exit 1; }
 # **A twin: the service's binary, running, and not launchd's.** Found by the
 # executable's basename, plus the argument that picks the instance, and never
 # by a regex over the whole command line. Those regexes drifted: they missed a
-# debug-built tower that ran for a day beside the launchd one, the tower's own
-# var/bin copy, and `galata-datawatch-vault <venue>`, which is a second writer
+# debug-built galata-tower (since retired) that ran for a day beside the
+# launchd one, its var/bin copy, and `galata-datawatch-vault <venue>`, which is a second writer
 # of one archive scope (know-a-twin-by-its-binary). Matching the executable
 # also cannot match the shell doing the matching. What launchd owns is the
 # job's pid and its descendants: run-service.sh and `gv run` exec, so
@@ -97,7 +100,6 @@ twins_of() {
         nats) bins="nats-server galata-bus"; want="$ROOT/config/nats-server.conf config/nats-server.conf $ROOT/config/nats-authorization.conf config/nats-authorization.conf" ;;
         capture:*) bins="galata-datawatch galata-datawatch-vault"; want="${spec#capture:}" ;;
         ledger:*) bins="galata-ledger galata-ledger-vault"; want="${spec#ledger:}" ;;
-        tower) bins="galata-tower" ;;
         flows) ;;
         markets) bins="galata-markets" ;;
     esac
@@ -153,7 +155,7 @@ twins_of() {
 
 # **Vet before the restart.** A freshly built binary's first launch waits
 # while macOS assesses it (syspolicyd; the process sits in _dyld_start). On
-# 2026-09-26 that kept the tower down about four minutes after its install,
+# 2026-09-26 that kept galata-tower (since retired) down about four minutes,
 # because launchd had already stopped the old one. So each program the start
 # will exec that this workspace built is launched once, first, with an
 # argument measured to exit before the program does any work, while the old
@@ -162,19 +164,15 @@ twins_of() {
 #   galata-token-expiry --help      usage line, exit 2
 #   gv --help                       help text
 #   galata-datawatch|ledger --help  refused as a venue, before connecting
-#   galata-tower --version          version, exit 0 (--help would SERVE)
 vet() {  # vet <label> <program>...
     local label="$1" program arg s took; shift
     for program in "$@"; do
         [[ -x "$program" ]] || continue
         case "$program" in
-            "$ROOT"/*|"$TOWER"/*|"$VAULT_BIN"/*) ;;
+            "$ROOT"/*|"$VAULT_BIN"/*) ;;
             *) continue ;;   # uv, Homebrew's nats-server: vetted long ago
         esac
-        case "${program##*/}" in
-            galata-tower|.galata-tower.new) arg=--version ;;
-            *) arg=--help ;;
-        esac
+        arg=--help
         s=$SECONDS
         "$program" "$arg" >/dev/null 2>&1 </dev/null || true
         took=$((SECONDS - s))
@@ -186,14 +184,14 @@ vet() {  # vet <label> <program>...
 vet_programs() {  # the programs a service's start would exec
     local spec="$1" said=""
     case "$spec" in
-        nats|tower|flows|markets) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
+        nats|flows|markets) said="$("$ROOT/scripts/run-service.sh" --check "$spec" 2>/dev/null)" ;;
         capture:*) said="$("$ROOT/scripts/run-service.sh" --check capture "${spec#capture:}" 2>/dev/null)" ;;
         ledger:*) said="$("$ROOT/scripts/run-service.sh" --check ledger "${spec#ledger:}" 2>/dev/null)" ;;
     esac
     if [[ "$said" == ready:* ]]; then set -- $said; echo "$2"; fi
     case "$spec" in
         # The two a secret-holding start runs before the service itself.
-        nats|tower|markets|capture:*|ledger:*)
+        nats|markets|capture:*|ledger:*)
             echo "$ROOT/target/release/galata-token-expiry"
             echo "$VAULT_BIN/gv" ;;
     esac
@@ -208,7 +206,7 @@ if [[ "${1:-}" == --status ]]; then
     printf '%-34s %-10s %s\n' LABEL "PID/EXIT" MANAGED
     launchctl list | awk '$3 ~ /^com\.galata\./ {print $1, $2, $3}' | sort -k3 | while read -r pid status label; do
         case "$label" in
-            com.galata.nats|com.galata.tower|com.galata.flows|com.galata.markets|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
+            com.galata.nats|com.galata.flows|com.galata.markets|com.galata.capture.*|com.galata.ledger.*) managed=yes ;;
             com.galata.vault) managed="NO — the vault is no longer a service here; --uninstall vault removes it" ;;
             *) managed="NO — not rendered by this installer" ;;
         esac
@@ -218,15 +216,15 @@ if [[ "${1:-}" == --status ]]; then
 
     # Restart: would each loaded service start again? run-service.sh --check
     # runs the start's own preconditions and starts nothing. A running service
-    # hides a missing binary or a lapsed token until its next restart; the
-    # tower ran a day with its installed copy missing.
+    # hides a missing binary or a lapsed token until its next restart;
+    # galata-tower (since retired) ran a day with its installed copy missing.
     echo
     printf '%-34s %s\n' RESTART "WOULD IT START AGAIN"
     launchctl list | awk '$3 ~ /^com\.galata\./ {print $3}' | sort | while read -r label; do
         case "$label" in
             com.galata.capture.*) args=(capture "${label#com.galata.capture.}") ;;
             com.galata.ledger.*) args=(ledger "${label#com.galata.ledger.}") ;;
-            com.galata.nats|com.galata.tower|com.galata.flows|com.galata.markets) args=("${label#com.galata.}") ;;
+            com.galata.nats|com.galata.flows|com.galata.markets) args=("${label#com.galata.}") ;;
             *) continue ;;
         esac
         if said="$("$ROOT/scripts/run-service.sh" --check "${args[@]}" 2>&1)"; then
@@ -239,11 +237,11 @@ if [[ "${1:-}" == --status ]]; then
     done
 
     # Twins: a managed service's binary running outside launchd. A debug
-    # tower ran beside the launchd one for a day with nothing saying so.
+    # build ran beside the launchd one for a day with nothing saying so.
     echo
     printf '%-34s %s\n' TWIN "PID  COMMAND"
     twin_count=0
-    managed_specs=(nats tower flows markets)
+    managed_specs=(nats flows markets)
     for plist in "$AGENTS"/com.galata.capture.*.plist "$AGENTS"/com.galata.ledger.*.plist; do
         [[ -f "$plist" ]] || continue
         l="$(basename "$plist" .plist)"
@@ -261,7 +259,7 @@ if [[ "${1:-}" == --status ]]; then
     done
     (( twin_count )) || echo "(none — every managed service runs only under launchd)"
 
-    # Containers: every service but the tower runs in one of its own. Each
+    # Containers: every service runs in one of its own. Each
     # installed service, and each line of var/containers.conf: whether its
     # container is running, the image it runs, the tree that image was built
     # from, and the limits it is given — or that none is stated, which is a
@@ -274,7 +272,7 @@ if [[ "${1:-}" == --status ]]; then
     specs=""
     [[ -f "$conf" ]] && specs="$(awk '!/^[[:space:]]*(#|$)/ {print $1}' "$conf")"
     for spec in "${managed_specs[@]}"; do
-        [[ "$spec" != tower && -f "$AGENTS/$(label_of "$spec").plist" ]] || continue
+        [[ -f "$AGENTS/$(label_of "$spec").plist" ]] || continue
         grep -qxF -- "$spec" <<< "$specs" || specs="${specs:+$specs$'\n'}$spec"
     done
     if ! ctool="$(container_tool 2>&1)"; then
@@ -359,28 +357,25 @@ if [[ "${1:-}" == --status ]]; then
     else
         echo "(the workspace's binaries are unlisted: cargo metadata failed)"
     fi
-    build_row "galata-tower (var/bin)" "$ROOT/var/bin/galata-tower" "$TOWER" \
-        "cargo build --release in $TOWER, then install-services.sh tower" \
-        "${ws_sources[@]}" ui/src
     exit 0
 fi
 
 UNINSTALL=0
 if [[ "${1:-}" == --uninstall ]]; then UNINSTALL=1; shift; fi
 services=("$@")
-(( ${#services[@]} )) || services=(nats capture:hyperliquid tower flows markets)
+(( ${#services[@]} )) || services=(nats capture:hyperliquid flows markets)
 
 
 for spec in "${services[@]}"; do
     case "$spec" in
-        nats|tower|flows|markets) service="$spec"; arg=""; label="com.galata.$spec" ;;
+        nats|flows|markets) service="$spec"; arg=""; label="com.galata.$spec" ;;
         vault) (( UNINSTALL )) || refuse "the vault is no longer a service of this deployment: it is the hosted vault, which galata-vault runs (deploy/apple-container/gv-container up). --uninstall vault removes the old agent"
                service=vault; arg=""; label="com.galata.vault" ;;
         capture:*) service=capture; arg="${spec#capture:}"; label="com.galata.capture.$arg"
                    [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
         ledger:*) service=ledger; arg="${spec#ledger:}"; label="com.galata.ledger.$arg"
                   [[ "$arg" =~ ^[a-z0-9-]+$ ]] || refuse "venue must be a token, got '$arg'" ;;
-        *) refuse "unknown service '$spec' (nats, capture:<venue>, ledger:<venue>, tower, flows, markets)" ;;
+        *) refuse "unknown service '$spec' (nats, capture:<venue>, ledger:<venue>, flows, markets)" ;;
     esac
     plist="$AGENTS/$label.plist"
 
@@ -399,13 +394,11 @@ for spec in "${services[@]}"; do
             said="$(container_limits "$spec" 2>&1)" || refuse "$said"
             ctool="$(container_tool 2>&1)" || refuse "$ctool"
             said="$(container_image "$ctool" "$(service_image "$spec")" 2>&1)" || refuse "$said" ;;
-        tower) [[ -x "$TOWER/target/release/galata-tower" ]] \
-                   || refuse "no tower release binary at $TOWER — cargo build --release there, or set GALATA_TOWER_ROOT" ;;
     esac
 
-    # The five that hold a secret read it through their own vault token.
+    # The four that hold a secret read it through their own vault token.
     # (Not `;;&` in the case above: macOS's bash is 3.2.)
-    if [[ "$service" == capture || "$service" == ledger || "$service" == nats || "$service" == tower || "$service" == markets ]]; then
+    if [[ "$service" == capture || "$service" == ledger || "$service" == nats || "$service" == markets ]]; then
         [[ -x "$ROOT/target/release/galata-token-expiry" ]] \
             || refuse "no galata-token-expiry — cargo build --release -p galata-datawatch-vault first"
         said="$(gv_tool 2>&1)" || refuse "$said"
@@ -419,18 +412,8 @@ for spec in "${services[@]}"; do
     [[ -z "$arg" ]] && sed -i '' '/<string><\/string>/d' "$plist"
     plutil -lint "$plist" >/dev/null || refuse "rendered plist does not parse: $plist"
 
-    # The tower runs a copy, taken here and only here: installing is the
-    # deploy, and building the tower checkout is not. Staged under a
-    # temporary name and vetted while the old tower serves; renamed into
-    # place once it has stopped, so the file that runs is the one assessed.
-    if [[ "$service" == tower ]]; then
-        mkdir -p "$ROOT/var/bin"
-        # -p: the copy keeps its build time, which --status's BUILD compares.
-        cp -p "$TOWER/target/release/galata-tower" "$ROOT/var/bin/.galata-tower.new"
-    fi
     programs=()
     while IFS= read -r program; do [[ -n "$program" ]] && programs+=("$program"); done < <(vet_programs "$spec")
-    [[ "$service" == tower ]] && programs+=("$ROOT/var/bin/.galata-tower.new")
     (( ${#programs[@]} )) && vet "$label" "${programs[@]}"
 
     # Replace, never stack — and never beside a hand-started twin.
@@ -450,7 +433,8 @@ for spec in "${services[@]}"; do
         # SIGINT first: a capture built before SIGTERM was a clean stop still
         # stops cleanly on it. Then SIGTERM, because a process started with
         # `nohup … &` from a non-interactive shell inherits SIGINT IGNORED —
-        # found when the tower, which installs no handler, would not stop.
+        # found when galata-tower (since retired), which installed no handler,
+        # would not stop.
         kill -INT $pids 2>/dev/null
         for _ in $(seq 1 10); do [[ -z "$(twin_pids | tr -d ' ')" ]] && break; sleep 1; done
         if [[ -n "$(twin_pids | tr -d ' ')" ]]; then
@@ -458,14 +442,6 @@ for spec in "${services[@]}"; do
             for _ in $(seq 1 20); do [[ -z "$(twin_pids | tr -d ' ')" ]] && break; sleep 1; done
         fi
         [[ -z "$(twin_pids | tr -d ' ')" ]] || refuse "a hand-started $spec would not stop"
-    fi
-    # The staged, vetted copy takes the installed name now the old tower has
-    # stopped: a rename, so no reader ever sees half a binary.
-    if [[ "$service" == tower ]]; then
-        mv -f "$ROOT/var/bin/.galata-tower.new" "$ROOT/var/bin/galata-tower"
-        at="$(git -C "$TOWER" describe --always --dirty 2>/dev/null || echo unknown)"
-        echo "$at" > "$ROOT/var/bin/galata-tower.source"
-        echo "installed the tower, its checkout at $at"
     fi
     launchctl bootstrap "$DOMAIN" "$plist" || refuse "launchctl bootstrap failed for $plist"
     launchctl print "$DOMAIN/$label" >/dev/null 2>&1 || refuse "$label did not load"

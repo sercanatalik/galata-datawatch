@@ -346,7 +346,7 @@ pub fn schema_for(kind: Kind) -> Option<SchemaRef> {
 /// An account's datasets are not projected here. Their rows name an account
 /// rather than an instrument, so they cannot carry the common five; and they
 /// live under their own root (`var/ledger`), readable by its owner only, which
-/// a tape the tower reads must not become a copy of.
+/// a tape galata-markets serves must not become a copy of.
 ///
 /// Signals (market-addressed) sit in this tape and are **not** projected into
 /// it: they are computed, and no archive row stands behind them (see

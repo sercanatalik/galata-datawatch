@@ -525,7 +525,7 @@ pub struct Ledger {
     /// Where the ledger is projected into typed datasets, one file per
     /// (venue, account, kind), rewritten by the ledger process on each fold
     /// pass. Held **owner-only** as `root` is, and never under the market
-    /// tape, which the tower serves. Absent means no projection.
+    /// tape, which galata-markets serves. Absent means no projection.
     ///
     /// Optional in the parse for the reason `events_secs` is: capture, the
     /// tower and the lane's tools read this document too, and a binary older
@@ -767,7 +767,7 @@ pub trait Adapters {
     /// `[ledger]` block's venues and cost.
     ///
     /// **Defaulted to no.** One deployment configuration is read by capture,
-    /// the maintenance tools and the tower as well as the ledger, and a tool
+    /// the maintenance tools and galata-markets as well as the ledger, and a tool
     /// that runs no ledger has no business refusing one: before this, every
     /// one of them refused a document with a `[ledger]` block, because its
     /// resolver answered *no ledger here* for a venue it was never going to
@@ -1461,7 +1461,7 @@ mod tests {
         }
     }
 
-    /// A tool that runs no ledger: capture, the maintenance tools, the tower.
+    /// A tool that runs no ledger: capture, the maintenance tools.
     struct NoLedger;
     impl Adapters for NoLedger {
         fn supplies(&self, venue: &str, series: Series) -> bool {
@@ -1653,8 +1653,8 @@ dexes = ["", "xyz"]
 
     #[test]
     fn a_tool_that_runs_no_ledger_loads_a_document_that_declares_one() {
-        // The deployment's one document is read by capture and the tower as
-        // well. Before this, both refused it: "keeps no ledger for".
+        // The deployment's one document is read by capture and the
+        // maintenance tools as well. Before this, they refused it: "keeps no ledger for".
         let text = format!("{GOOD}{LEDGER}");
         Config::load_from_str(&text, origin(), &NoLedger).expect("capture must still start");
         // An account on a venue nothing keeps a ledger for is the ledger's

@@ -6,23 +6,22 @@
 #   run-service.sh nats
 #   run-service.sh capture <venue>
 #   run-service.sh ledger <venue>
-#   run-service.sh tower
 #   run-service.sh flows
 #   run-service.sh markets
 #   run-service.sh --check <service> [<venue>]   every precondition, then `ready`;
 #                                                starts nothing
 #
-# **Every service but the tower runs in a container of its own** (Apple's
-# `container`), at the CPUs and memory its line in var/containers.conf states.
-# A service with no line does not start, and the refusal names the service and
-# the missing limit: there is no native start to fall back to. The tower runs
-# natively until it is retired.
+# **Every service runs in a container of its own** (Apple's `container`), at
+# the CPUs and memory its line in var/containers.conf states. A service with no
+# line does not start, and the refusal names the service and the missing
+# limit: there is no native start to fall back to. The one native service,
+# galata-tower, was retired on 2026-11-28 (`retire-galata-tower`).
 #
 # **Each service gets only its own secrets**, read from the deployment's vault
 # through a token minted for that service alone
 # (var/tokens/<service>.gvt, 0600; scripts/mint-service-tokens.sh): NATS all
-# three broker passwords, capture its own venue's, the tower the reader's, the
-# ledger its own venue's account addresses and the fingerprint key, and
+# the broker passwords, capture its own venue's, the ledger its own venue's
+# account addresses and the fingerprint key, and
 # the scheduling lane none — it is built to hold no credential.
 # Secrets never go in a launchd plist, which is mode 0644 and readable by
 # every user on the machine.
@@ -75,8 +74,8 @@ record_start() {  # record_start started | record_start refused <reason>
 # **--check: would this service start?** Every precondition below, plus that
 # its token opens and has not expired, and then `ready` in place of the exec.
 # A restart is when a missing binary or a lapsed token is found otherwise:
-# the tower's installed copy was missing for a day while --status read
-# `pid 1770 yes` (say-a-service-cannot-restart).
+# galata-tower's (since retired) installed copy was missing for a day while
+# --status read `pid 1770 yes` (say-a-service-cannot-restart).
 CHECK=0
 if [[ "${1:-}" == --check ]]; then CHECK=1; shift; fi
 
@@ -106,11 +105,6 @@ config_verdict() {  # prints a note, or refuses
     [[ -n "${GALATA_CONFIG:-}" ]] || return 0
     case "${program##*/}" in
         galata-datawatch|galata-ledger) ;;
-        galata-tower)
-            # An older tower ignores its arguments and serves: ask only one
-            # whose --version says it understands the flag.
-            "$program" --version 2>/dev/null </dev/null | grep -q '^understands:.*--check-config' \
-                || { echo "config not checked: this tower predates --check-config"; return 0; } ;;
         *) return 0 ;;
     esac
     answer="$("$program" --check-config "$GALATA_CONFIG" 2>/dev/null </dev/null | head -1)"
@@ -411,34 +405,6 @@ case "$service" in
             /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
             "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- galata-ledger "$venue"
         ;;
-    tower)
-        # The copy install-services.sh put in var/bin, never the tower
-        # checkout's target/: a build there is not a deploy, and a restart
-        # must not make it one. On 2026-09-25 a stray SIGTERM restarted this
-        # service onto a build nobody had chosen to ship.
-        bin="$ROOT/var/bin/galata-tower"
-        [[ -x "$bin" ]] || refuse "no installed tower at $bin — scripts/install-services.sh tower"
-        # Every path absolute. The tower's defaults are relative to its own
-        # checkout, and from here its config/datawatch.toml does not exist:
-        # the same day, latest prices went out empty for want of GALATA_CONFIG.
-        export GALATA_ARCHIVE="$ROOT/var/archive"
-        export GALATA_TAPE="$ROOT/var/tape"
-        export GALATA_STATUS="$ROOT/var/status"
-        use_config
-        export GALATA_TOWER_LISTEN="${GALATA_TOWER_LISTEN:-127.0.0.1:8777}"
-        # The broker capture publishes to, read from the same [broker] url
-        # (scripts/lib/broker_addr.py). Loopback only when the configuration
-        # declares no broker at all, which is what it was before.
-        if [[ -z "${GALATA_BROKER:-}" ]]; then
-            GALATA_BROKER="$(python3 "$ROOT/scripts/lib/broker_addr.py" "$GALATA_CONFIG" 2>/dev/null)" \
-                || GALATA_BROKER="127.0.0.1:4222"
-        fi
-        export GALATA_BROKER
-        # Said under --check, on stderr: the address is in the environment,
-        # not the command line, so `ready:` alone would not show it.
-        if (( CHECK )); then echo "run-service: the tower connects to the broker at $GALATA_BROKER" >&2; fi
-        from_vault tower --only "$(password_var reader)" -- "$bin"
-        ;;
     vault)
         # Once a service here: `gv-server local`, on loopback, with its data
         # in ~/.local/share/galata-vault. The deployment's vault is now the
@@ -497,6 +463,6 @@ case "$service" in
             "${CONTAINER_RUN[@]}" with-secrets "${secrets[@]}" -- galata-markets
         ;;
     *)
-        refuse "usage: run-service.sh [--check] nats | capture <venue> | ledger <venue> | tower | flows | markets"
+        refuse "usage: run-service.sh [--check] nats | capture <venue> | ledger <venue> | flows | markets"
         ;;
 esac

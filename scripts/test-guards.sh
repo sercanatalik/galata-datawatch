@@ -270,8 +270,8 @@ prove "check-tarball-builds (a crate whose tarball is missing its modules)" \
 # The second half: `cargo package` verifies DEFAULT FEATURES and offers no way
 # to ask for another set, so the guard builds the shapes somebody else takes
 # from the same unpacked tarballs. This plant compiles perfectly with defaults
-# and not without them — which is the configuration galata-tower takes, and the
-# one nobody develops in.
+# and not without them — which is the configuration galata-markets and
+# galata-margin start from, and the one nobody develops in.
 prove "check-tarball-builds (what ships fails without default features)" \
       ./scripts/check-tarball-builds.sh \
       crates/galata-datawatch/src/lib.rs \
@@ -472,14 +472,14 @@ prove "check-service-secrets (a script runs gv from a checkout)" \
 prove "check-service-secrets (the template holds a value)" \
       ./scripts/check-service-secrets.sh \
       config/secrets.env.example replace \
-      'GALATA_BROKER_PASSWORD_READER=' \
-      'GALATA_BROKER_PASSWORD_READER=hunter2'
+      'GALATA_BROKER_PASSWORD_BUS_ADMIN=' \
+      'GALATA_BROKER_PASSWORD_BUS_ADMIN=hunter2'
 
 # A secret a service reads, missing from the template.
 prove "check-service-secrets (the template lacks a name)" \
       ./scripts/check-service-secrets.sh \
       config/secrets.env.example replace \
-      $'\n# read by: nats, tower\nGALATA_BROKER_PASSWORD_READER=\n' \
+      $'\n# read by: nats\nGALATA_BROKER_PASSWORD_BUS_ADMIN=\n' \
       $'\n'
 
 # A secret handed to a container with -e, which Apple's container writes into

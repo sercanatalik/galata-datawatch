@@ -23,8 +23,9 @@
 #
 # **The floor is what makes `gv run` safe here.** Before 0.5.0, `gv` ignored
 # `GV_TOKEN_FILE` and answered with the owner key, which this machine holds:
-# measured on 2026-09-25, the tower's token "read" capture's password through
-# `gv run`. 0.5.0 uses the token or refuses, and refuses a name outside the
+# measured on 2026-09-25, galata-tower's token (the tower is since retired)
+# "read" capture's password through `gv run`. 0.5.0 uses the token or
+# refuses, and refuses a name outside the
 # token's allow-list instead of starting the command without it. An older
 # `gv` is therefore not a slower path but the leak itself, and is refused by
 # version before it is handed a token.

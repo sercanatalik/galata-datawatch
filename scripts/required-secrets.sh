@@ -12,7 +12,7 @@
 # **From what the services themselves are started from**, so this list and a
 # service's start cannot disagree: the identities in the generated
 # authorization file (the broker reads every one's password, capture its own
-# venue's, the tower the reader's), and the configuration's venues and
+# venue's), and the configuration's venues and
 # `[ledger]` tables (scripts/lib/ledger_vars.py). A venue with a broker
 # identity and no `[venue.…]` table has no capture here, so nothing reads its
 # password but the broker. A ledger's venue is the one its accounts name, table
@@ -65,7 +65,6 @@ required() {
         name="$(password_var "$id")"
         printf 'nats\t%s\n' "$name"
         case "$id" in
-            reader) printf 'tower\t%s\n' "$name" ;;
             markets) printf 'markets\t%s\n' "$name" ;;
             datawatch-*)
                 venue="${id#datawatch-}"

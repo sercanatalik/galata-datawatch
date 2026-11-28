@@ -8,7 +8,7 @@
 //! ```
 //!
 //! **Never under the market tape.** An account's rows name an account, not
-//! an instrument, and the market tape is what the tower serves
+//! an instrument, and the market tape is what galata-markets serves
 //! (`tape/schema.rs`, "Projecting the ledger is a later change, with its own
 //! schema"). This root is held as `var/ledger` is: `0700`, refused otherwise.
 //!

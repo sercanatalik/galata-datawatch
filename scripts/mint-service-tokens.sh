@@ -46,7 +46,7 @@ CONFIG="$ROOT/var/datawatch.local.toml"
 ledger_venues="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" --venues 2>/dev/null)" \
     || { ledger_venues=""; echo "no ledger declared in $CONFIG — no ledger token"; }
 
-known=(nats capture-hyperliquid tower markets)
+known=(nats capture-hyperliquid markets)
 for venue in $ledger_venues; do known+=("ledger-$venue"); done
 for asked in ${ONLY_SERVICES[@]+"${ONLY_SERVICES[@]}"}; do
     [[ " ${known[*]} " == *" $asked "* ]] \
@@ -132,7 +132,6 @@ done < <(awk '$1 == "user:" { print $2 }' "$ROOT/config/nats-authorization.conf"
 (( ${#broker_names[@]} )) || { echo "mint-service-tokens: config/nats-authorization.conf names no identity" >&2; exit 1; }
 mint nats "${broker_names[@]}"
 mint capture-hyperliquid GALATA_BROKER_PASSWORD_DATAWATCH_HYPERLIQUID
-mint tower GALATA_BROKER_PASSWORD_READER
 # galata-markets: its bus password and its clients' tokens.
 markets_names=()
 while read -r name; do markets_names+=("$name"); done < <(markets_secrets)

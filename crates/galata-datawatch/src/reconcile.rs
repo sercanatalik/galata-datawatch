@@ -32,7 +32,8 @@ use crate::watch::Finding;
 pub const MEASURE: &str = "correlation_target";
 
 /// How far back the newest figures are looked for: twice the widest horizon
-/// the calculator declares (1w), as the tower's reader does.
+/// the calculator declares (1w), as galata-tower's reader did (the tower is
+/// since retired).
 const LOOKBACK_DAYS: i64 = 14;
 const DAY_MICROS: i64 = 86_400_000_000;
 

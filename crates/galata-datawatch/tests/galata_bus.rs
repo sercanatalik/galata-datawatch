@@ -13,7 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use galata_broker::{BUS_ADMIN, BrokerIdentity, NatsSubscriber, grants, password_var, streams};
+use galata_broker::{BUS_ADMIN, BrokerIdentity, NatsPublisher, grants, password_var, streams};
 
 const VENUES: [&str; 1] = ["hyperliquid"];
 const LEDGERS: [&str; 1] = ["hyperliquid"];
@@ -195,12 +195,17 @@ fn a_table_it_cannot_apply_costs_the_streams_and_not_the_bus() {
 
     // Publishers and subscribers are served as before.
     let served = runtime().block_on(async {
-        let reader = BrokerIdentity::new("reader", password("reader"), password_var("reader"));
-        NatsSubscriber::connect(&format!("nats://127.0.0.1:{port}"), &reader, "status.>")
-            .await
-            .is_ok()
+        let capture = BrokerIdentity::new(
+            "datawatch-hyperliquid",
+            password("datawatch-hyperliquid"),
+            password_var("datawatch-hyperliquid"),
+        );
+        match NatsPublisher::connect(&format!("nats://127.0.0.1:{port}"), &capture).await {
+            Ok(publisher) => publisher.flush().await.is_ok(),
+            Err(_) => false,
+        }
     });
-    assert!(served, "the reader is served though no stream was applied");
+    assert!(served, "capture is served though no stream was applied");
 
     sigterm(&child);
     assert!(wait_exit(&mut child, Duration::from_secs(10)).is_some());

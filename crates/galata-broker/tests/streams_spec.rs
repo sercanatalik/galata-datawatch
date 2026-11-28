@@ -157,7 +157,7 @@ async fn a_message_older_than_the_window_is_gone() {
 }
 
 #[tokio::test]
-async fn a_publisher_cannot_delete_the_window_nor_the_reader_create_a_stream() {
+async fn a_publisher_cannot_delete_the_window_nor_a_reader_create_a_stream() {
     let (broker, admin) = applied().await;
 
     let capture = quick(&broker, "datawatch-hyperliquid").await;
@@ -172,7 +172,9 @@ async fn a_publisher_cannot_delete_the_window_nor_the_reader_create_a_stream() {
         "the window is unchanged"
     );
 
-    let reader = quick(&broker, "reader").await;
+    // The window's reader, galata-markets, on the inbox it may hear on: a
+    // refusal, not a request that timed out unheard.
+    let reader = galata_markets(&broker).await;
     let mut rogue = streams::table()
         .into_iter()
         .find(|s| s.name == "STATUS")

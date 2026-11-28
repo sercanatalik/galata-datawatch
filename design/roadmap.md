@@ -4,6 +4,11 @@
 exploration of `legacy/galata-legacy`'s datawatch slice, galata-vault,
 galata-tower and cereyan.*
 
+> **galata-tower was retired on 2026-11-28** (`retire-galata-tower`): its
+> repository is deleted and the deployment no longer runs it. What follows
+> about it is the plan as written; market data and status now reach screens
+> through galata-markets.
+
 The ordering rule is **not** dependency alone. It is: *the things whose wrong
 answer is unrecoverable come first.* Every byte not captured is gone forever,
 and every gap row written before clipping exists is a row whose `clipped`
@@ -26,7 +31,7 @@ Tier 2 and the broker at Tier 4.
 | broker | NATS stays, in its own crate, so a consumer links no parquet |
 | tape schema | a **public API** under semver — safe because it is rebuildable |
 | scheduling | cereyan, by subprocess, with an exit-code taxonomy |
-| UI | galata-tower: axum server and React in one repo |
+| UI | galata-tower: axum server and React in one repo (retired 2026-11-28) |
 | ledger | account state, in this workspace: perp positions and margin, fills, funding, liquidations and every transfer that touches perp margin. Hyperliquid first. Many venues, many accounts |
 | accounts | declared by alias in the vault document; the address is a vault variable; Hyperliquid sub-accounts are **discovered** under a declared master |
 | ledger scope | spot balances and vault equity are **out**. A transfer into either is still recorded, as an event that leaves perp margin |
@@ -383,7 +388,7 @@ comment.
 
 ---
 
-## Tier 6 — galata-tower
+## Tier 6 — galata-tower (retired 2026-11-28)
 
 *One repo, both halves. The cereyan pattern, already proven in this tree.*
 

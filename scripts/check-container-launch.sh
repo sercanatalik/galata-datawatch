@@ -117,7 +117,7 @@ refuses_with "no CPU or memory limit for capture:hyper," limits capture:hyper \
     || say "capture:hyper is given capture:hyperliquid's limits: a service is matched by its whole name, not a prefix"
 refuses_with "no CPU or memory limit for flows," limits flows \
     || say "a commented-out service is given limits, or refused without naming the service and the missing limits"
-refuses_with "no CPU or memory limit for tower," limits tower \
+refuses_with "no CPU or memory limit for markets," limits markets \
     || say "a service with no line is given limits, or refused without naming the service and the missing limits"
 refuses_with "no memory limit for ledger:hyperliquid" limits ledger:hyperliquid \
     || say "a line with CPUs and no memory is accepted: half a limit is a default for the other half"
@@ -460,26 +460,6 @@ line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/co
         /bin/bash "$scratch/scripts/run-service.sh" --check markets 2>&1 || true)"
 [[ "$line" == *"REFUSED"*"no CPU or memory limit for markets"* ]] \
     || say "galata-markets, with no line in containers.conf, is not refused by its name and the missing limit: $line"
-
-# The tower is pointed at the broker the configuration names. Its address is
-# in the environment, so --check says it.
-mkdir -p "$scratch/var/bin"
-printf '#!/bin/sh\nexit 0\n' > "$scratch/var/bin/galata-tower"
-chmod 755 "$scratch/var/bin/galata-tower"
-cp "$scratch/var/tokens/capture-hyperliquid.gvt" "$scratch/var/tokens/tower.gvt"
-chmod 600 "$scratch/var/tokens/tower.gvt"
-tower_would_start() {  # with no GALATA_BROKER of the caller's own
-    ( unset GALATA_BROKER
-      GALATA_VAULT_BIN="$scratch/vault-bin" /bin/bash "$scratch/scripts/run-service.sh" --check tower 2>&1 )
-}
-printf '\n[broker]\nurl = "nats://mac.example.ts.net:4222"\nuser = "reader"\n' >> "$scratch/var/datawatch.local.toml"
-line="$(tower_would_start || true)"
-[[ "$line" == *"the tower connects to the broker at mac.example.ts.net:4222"* ]] \
-    || say "the tower is not pointed at the broker the configuration names: $line"
-rm "$scratch/var/datawatch.local.toml"
-line="$(tower_would_start || true)"
-[[ "$line" == *"the tower connects to the broker at 127.0.0.1:4222"* ]] \
-    || say "with no broker declared, the tower is not left on loopback as it was: $line"
 
 # --- 4. the build context --------------------------------------------------
 if [[ -f "$ROOT/.dockerignore" ]]; then

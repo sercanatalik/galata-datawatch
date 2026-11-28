@@ -37,7 +37,7 @@ walk_cap = 200
 # never sends a bar final and the walk runs at boot, so WITHOUT THIS A RUNNING
 # CAPTURE HOLDS FORMING ROWS AND NO CLOSES. Optional, no default, 60..=86400.
 # Commented because every binary that reads this document refuses a key it
-# does not know: rebuild the ledger and the tower before writing it.
+# does not know: rebuild the ledger before writing it.
 # settle_secs = 300
 
 [venue.hyperliquid]
