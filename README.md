@@ -790,6 +790,83 @@ curl -NsH "$T" "$M/v1/live?venue=hyperliquid&tickers=BTC&kinds=candles&period=5m
   saying so, rather than slowing the others or dropping events silently; it
   resumes with `Last-Event-ID`, the window being its buffer.
 
+### Account data
+
+galata-markets serves the owner's accounts as it serves market data
+(`add-markets-accounts`): what each account holds now, its history and its
+live stream. They come from the ledger's projection (`[ledger] tape`,
+mounted read-only) and the bus's account stream, and galata-markets changes
+neither. An account is named by its venue and alias, never an address: the
+projection is written by alias, and the account stream's subjects and rows
+are too. The ledger's record, which holds the venues' answers with
+addresses in them, is not mounted.
+
+**Only clients granted account data are answered**: `watcher`,
+`controlboard` and `operator` (`ACCOUNT_CLIENTS`, beside the clients). Any
+other client's valid token is refused with `403`, which names no account.
+
+| Route | Answers |
+|---|---|
+| `/v1/accounts` | each account held, by venue and alias, with each kind's newest time |
+| `/v1/accounts/{venue}/{alias}/now` | each state kind's newest set, with the time it was read |
+| `/v1/accounts/{venue}/{alias}/{kind}?from&to` | one kind's rows over a venue-time window |
+| `/v1/accounts/live?accounts&kinds[&after\|&from]` | server-sent events from the account stream |
+
+```sh
+T="Authorization: Bearer $GALATA_MARKETS_TOKEN_WATCHER"
+
+# The accounts held: hyperliquid main, and each Derive subaccount by alias.
+curl -sH "$T" "$M/v1/accounts"
+
+# main's state now: positions, margin, balances, open orders, …
+curl -sH "$T" "$M/v1/accounts/hyperliquid/main/now"
+
+# owner_s3's fills over a day.
+curl -sH "$T" "$M/v1/accounts/derive-xyz/owner_s3/fills?from=1795564800000000&to=1795651200000000"
+
+# Continue that answer live, after its position.
+curl -NsH "$T" "$M/v1/accounts/live?accounts=derive-xyz/owner_s3&kinds=fills&after=4211"
+```
+
+- **Rows are the projection's columns**: `venue`, `account`, `dex`, `ticker`,
+  `at_micros` (the venue's time), `recv_micros` (when the ledger read it),
+  then the kind's own columns. Decimals are exact strings. A row from the
+  stream is built by the projection's own code, so it reads the same as one
+  from the projection.
+- **`now` is each state kind's newest set.** For Hyperliquid that is margin,
+  positions, balances, borrowing and lending, lend health, portfolio margin,
+  token margin and open orders. For Derive it is margin state, position
+  state, collateral and open orders.
+  - Each set comes from the stream's last message on its subject, or, where
+    the stream (seven days) holds none, from the projection.
+  - Each says `read_micros`, its `source` and its rows. A flat account's
+    positions are an empty set at the time they were read.
+  - A kind held nowhere is listed under `absent`, not answered as empty.
+- **History joins at a time bound.** The projection answers up to the newest
+  time it read for that account and kind (`bound_micros`), and the account
+  stream answers after it.
+  - A row both hold appears once, by the identity the ledger reads it by:
+    for a fill, its trade id and order id.
+  - The answer states the stream `position` it read to.
+    `live?after=<position>` continues there, with nothing missed and nothing
+    repeated.
+  - Limits: 31 days and 200,000 rows, refused naming the limit, never cut
+    short. Without the bus it is refused (`503`), since half an answer would
+    read as the whole.
+  - A state kind's history is its sets as read: every read the projection
+    kept, then each set the stream carried, its rows timed by the set.
+- **The live stream** follows up to 256 account and kind subjects (an
+  account with no `kinds` is one). Each event is the bus's envelope, and
+  its id is its position in the account stream.
+  - It resumes with `Last-Event-ID` or `after`, and starts at a moment with
+    `from`.
+  - A position the stream no longer holds is refused (`410`), naming the
+    oldest it does.
+  - A client that falls behind is disconnected, as on the market stream.
+- **Every account route is a read.** galata-markets holds no venue
+  credential, and its bus identity may read the account stream and the
+  stream's last message per subject, and publish nothing.
+
 ---
 
 ## Operations
@@ -1090,7 +1167,7 @@ scripts/install-services.sh --status                     # CONTAINER: state, ima
 | `ledger:<venue>` | `galata-datawatch` | its record, its projection and the status folder | nowhere |
 | `nats` | `galata-nats` | its server configuration, the generated authorization file and a volume of its own | this Mac's tailnet name, port 4222 |
 | `flows` | `galata-flows` | the archive, the tape, the status folder (the record judge's report) and a volume of its own | nowhere |
-| `markets` | `galata-markets` | the archive, the tape and the status folder, **read-only** | this Mac's tailnet name, port 8780 |
+| `markets` | `galata-markets` | the archive, the tape, the status folder and the ledger's projection, **read-only**; never the ledger's record | this Mac's tailnet name, port 8780 |
 
 - **The limits are stated, never defaulted.** A container given none gets
   4 CPUs and 1 GiB whatever it runs. A service's line states both, and a

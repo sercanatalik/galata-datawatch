@@ -22,6 +22,48 @@ use galata_datawatch::config::{ConfigError, Secret, SecretSource};
 /// The clients galata-markets serves.
 pub const CLIENTS: [&str; 3] = ["controlboard", "watcher", "operator"];
 
+/// **The clients granted account data** (`add-markets-accounts`, design D2):
+/// the owner's amounts, positions and orders, served by alias. Checked after
+/// the token, by [`require_account_grant`], on the account routes alone. The
+/// watcher is the first to call them; controlboard and operator are granted
+/// now so that their own changes need none here.
+pub const ACCOUNT_CLIENTS: [&str; 3] = ["watcher", "controlboard", "operator"];
+
+/// The clients an account route answers: [`ACCOUNT_CLIENTS`] on the service,
+/// a narrower list in a test that needs a client without the grant.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountGrant(pub &'static [&'static str]);
+
+impl Default for AccountGrant {
+    fn default() -> AccountGrant {
+        AccountGrant(&ACCOUNT_CLIENTS)
+    }
+}
+
+/// **The refusal of a client without the grant**: forbidden, naming no
+/// account, no client and nothing about what exists.
+pub fn not_granted() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "this client is not granted account data\n",
+    )
+        .into_response()
+}
+
+/// The layer on the account routes, inside [`require_token`]: the client
+/// that token named must be granted account data. A request that reached it
+/// without a client named is refused alike.
+pub async fn require_account_grant(
+    State(grant): State<AccountGrant>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match request.extensions().get::<Client>() {
+        Some(Client(client)) if grant.0.contains(client) => next.run(request).await,
+        _ => not_granted(),
+    }
+}
+
 /// The variable holding one client's token: `GALATA_MARKETS_TOKEN_<CLIENT>`.
 pub fn token_var(client: &str) -> String {
     format!(
@@ -191,6 +233,17 @@ pub(crate) mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(listed, CLIENTS);
+    }
+
+    #[test]
+    fn every_client_granted_account_data_is_a_client() {
+        for client in ACCOUNT_CLIENTS {
+            assert!(CLIENTS.contains(&client), "{client} has no token");
+        }
+        assert!(
+            ACCOUNT_CLIENTS.contains(&"watcher"),
+            "the first client to call the account routes"
+        );
     }
 
     #[test]

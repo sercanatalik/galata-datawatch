@@ -5,8 +5,14 @@
 //! the facts about what exists — over HTTP, to clients that never connect to
 //! the bus. It reads the tape and the archive and never writes either, reads
 //! the bus as `markets` and publishes nothing, and links no venue transport.
+//!
+//! **And account data** (`add-markets-accounts`), to the clients granted it:
+//! the accounts held, each one's state now, its history and its live stream,
+//! by alias, from the ledger's projection and the account stream, never
+//! changing either.
 
 pub mod access;
+pub mod accounts;
 pub mod fill;
 pub mod health;
 pub mod history;
@@ -46,6 +52,12 @@ pub struct Markets {
     pub held: metadata::HeldCache,
     /// Where the deployment's health is read from, and what to expect.
     pub health: health::Sources,
+    /// The ledger's projection (`[ledger] tape`), read-only; `None` where the
+    /// deployment declares none, and account history then comes from the
+    /// stream alone.
+    pub ledger_tape: Option<PathBuf>,
+    /// How much one account answer may hold.
+    pub account_limits: accounts::Limits,
 }
 
 impl Markets {
@@ -63,6 +75,8 @@ impl Markets {
             statuses: status::Statuses::default(),
             held: metadata::HeldCache::default(),
             health: health::Sources::default(),
+            ledger_tape: None,
+            account_limits: accounts::Limits::default(),
         }
     }
 }
@@ -77,8 +91,16 @@ pub fn now_micros() -> i64 {
 /// The state every handler shares.
 pub type Shared = Arc<Markets>;
 
-/// **Every route behind a token**, on their state.
+/// **Every route behind a token**, on their state: the account routes behind
+/// the grant of account data as well.
 pub fn routes(markets: Shared) -> Router {
+    routes_granting(markets, access::AccountGrant::default())
+}
+
+/// [`routes`], the account routes answering the clients `grant` names: a test
+/// narrows it to have a client without the grant.
+pub fn routes_granting(markets: Shared, grant: access::AccountGrant) -> Router {
+    let accounts = accounts::routes(markets.clone(), grant);
     Router::new()
         .route("/v1/tape/{kind}", get(history::tape))
         .route("/v1/candles", get(periods::candles))
@@ -90,6 +112,7 @@ pub fn routes(markets: Shared) -> Router {
             get(metadata::instrument_route),
         )
         .with_state(markets)
+        .merge(accounts)
 }
 
 /// **The service as it is served**: `/health` and `/v1/health` open, every

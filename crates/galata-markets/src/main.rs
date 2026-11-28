@@ -104,6 +104,12 @@ async fn serve(listen: &str) -> Result<(), String> {
     markets.archive = config.paths.archive.clone();
     markets.normalisers = normalisers;
     markets.health = galata_markets::health::Sources::from_config(&config);
+    // The ledger's projection, mounted read-only where one is declared: account
+    // history up to its bound (add-markets-accounts, design D7).
+    markets.ledger_tape = config
+        .ledger
+        .as_ref()
+        .and_then(|ledger| ledger.tape.clone());
 
     // The bus, asked for in the background: a broker that is away delays the
     // live stream, never the rest.

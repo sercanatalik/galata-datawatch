@@ -430,9 +430,29 @@ else
     has "source=$scratch/var/status,target=/app/var/status,readonly" "it is given the status folder read-only: it judges the reports in it, and must not change them"
     [[ "$line" == *" -v $scratch/var/status"* ]] \
         && say "galata-markets is given the status folder writable"
-    [[ "$line" == *"/var/ledger"* ]] \
-        && say "galata-markets' container is given the ledger's record, which is not its to read"
+    # The ledger's projection, read-only (add-markets-accounts, design D7):
+    # account history by alias. Its record never: the venues' answers in it
+    # hold addresses. `/var/ledger` followed by anything but `-` is the record,
+    # not `/var/ledger-tape`.
+    has "source=$scratch/var/ledger-tape,target=/app/var/ledger-tape,readonly" "it is given the ledger's projection read-only: it serves account history from it, and must not change it"
+    [[ "$line" == *" -v $scratch/var/ledger-tape"* ]] \
+        && say "galata-markets is given the ledger's projection writable"
+    [[ "$line" =~ /var/ledger([^-]|$) ]] \
+        && say "galata-markets' container is given the ledger's record, which holds addresses and is not its to read"
     [[ "$line" =~ -e\ +\"?GALATA_(MARKETS_TOKEN|BROKER_PASSWORD) ]] && say "one of galata-markets' secrets is passed with -e"
+fi
+# A deployment that declares no ledger: galata-markets starts, given nothing
+# of one.
+mv "$scratch/var/datawatch.local.toml" "$scratch/var/datawatch.local.toml.aside"
+line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
+        GALATA_CONTAINERS_CONF="$scratch/containers.conf" GALATA_TAILSCALE_BIN="$stubs/ts-up/tailscale" \
+        /bin/bash "$scratch/scripts/run-service.sh" --check markets 2>&1 || true)"
+mv "$scratch/var/datawatch.local.toml.aside" "$scratch/var/datawatch.local.toml"
+if [[ "$line" != ready:* ]]; then
+    say "galata-markets, with no ledger declared, does not check as ready: $line"
+else
+    [[ "$line" == *"/var/ledger"* ]] \
+        && say "galata-markets, with no ledger declared, is given a ledger's folder: $line"
 fi
 : > "$scratch/containers.conf"
 line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \

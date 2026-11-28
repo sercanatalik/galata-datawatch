@@ -431,6 +431,74 @@ async fn galata_markets_publishes_nothing_and_changes_no_stream() {
         streams::held(&admin, "MARKETS").await.is_some(),
         "the window is unchanged"
     );
-    // Account data is not its to read.
-    assert!(markets.get_stream("ACCOUNTS").await.is_err());
+    assert!(markets.delete_stream("ACCOUNTS").await.is_err());
+    assert!(
+        streams::held(&admin, "ACCOUNTS").await.is_some(),
+        "the account stream is unchanged"
+    );
+}
+
+/// galata-markets reads the account stream it serves (`add-markets-accounts`,
+/// design D6): a replay of one account's subject, and the last message on a
+/// subject, which is an account's newest set. And it publishes nothing under
+/// `accounts.`, which is each ledger's own.
+#[tokio::test]
+async fn galata_markets_reads_the_account_stream_and_publishes_nothing_under_it() {
+    let (broker, admin) = applied().await;
+    let ledger = jetstream::new(quick(&broker, TEST_LEDGER).await);
+    for (subject, body) in [
+        ("accounts.hyperliquid.main.positions", "first"),
+        ("accounts.hyperliquid.main.fills", "fill"),
+        ("accounts.hyperliquid.main.positions", "second"),
+    ] {
+        ledger
+            .publish(subject, body.into())
+            .await
+            .unwrap()
+            .await
+            .expect("acknowledged");
+    }
+    assert_eq!(settled(&admin, "ACCOUNTS", 3).await, 3);
+
+    let client = galata_markets(&broker).await;
+    let markets = jetstream::new(client.clone());
+    let stream = markets.get_stream("ACCOUNTS").await.unwrap();
+    let mut replay = stream
+        .create_consumer(OrderedConfig {
+            filter_subject: "accounts.hyperliquid.main.positions".into(),
+            deliver_policy: DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .messages()
+        .await
+        .unwrap();
+    assert_eq!(next_payloads(&mut replay, 2).await, ["first", "second"]);
+    let newest = stream
+        .get_last_raw_message_by_subject("accounts.hyperliquid.main.positions")
+        .await
+        .expect("the newest set, by its subject");
+    assert_eq!(&newest.payload[..], b"second");
+
+    // A publish under `accounts.` it is not granted: the server drops it, so
+    // the stream holds nothing it sent.
+    let _ = client
+        .publish("accounts.hyperliquid.main.positions", "forged".into())
+        .await;
+    let _ = client.flush().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(settled(&admin, "ACCOUNTS", 3).await, 3);
+    let acknowledged = match markets
+        .publish("accounts.hyperliquid.main.positions", "forged".into())
+        .await
+    {
+        Ok(ack) => ack.await.is_ok(),
+        Err(_) => false,
+    };
+    assert!(
+        !acknowledged,
+        "nor through JetStream: a publish it may not make is never acknowledged"
+    );
+    assert_eq!(settled(&admin, "ACCOUNTS", 3).await, 3);
 }

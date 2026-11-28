@@ -127,6 +127,62 @@ pub fn newest(
     Ok(Some((latest, rows)))
 }
 
+/// **Every row one account's kind holds**, as one batch in the kind's
+/// columns: what galata-markets answers an account's history from, up to the
+/// projection's bound (`add-markets-accounts`, design D4). `None` where no
+/// file was written: for open orders, never read; for any other kind, never
+/// projected.
+pub fn read(
+    root: &Path,
+    venue: &str,
+    account: &str,
+    kind: Kind,
+) -> Result<Option<RecordBatch>, ProjectError> {
+    let path = path_of(root, venue, account, kind);
+    let schema = schema_for(kind).ok_or(ProjectError::Arrow {
+        kind,
+        detail: "not a projected kind".into(),
+    })?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let batches = galata_segments::read_segment(&path)?;
+    arrow::compute::concat_batches(&schema, &batches)
+        .map(Some)
+        .map_err(|e| ProjectError::Arrow {
+            kind,
+            detail: e.to_string(),
+        })
+}
+
+/// **Rows in the projection's columns, from envelopes**: what the account
+/// stream carries, made to read as the projection does, so one answer holds
+/// both (`add-markets-accounts`, design D4). Rows of other kinds are left
+/// out, and a ledger update is one row per dex effect, as [`write_kinds`]
+/// writes it. A state set is given here row by row, each in an envelope of
+/// its own.
+pub fn batch(
+    kind: Kind,
+    venue: &str,
+    account: &str,
+    rows: &[Envelope],
+) -> Result<RecordBatch, ProjectError> {
+    if schema_for(kind).is_none() {
+        return Err(ProjectError::Arrow {
+            kind,
+            detail: "not a projected kind".into(),
+        });
+    }
+    let expanded: Vec<std::borrow::Cow<'_, Envelope>>;
+    let of_kind: Vec<&Envelope> = if kind == Kind::LedgerUpdates {
+        expanded = per_effect(rows);
+        expanded.iter().map(|e| e.as_ref()).collect()
+    } else {
+        rows.iter().filter(|e| e.kind() == kind).collect()
+    };
+    batch_for(kind, venue, account, &of_kind)
+}
+
 /// The file each kind is written to, under its directory.
 pub const FILE: &str = "rows.parquet";
 

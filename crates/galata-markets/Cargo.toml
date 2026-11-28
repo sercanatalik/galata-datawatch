@@ -20,8 +20,9 @@ workspace = true
 
 [dependencies]
 # The normalisers of the venues whose holes it fills from the record, and no
-# capture loop.
-galata-datawatch = { version = "0.1.0", path = "../galata-datawatch", default-features = false, features = ["hyperliquid", "derive-xyz"] }
+# capture loop. And the ledger's projection, read back as galata-margin reads
+# it (`add-markets-accounts`): hashing only, no transport.
+galata-datawatch = { version = "0.1.0", path = "../galata-datawatch", default-features = false, features = ["hyperliquid", "derive-xyz", "ledger"] }
 galata-broker = { version = "0.1.0", path = "../galata-broker" }
 galata-wire = { version = "0.1.0", path = "../galata-wire" }
 arrow.workspace = true

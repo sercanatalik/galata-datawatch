@@ -147,12 +147,27 @@ prove "check-container-launch (galata-markets mounts the record writable)" \
     replace '        root_mounts_readonly paths.archive paths.tape paths.status' \
     '        root_mounts paths.archive paths.tape paths.status'
 
+# galata-markets given the ledger's record beside its projection: the
+# venues' answers in it hold addresses (add-markets-accounts, design D7).
+prove "check-container-launch (galata-markets mounts the ledger's record)" \
+    "$ROOT/scripts/check-container-launch.sh" \
+    "$ROOT/scripts/run-service.sh" \
+    replace '            root_mounts_readonly ledger.tape' \
+    '            root_mounts_readonly ledger.tape ledger.root'
+
+# galata-markets given the ledger's projection writable.
+prove "check-container-launch (galata-markets mounts the projection writable)" \
+    "$ROOT/scripts/check-container-launch.sh" \
+    "$ROOT/scripts/run-service.sh" \
+    replace '            root_mounts_readonly ledger.tape' \
+    '            root_mounts ledger.tape'
+
 # galata-markets taking galata-datawatch with its capture loop.
 prove "check-markets-no-transport (the service links a venue transport)" \
     "$ROOT/scripts/check-markets-no-transport.sh" \
     "$ROOT/crates/galata-markets/Cargo.toml" \
-    replace 'features = ["hyperliquid", "derive-xyz"] }' \
-    'features = ["hyperliquid", "derive-xyz", "capture"] }'
+    replace 'features = ["hyperliquid", "derive-xyz", "ledger"] }' \
+    'features = ["hyperliquid", "derive-xyz", "ledger", "capture"] }'
 
 # The fourth wall. `own` because the guard plants a dependency, and where a
 # dependency is planted matters: [dev-dependencies] would not break the wall,

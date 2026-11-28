@@ -136,12 +136,22 @@ pub fn table(venues: &[&str], ledgers: &[&str]) -> Grants {
     });
     // **galata-markets, the one consumer of the windows** (`add-galata-markets`).
     // It serves every client, so no client holds a bus password: this one
-    // lives in the vault and galata-markets' container. It may read the market
-    // and status streams and run consumers of its own on them — create, read,
-    // page and delete — and it hears replies only on an inbox of its own. It
-    // publishes nothing to any root, and creates, changes and deletes no stream.
+    // lives in the vault and galata-markets' container. It may read the market,
+    // status and account streams and run consumers of its own on them —
+    // create, read, page and delete — and it hears replies only on an inbox of
+    // its own. It publishes nothing to any root, and creates, changes and
+    // deletes no stream.
+    //
+    // **The account stream too** (`add-markets-accounts`, design D6), which it
+    // serves to the clients granted account data, and on it alone the
+    // stream's own message get: an account's newest set of each kind is the
+    // last message on its subject.
     let mut markets = Vec::new();
-    for stream in [crate::streams::MARKET_STREAM, crate::streams::STATUS_STREAM] {
+    for stream in [
+        crate::streams::MARKET_STREAM,
+        crate::streams::STATUS_STREAM,
+        crate::streams::ACCOUNT_STREAM,
+    ] {
         markets.push(format!("$JS.API.STREAM.INFO.{stream}"));
         // An unnamed consumer — an ordered replay — is created on the stream's
         // own subject, which `.>` does not match (async-nats 0.50).
@@ -150,6 +160,10 @@ pub fn table(venues: &[&str], ledgers: &[&str]) -> Grants {
             markets.push(format!("$JS.API.CONSUMER.{verb}.{stream}.>"));
         }
     }
+    markets.push(format!(
+        "$JS.API.STREAM.MSG.GET.{}",
+        crate::streams::ACCOUNT_STREAM
+    ));
     grants.push(Grant {
         identity: GALATA_MARKETS.into(),
         publish: markets,
@@ -421,7 +435,7 @@ mod tests {
             .iter()
             .find(|g| g.identity == GALATA_MARKETS)
             .unwrap();
-        for stream in ["MARKETS", "STATUS"] {
+        for stream in ["MARKETS", "STATUS", "ACCOUNTS"] {
             let info = format!("$JS.API.STREAM.INFO.{stream}");
             assert!(markets.publish.contains(&info), "missing {info}");
             let unnamed = format!("$JS.API.CONSUMER.CREATE.{stream}");
@@ -431,15 +445,20 @@ mod tests {
                 assert!(markets.publish.contains(&subject), "missing {subject}");
             }
         }
+        // An account's newest set: the account stream's own message get, and
+        // no other stream's.
+        let get = "$JS.API.STREAM.MSG.GET.ACCOUNTS".to_string();
+        assert!(markets.publish.contains(&get), "missing {get}");
         for subject in &markets.publish {
             assert!(
                 subject.starts_with("$JS.API.CONSUMER.")
-                    || subject.starts_with("$JS.API.STREAM.INFO."),
+                    || subject.starts_with("$JS.API.STREAM.INFO.")
+                    || *subject == get,
                 "it administers no stream and publishes no data: {subject}"
             );
             assert!(
-                !subject.contains("ACCOUNTS"),
-                "account data is not its to read: {subject}"
+                !subject.starts_with("accounts.") && !subject.starts_with("markets."),
+                "it publishes no data: {subject}"
             );
         }
         assert_eq!(markets.subscribe, vec![format!("{GALATA_MARKETS_INBOX}.>")]);

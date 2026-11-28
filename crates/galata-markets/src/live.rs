@@ -820,8 +820,8 @@ async fn bars(
 }
 
 /// The events a connection sends, ending with a comment where it fell
-/// behind.
-fn events(
+/// behind. The account stream's too (`crate::accounts`).
+pub(crate) fn events(
     queue: tokio::sync::mpsc::Receiver<Sent>,
     behind: Arc<AtomicBool>,
 ) -> impl Stream<Item = Result<SseEvent, Infallible>> {

@@ -477,11 +477,20 @@ case "$service" in
         # The status folder too, read-only: the deployment's health is judged
         # from the reports in it (add-service-health-monitoring, design D2).
         root_mounts_readonly paths.archive paths.tape paths.status
+        mounts=("${ROOT_MOUNTS[@]}")
+        # The ledger's projection, read-only, where one is declared: account
+        # history up to its bound, by alias (add-markets-accounts, design D7).
+        # **Never the ledger's record**, [ledger] root, whose answers hold
+        # addresses.
+        if python3 "$ROOT/scripts/lib/config_roots.py" "$GALATA_CONFIG" "$ROOT" ledger.tape >/dev/null 2>&1; then
+            root_mounts_readonly ledger.tape
+            mounts+=("${ROOT_MOUNTS[@]}")
+        fi
         config_mount "$(container_name markets)"
         secrets=(); only=()
         while read -r name; do secrets+=("$name"); only+=(--only "$name"); done < <(markets_secrets)
         tailnet="$(tailnet_address 2>&1)" || refuse "$tailnet"
-        in_container markets "$MARKETS_IMAGE" -i "${ROOT_MOUNTS[@]}" "${CONFIG_MOUNT[@]}" \
+        in_container markets "$MARKETS_IMAGE" -i "${mounts[@]}" "${CONFIG_MOUNT[@]}" \
             --publish "$tailnet:$MARKETS_PORT:8780"
         from_vault markets "${only[@]}" -- \
             /bin/bash "$ROOT/scripts/lib/hand-secrets.sh" "${secrets[@]}" -- \
