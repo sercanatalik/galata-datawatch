@@ -41,8 +41,10 @@ ONLY_SERVICES=("$@")
 # The ledger's venues, from the deployment's own [ledger] tables: one token per
 # venue the accounts name, with or without a [venue.…] table
 # (add-derive-account-ledger, D7); none where no ledger is declared.
-CONFIG="$ROOT/var/datawatch.local.toml"
-[[ -f "$CONFIG" ]] || CONFIG="$ROOT/config/datawatch.toml"
+# The deployment's document, composed as run-service.sh composes it
+# (compose-deployment-config).
+CONFIG="$(python3 "$ROOT/scripts/lib/compose_config.py" "$ROOT" 2>&1)" \
+    || { echo "mint-service-tokens: ${CONFIG#compose-config: }" >&2; exit 1; }
 ledger_venues="$(python3 "$ROOT/scripts/lib/ledger_vars.py" "$CONFIG" --venues 2>/dev/null)" \
     || { ledger_venues=""; echo "no ledger declared in $CONFIG — no ledger token"; }
 

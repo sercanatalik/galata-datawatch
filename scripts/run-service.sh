@@ -193,15 +193,32 @@ from_vault() {
     exec "$gv" run --only "$names" -- "$@"
 }
 
-# This machine's broker block lives in the local configuration, which is the
-# committed one plus [broker]; without it, capture archives and publishes
-# nothing. Every service that reads the document reads the same one.
+# **The document is composed at every start** (compose-deployment-config):
+# the committed config/datawatch.toml followed by this machine's
+# var/datawatch.overlay.toml ([broker], [ledger]), written to
+# var/datawatch.local.toml. So a committed change reaches a service at its
+# next start, and nothing is copied by hand; on 2026-11-28 four committed
+# instruments did not reach capture until they were. Without the overlay's
+# [broker], capture archives and publishes nothing. A table in both, a hand
+# edit to the composed document, or a hand-kept one refuses the start, by
+# name (scripts/lib/compose_config.py). Under --check it is composed in
+# memory and nothing is written. No overlay and no local document: the
+# committed file, as before. Every service that reads the document reads the
+# same one.
 use_config() {
-    if [[ -f "$ROOT/var/datawatch.local.toml" ]]; then
-        export GALATA_CONFIG="$ROOT/var/datawatch.local.toml"
+    local said
+    if (( CHECK )); then
+        # What a start would compose, in a file of the check's own outside
+        # var/, removed when the check exits.
+        CHECK_CONFIG="$(mktemp -t galata-config)" || refuse "could not make a file for the check's composition"
+        trap 'rm -f "$CHECK_CONFIG"' EXIT
+        said="$(python3 "$ROOT/scripts/lib/compose_config.py" "$ROOT" --check "$CHECK_CONFIG" 2>&1)" \
+            || refuse "${said#compose-config: REFUSED — }"
     else
-        export GALATA_CONFIG="$ROOT/config/datawatch.toml"
+        said="$(python3 "$ROOT/scripts/lib/compose_config.py" "$ROOT" 2>&1)" \
+            || refuse "${said#compose-config: REFUSED — }"
     fi
+    export GALATA_CONFIG="$said"
 }
 
 # **A service in a container of its own** (Apple `container`). Its line in

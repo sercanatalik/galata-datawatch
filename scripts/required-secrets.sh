@@ -44,9 +44,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 if [[ -z "$CONFIG" ]]; then
-    # The deployment's own, chosen as run-service.sh chooses it.
-    CONFIG="$ROOT/var/datawatch.local.toml"
-    [[ -f "$CONFIG" ]] || CONFIG="$ROOT/config/datawatch.toml"
+    # The deployment's own, composed as run-service.sh composes it
+    # (compose-deployment-config): the committed file and this machine's
+    # overlay, or the committed file alone when there is no overlay.
+    CONFIG="$(python3 "$ROOT/scripts/lib/compose_config.py" "$ROOT" 2>&1)" \
+        || refuse "${CONFIG#compose-config: REFUSED — }"
 fi
 [[ -f "$CONFIG" ]] || refuse "no configuration at $CONFIG"
 [[ -f "$AUTH" ]] || refuse "no $AUTH"

@@ -188,6 +188,18 @@ both `ConnectionPolicy` variants gain `reply_secs`.
 
 ### Changed
 
+- **The deployment's configuration document is composed, not kept by hand**
+  (`compose-deployment-config`). `var/datawatch.local.toml` is now generated at
+  every service start (`run-service.sh`'s `use_config`) and by
+  `scripts/compose-config.sh`: the committed `config/datawatch.toml` followed by
+  this machine's `var/datawatch.overlay.toml` (`[broker]`, `[ledger]`), under a
+  header carrying the body's digest. A table in both, a hand edit to the
+  generated document, and a hand-kept one are refused by name, never
+  overwritten; `--migrate` turns a hand-kept document into an overlay once,
+  only if the composition reads exactly as it did. `required-secrets.sh` and
+  `mint-service-tokens.sh` read the composed document. On 2026-11-28 four
+  committed instruments did not reach capture until copied by hand.
+
 - A reference refresh that fails is logged once for a run of failures, and
   once when it reads again, rather than at every refresh.
 - **Breaking:** `VenueConfig::candle` is `Option<String>`. A venue that pushes

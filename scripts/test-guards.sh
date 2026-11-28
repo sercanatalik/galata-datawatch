@@ -468,6 +468,22 @@ prove "check-service-secrets (a script runs gv from a checkout)" \
       scripts/provision-vault.sh append \
       $'\n# GV="$GALATA_VAULT_ROOT/target/release/gv"\n'
 
+# A composer that lets the overlay change a committed table: the silent
+# override the overlay exists to rule out (compose-deployment-config).
+prove "check-config-compose (an overlapping table is merged)" \
+      ./scripts/check-config-compose.sh \
+      scripts/lib/compose_config.py replace \
+      '    both = shared_tables(committed, overlay)' \
+      '    both = []'
+
+# A composer that writes over a hand edit: the edit is lost, and the drift
+# it was comes back at the next commit.
+prove "check-config-compose (a hand edit is overwritten)" \
+      ./scripts/check-config-compose.sh \
+      scripts/lib/compose_config.py replace \
+      '        if state == "edited":' \
+      '        if False:'
+
 # A value left in the template a fresh vault project is filled from.
 prove "check-service-secrets (the template holds a value)" \
       ./scripts/check-service-secrets.sh \

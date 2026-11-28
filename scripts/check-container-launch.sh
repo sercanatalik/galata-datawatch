@@ -281,10 +281,10 @@ line="$(would_start || true)"
     && say "capture, with no line in containers.conf, would start some other way: $line"
 
 # The ledger, which holds more than one secret and has roots of its own. The
-# committed configuration declares no ledger, so this root's local file is
-# the committed one plus a ledger: the names only, as the configuration holds.
-cp "$scratch/config/datawatch.toml" "$scratch/var/datawatch.local.toml"
-cat >> "$scratch/var/datawatch.local.toml" <<'LEDGER'
+# committed configuration declares no ledger, so this root's overlay declares
+# one: the names only, as the configuration holds. Every start composes the
+# document from the committed file and the overlay (compose-deployment-config).
+cat > "$scratch/var/datawatch.overlay.toml" <<'LEDGER'
 
 [ledger]
 root = "var/ledger"
@@ -317,6 +317,28 @@ else
         && say "the ledger's container is given the archive or the market tape, which are not its own roots"
     [[ "$line" =~ -e\ +\"?GALATA_LEDGER_ ]] && say "one of the ledger's secrets is passed with -e"
 fi
+# The document is composed at a start, never by a check
+# (compose-deployment-config). The start below reaches only stubs: the vault
+# tool prints its version and exits, so nothing is started.
+[[ -e "$scratch/var/datawatch.local.toml" ]] \
+    && say "--check wrote var/datawatch.local.toml: a check composes in a file of its own"
+GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
+GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
+    /bin/bash "$scratch/scripts/run-service.sh" ledger hyperliquid >/dev/null 2>&1 || true
+head -1 "$scratch/var/datawatch.local.toml" 2>/dev/null | grep -q '^# GENERATED' \
+    || say "a start with an overlay does not compose var/datawatch.local.toml under its generated header"
+head -1 "$scratch/var/run/galata-ledger-hyperliquid/datawatch.toml" 2>/dev/null | grep -q '^# GENERATED' \
+    || say "the ledger's copy of the configuration is not the composed document"
+# A hand edit to the composed document refuses the start and is kept.
+printf '\n# an operator was here\n' >> "$scratch/var/datawatch.local.toml"
+edited="$(shasum "$scratch/var/datawatch.local.toml")"
+line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
+        GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
+        /bin/bash "$scratch/scripts/run-service.sh" --check ledger hyperliquid 2>&1 || true)"
+[[ "$line" == *"REFUSED"*"edited by hand"* ]] \
+    || say "a start over a hand-edited configuration is not refused as one: $line"
+[[ "$(shasum "$scratch/var/datawatch.local.toml")" == "$edited" ]] || say "a hand edit was overwritten by a start"
+rm -f "$scratch/var/datawatch.local.toml"
 : > "$scratch/containers.conf"
 line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
         GALATA_CONTAINERS_CONF="$scratch/containers.conf" \
@@ -443,11 +465,11 @@ else
 fi
 # A deployment that declares no ledger: galata-markets starts, given nothing
 # of one.
-mv "$scratch/var/datawatch.local.toml" "$scratch/var/datawatch.local.toml.aside"
+mv "$scratch/var/datawatch.overlay.toml" "$scratch/var/datawatch.overlay.toml.aside"
 line="$(GALATA_VAULT_BIN="$scratch/vault-bin" GALATA_CONTAINER_BIN="$stubs/up/container" \
         GALATA_CONTAINERS_CONF="$scratch/containers.conf" GALATA_TAILSCALE_BIN="$stubs/ts-up/tailscale" \
         /bin/bash "$scratch/scripts/run-service.sh" --check markets 2>&1 || true)"
-mv "$scratch/var/datawatch.local.toml.aside" "$scratch/var/datawatch.local.toml"
+mv "$scratch/var/datawatch.overlay.toml.aside" "$scratch/var/datawatch.overlay.toml"
 if [[ "$line" != ready:* ]]; then
     say "galata-markets, with no ledger declared, does not check as ready: $line"
 else

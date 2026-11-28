@@ -1043,7 +1043,7 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
 
   ```sh
   # from the repository's root, with the deployment's configuration
-  export GALATA_CONFIG=var/datawatch.local.toml
+  export GALATA_CONFIG="$(scripts/compose-config.sh)"
   redo() {  # <signal> <period end>
     uv run --project py/signals galata-signals "$1" --var var --out var/signals-staging/redo.arrow --asof "$2" --redo \
       && target/release/galata-signals-commit var/signals-staging/redo.arrow
@@ -1055,10 +1055,19 @@ cd py && CEREYAN_HOME=~/.cereyan-galata uv run cereyan serve . --no-open
 - **The lane has its own cereyan home.** `~/.cereyan` is shared with every
   other cereyan project on the machine, and a server started there would
   schedule their flows too.
-- **One configuration per deployment.** Capture and the lane both use
-  `var/datawatch.local.toml` if it exists (the committed file plus this
-  machine's `[broker]` and `[watch]` blocks), and `config/datawatch.toml`
-  otherwise. The two are never merged.
+- **One configuration per deployment, composed at every start.** Every
+  service reads `var/datawatch.local.toml`, which is generated: the committed
+  `config/datawatch.toml` followed by this machine's
+  `var/datawatch.overlay.toml`, which holds only its `[broker]` and `[ledger]`
+  tables (names, never values). So a committed change reaches each service at
+  its next start, with nothing copied by hand. The overlay adds tables and
+  never changes a committed one: a table in both is refused by name. Edit the
+  committed file or the overlay, never the generated document; a hand edit
+  to it refuses the next start rather than being lost. With no overlay,
+  services read the committed file. `scripts/compose-config.sh` composes it
+  by hand (`--check`, `--vet`), and `--migrate` turns a hand-kept local
+  document into an overlay once, only if the result reads exactly as it did
+  (`compose-deployment-config`).
 - **Build the features your venues need.** A binary that cannot speak a
   declared venue rejects the whole configuration, and every scheduled job
   fails with the venue's name until the build matches.
