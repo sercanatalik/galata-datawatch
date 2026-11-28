@@ -167,6 +167,10 @@ mod tests {
             subs_held: 50,
             last_event_micros: Some(now - 1_000_000),
             pairs: vec![],
+            // Neither stated: judged as an older capture, by nothing but
+            // the counts.
+            started_at_micros: None,
+            session_age_secs: None,
         });
         markets.health = Sources {
             status,

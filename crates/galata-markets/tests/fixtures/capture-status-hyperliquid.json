@@ -1,0 +1,262 @@
+{
+  "venue": "hyperliquid",
+  "observed_at_micros": 1795866023238796,
+  "build": "galata-datawatch 0.1.0",
+  "started_at_micros": 1795861700168148,
+  "config_hash": "c32f5d37b5c71a27",
+  "connection": "connected",
+  "session_age_secs": 435,
+  "next_handover_in_secs": 44,
+  "subs_held": 27,
+  "subs_declared": 27,
+  "subs_refused": 0,
+  "count_window_secs": 23,
+  "last_flush_micros": 1795866021579800,
+  "buffered": 41,
+  "sink_dropped": 0,
+  "pairs": [
+    {
+      "ticker": "BTC",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866023238751,
+      "last_event_micros": 1795866022862000,
+      "count": 111,
+      "reason": null
+    },
+    {
+      "ticker": "BTC",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866021067121,
+      "last_event_micros": 1795866000000000,
+      "count": 12,
+      "reason": null
+    },
+    {
+      "ticker": "BTC",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022184461,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "ETH",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866023012452,
+      "last_event_micros": 1795866022727000,
+      "count": 153,
+      "reason": null
+    },
+    {
+      "ticker": "ETH",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866020885363,
+      "last_event_micros": 1795866000000000,
+      "count": 8,
+      "reason": null
+    },
+    {
+      "ticker": "ETH",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186290,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "HYPE",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866022381095,
+      "last_event_micros": 1795866022056000,
+      "count": 108,
+      "reason": null
+    },
+    {
+      "ticker": "HYPE",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866022682389,
+      "last_event_micros": 1795866000000000,
+      "count": 8,
+      "reason": null
+    },
+    {
+      "ticker": "HYPE",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186317,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "CL",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866015360138,
+      "last_event_micros": 1795866015010000,
+      "count": 4,
+      "reason": null
+    },
+    {
+      "ticker": "CL",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866015404611,
+      "last_event_micros": 1795866000000000,
+      "count": 2,
+      "reason": null
+    },
+    {
+      "ticker": "CL",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186389,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "XYZ100",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866022745265,
+      "last_event_micros": 1795866022461000,
+      "count": 48,
+      "reason": null
+    },
+    {
+      "ticker": "XYZ100",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866023081588,
+      "last_event_micros": 1795866000000000,
+      "count": 14,
+      "reason": null
+    },
+    {
+      "ticker": "XYZ100",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186330,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "GOLD",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866017983953,
+      "last_event_micros": 1795866017693000,
+      "count": 24,
+      "reason": null
+    },
+    {
+      "ticker": "GOLD",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866018238345,
+      "last_event_micros": 1795866000000000,
+      "count": 5,
+      "reason": null
+    },
+    {
+      "ticker": "GOLD",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186368,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "NVDA",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866022745287,
+      "last_event_micros": 1795866022461000,
+      "count": 20,
+      "reason": null
+    },
+    {
+      "ticker": "NVDA",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866022682402,
+      "last_event_micros": 1795866000000000,
+      "count": 6,
+      "reason": null
+    },
+    {
+      "ticker": "NVDA",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186356,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "SILVER",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866021805868,
+      "last_event_micros": 1795866021520000,
+      "count": 8,
+      "reason": null
+    },
+    {
+      "ticker": "SILVER",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795865967695413,
+      "last_event_micros": 1795865940000000,
+      "count": 0,
+      "reason": null
+    },
+    {
+      "ticker": "SILVER",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186378,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    },
+    {
+      "ticker": "ANT",
+      "series": "quotes",
+      "state": "live",
+      "last_recv_micros": 1795866022941612,
+      "last_event_micros": 1795866022658000,
+      "count": 95,
+      "reason": null
+    },
+    {
+      "ticker": "ANT",
+      "series": "candles",
+      "state": "live",
+      "last_recv_micros": 1795866017836643,
+      "last_event_micros": 1795866000000000,
+      "count": 4,
+      "reason": null
+    },
+    {
+      "ticker": "ANT",
+      "series": "funding",
+      "state": "live",
+      "last_recv_micros": 1795866022186404,
+      "last_event_micros": null,
+      "count": 23,
+      "reason": null
+    }
+  ]
+}

@@ -37,6 +37,17 @@ pub struct VenueStatus {
     pub last_event_micros: Option<i64>,
     /// Each pair capture follows: ticker and dataset.
     pub pairs: Vec<(String, String)>,
+    /// When capture started, for the deployment's health only: not shown.
+    #[serde(skip)]
+    pub started_at_micros: Option<i64>,
+    /// The current connection's age, for the deployment's health only: not
+    /// shown. **Three states**, as capture writes them: absent from a capture
+    /// that never wrote it (`None`), `null` while no connection is open
+    /// (`Some(None)`), or its age (`Some(Some(_))`). The judge graces a
+    /// subscription shortfall from it (`judge-subscriptions-per-connection`,
+    /// design D4): dropped here, every handover read as a shortfall.
+    #[serde(skip)]
+    pub session_age_secs: Option<Option<u64>>,
 }
 
 impl VenueStatus {
@@ -67,6 +78,8 @@ impl VenueStatus {
                     ))
                 })
                 .collect(),
+            started_at_micros: v["started_at_micros"].as_i64(),
+            session_age_secs: v.get("session_age_secs").map(serde_json::Value::as_u64),
         })
     }
 
@@ -74,14 +87,23 @@ impl VenueStatus {
     /// ([`galata_datawatch::health`]): what is held of it, under capture's own
     /// names.
     pub fn as_report(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut report = serde_json::json!({
             "venue": self.venue,
             "observed_at_micros": self.reported_at_micros,
             "connection": self.connection,
             "subs_held": self.subs_held,
             "subs_declared": self.subs_declared,
             "pairs": [{ "last_recv_micros": self.last_event_micros }],
-        })
+        });
+        // Both only where capture stated them: an absent one is judged as an
+        // older capture's, a `null` connection age as no connection open.
+        if let Some(started) = self.started_at_micros {
+            report["started_at_micros"] = serde_json::json!(started);
+        }
+        if let Some(age) = self.session_age_secs {
+            report["session_age_secs"] = serde_json::json!(age);
+        }
+        report
     }
 
     /// Whether it is recent enough, at `now`, to call current.
@@ -216,5 +238,95 @@ pub(crate) mod tests {
         let status = VenueStatus::parse(&report("hyperliquid", 0, &[])).unwrap();
         assert!(status.is_current(CURRENT_FOR_MICROS));
         assert!(!status.is_current(10 * 60_000_000));
+    }
+
+    /// A status capture published on the deployment, 2026-11-28: 27 of 27
+    /// held, its connection 435 s old.
+    const RECORDED: &str = include_str!("../tests/fixtures/capture-status-hyperliquid.json");
+
+    /// Whether the deployment's health, judging what galata-markets holds of
+    /// `status`, states the subscriptions finding.
+    fn judged_short(status: &serde_json::Value) -> bool {
+        let held = VenueStatus::parse(status.to_string().as_bytes()).unwrap();
+        let observed = held.reported_at_micros;
+        let reports = galata_datawatch::health::Reports {
+            captures: vec![("hyperliquid".into(), Some(held.as_report()))],
+            ledgers: Vec::new(),
+            starts: Vec::new(),
+            record: None,
+            snapshot_secs: 300,
+            events_secs: None,
+        };
+        serde_json::to_string(&galata_datawatch::health::judge(
+            &reports,
+            observed + 1_000_000,
+        ))
+        .unwrap()
+        .contains("capture:hyperliquid/subscriptions")
+    }
+
+    /// `judge-subscriptions-per-connection`, design D4: the judge saw neither
+    /// opening through what galata-markets kept, so every handover read as a
+    /// shortfall on the deployment.
+    #[test]
+    fn the_health_judged_from_what_is_held_graces_a_handover_and_a_restart() {
+        let recorded: serde_json::Value = serde_json::from_str(RECORDED).unwrap();
+        assert!(!judged_short(&recorded), "as recorded: 27 of 27");
+        let observed = recorded["observed_at_micros"].as_i64().unwrap();
+        let mut status = recorded.clone();
+        status["subs_held"] = serde_json::json!(7);
+        status["session_age_secs"] = serde_json::json!(5);
+        assert!(
+            !judged_short(&status),
+            "7 of 27, five seconds after a handover"
+        );
+        status["session_age_secs"] = serde_json::json!(4 * 60);
+        assert!(judged_short(&status), "the same, four minutes on");
+        let mut restarted = recorded.clone();
+        restarted["subs_held"] = serde_json::json!(4);
+        restarted["started_at_micros"] = serde_json::json!(observed - 14_000_000);
+        restarted["session_age_secs"] = serde_json::json!(14);
+        assert!(
+            !judged_short(&restarted),
+            "4 of 27, fourteen seconds after a restart"
+        );
+        let mut down = status.clone();
+        down["connection"] = serde_json::json!("down");
+        down["session_age_secs"] = serde_json::Value::Null;
+        assert!(
+            !judged_short(&down),
+            "no connection: the disconnected finding's to say"
+        );
+        // An older capture, which never wrote either: as before this change.
+        let mut older = status.clone();
+        older.as_object_mut().unwrap().remove("session_age_secs");
+        older.as_object_mut().unwrap().remove("started_at_micros");
+        assert!(judged_short(&older));
+    }
+
+    #[test]
+    fn what_venues_shows_of_a_status_is_unchanged() {
+        let held = VenueStatus::parse(RECORDED.as_bytes()).unwrap();
+        assert_eq!(held.session_age_secs, Some(Some(435)), "read as recorded");
+        let shown = serde_json::to_value(&held).unwrap();
+        let mut keys: Vec<&str> = shown
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "connection",
+                "last_event_micros",
+                "pairs",
+                "reported_at_micros",
+                "subs_declared",
+                "subs_held",
+                "venue"
+            ]
+        );
     }
 }

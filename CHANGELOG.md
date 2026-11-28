@@ -226,7 +226,10 @@ both `ConnectionPolicy` variants gain `reply_secs`.
   grace now runs from the later of capture's start and its current connection's
   opening (`session_age_secs`); with no connection open, the disconnected
   finding speaks instead; a status without the field is judged by its start, as
-  before.
+  before. **galata-markets now passes both openings to the judge**: the copy of
+  capture's status it judges kept neither `started_at_micros` nor
+  `session_age_secs`, so the restart grace added on 2026-11-27 never applied on
+  the deployment either. `/v1/venues` shows what it showed.
 - **A connection that dies without closing is found, and its silence is a gap**
   (`capture-recovers-dead-connections`). Measured on 2026-11-25: a change in the
   host's network killed capture's connection inside its container, capture said
