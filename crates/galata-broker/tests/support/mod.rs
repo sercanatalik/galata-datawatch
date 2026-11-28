@@ -22,6 +22,10 @@ use galata_broker::grants;
 /// The venues the test broker's permissions are generated for.
 pub const VENUES: [&str; 1] = ["hyperliquid"];
 
+/// The venues whose ledger the test broker admits: two, so a ledger can be
+/// shown another's subjects refused.
+pub const LEDGERS: [&str; 2] = ["hyperliquid", "derive-xyz"];
+
 /// **Test-only identities**, added to the generated table for the test broker
 /// alone and never to a deployment's: this change grants no consumer and no
 /// account publisher, and the stream tests need both.
@@ -110,7 +114,7 @@ impl Broker {
             "listen: 127.0.0.1:{port}\n\
              jetstream {{\n  store_dir: \"{}\"\n  max_memory_store: 0\n  max_file_store: 4GB\n}}\n{}",
             store.display(),
-            with_test_identities(&grants::to_nats_config(&grants::table(&VENUES)))
+            with_test_identities(&grants::to_nats_config(&grants::table(&VENUES, &LEDGERS)))
         );
         let config_path = dir.join("nats-server.conf");
         std::fs::write(&config_path, config).expect("the test broker's config");
@@ -121,7 +125,7 @@ impl Broker {
             .arg(&config_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        for grant in grants::table(&VENUES).iter() {
+        for grant in grants::table(&VENUES, &LEDGERS).iter() {
             command.env(
                 grants::password_var(&grant.identity),
                 password(&grant.identity),

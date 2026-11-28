@@ -50,10 +50,11 @@ allowed() {
     case "$1" in
         galata-datawatch/src/ledger/accounts.rs)              ;; # into the HMAC, never out of it
         galata-datawatch/src/adapters/hyperliquid/client.rs)  ;; # into an info request's body, to the venue
+        galata-datawatch/src/adapters/hyperliquid/accounts.rs) ;; # an account's address, into its stream's subscription frames, to the venue
         galata-datawatch/src/adapters/rh_crypto/sign.rs)      ;; # into the signature
         galata-datawatch/src/adapters/derive_xyz/sign.rs)     ;; # a session key, into the signature; a new one, into the pipe to the vault
         galata-datawatch/src/adapters/derive_xyz/private.rs)  ;; # a wallet, into a signed request's header and body, to the venue
-        galata-datawatch/src/adapters/derive_xyz/accounts.rs) ;; # a wallet, compared with the wallets the venue names for its key
+        galata-datawatch/src/adapters/derive_xyz/accounts.rs) ;; # a wallet, compared with the wallets the venue names for its key, and into the stream's login; a subaccount's id, into its channels' names; each to the venue
         galata-margin/src/derive.rs)                          ;; # a wallet, into the simulation's signed header and body, to the venue; a subaccount's id, into its fingerprint
         galata-datawatch/src/adapters/rh_chain/client.rs)     ;; # the keyed RPC endpoint, to the client
         galata-datawatch/src/source/stream.rs)                ;; # the websocket endpoint, to the connector

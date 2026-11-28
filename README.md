@@ -491,6 +491,44 @@ session key ([below](#derive-a-wallet-read-with-a-session-key)).
 - **An address never names anything**: accounts are aliases (`main`, and
   `main_s1` for a discovered sub-account) in every path, subject and log.
 
+**Real time** (`add-realtime-account-ledger`). Each ledger also holds its
+venue's account stream, one connection for every account, and publishes what
+it records to the bus's `ACCOUNTS` stream:
+
+```text
+  Hyperliquid   by address: state per dex, spot state, open orders, order
+                updates, fills, funding, ledger updates (a ping each 30 s)
+  Derive        public/login with the session key, then each bound
+                subaccount's {id}.balances, .orders, .trades
+  each frame    recorded first, verbatim, under ws/<channel>
+  the bus       accounts.<venue>.<alias>.<kind>, as ledger-<venue>,
+                read past a cursor (var/ledger/venue=<v>/publication.json)
+```
+
+- **Each event is published once**, by its identity, however often the
+  venue repeats it or however it arrives, stream or REST.
+- **Each state kind is published as one set**: every dex's newest rows
+  together, at most one a second, and not again while it is unchanged.
+  Hyperliquid pushes its state every 5 s, changed or not. An empty set is a
+  message with no rows.
+- **Nothing is counted until the stream acknowledges it.** A broker outage or
+  a restart resumes from the cursor, in order. With no cursor yet, the stream
+  begins at the record's end; history is the projection's.
+- **REST is the backstop.** Every connection and reconnection reads each
+  account's state and its events at once, and the cadenced reads go on.
+  - A Hyperliquid order update or fill, which does not carry the whole
+    order, asks for the order history at once.
+  - A Derive frame asks for the wallet's snapshot at once.
+- **The ledger compacts its own record** hourly: nothing else can read its
+  root.
+- **Its stream is on the status surface**, per account: `stream_connected`,
+  `stream_connected_micros`, `stream_frame_micros`, `stream_down_micros`. The
+  health judge warns `stream-down` once it has been down a minute.
+- **Its identity is `ledger-<venue>`**, password
+  `GALATA_BROKER_PASSWORD_LEDGER_<VENUE>`. It may publish only
+  `accounts.<venue>.>` and hear only its own inbox. A `[broker]` that refuses
+  it stops the ledger; one that does not answer is published to once it does.
+
 ### Derive: a wallet, read with a session key
 
 Built with `--features derive-xyz`. An account with `venue = "derive-xyz"`

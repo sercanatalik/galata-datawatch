@@ -1,0 +1,25 @@
+{
+ "channel": "clearinghouseState",
+ "data": {
+  "dex": "xyz",
+  "user": "0x0001000100010001000100010001000100010001",
+  "clearinghouseState": {
+   "marginSummary": {
+    "accountValue": "0.0",
+    "totalNtlPos": "0.0",
+    "totalRawUsd": "0.0",
+    "totalMarginUsed": "0.0"
+   },
+   "crossMarginSummary": {
+    "accountValue": "0.0",
+    "totalNtlPos": "0.0",
+    "totalRawUsd": "0.0",
+    "totalMarginUsed": "0.0"
+   },
+   "crossMaintenanceMarginUsed": "0.0",
+   "withdrawable": "0.0",
+   "assetPositions": [],
+   "time": 1768379052952
+  }
+ }
+}

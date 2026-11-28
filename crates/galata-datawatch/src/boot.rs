@@ -664,8 +664,8 @@ fn run_ledger_for(
         // with the ones a previous run left on disk.
         archive: crate::record::Archive::open(&ledger.root)
             .from_seq(SystemClock.now_micros().max(0) as u64),
-        // The ledger publishes nothing in this change; its record and its
-        // status file are the surface.
+        // Nothing inline: the ledger publishes from its record, past a cursor
+        // the account stream acknowledged (`ledger::publish`).
         sink: Box::new(NullSink),
         key,
         cadences: crate::ledger::run::Cadences {
@@ -688,10 +688,45 @@ fn run_ledger_for(
             fold_tolerances,
         ),
         projection: ledger.tape.clone(),
+        bus: None,
+    };
+    let mut parts = parts;
+    // The ledger's own identity on the bus: it publishes its venue's accounts
+    // and nothing else (`ledger-<venue>`, design D6), with a password of its
+    // own, read through the one door as capture's is.
+    let ledger_identity = match &config.broker {
+        None => {
+            tracing::info!(
+                "no broker is configured; the ledger records its accounts and publishes none"
+            );
+            None
+        }
+        Some(broker) => {
+            let user = galata_broker::ledger_identity(&venue_name);
+            let var = galata_broker::password_var(&user);
+            let password = secrets.secret(&var)?;
+            Some((
+                broker.url.clone(),
+                BrokerIdentity::new(user, password.expose(), var),
+            ))
+        }
     };
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
+        if let Some((url, identity)) = ledger_identity {
+            // A broker that refuses the identity is a misconfiguration that
+            // will never fix itself: fatal, as capture's is. One that does not
+            // answer is an outage the record survives: published once it does.
+            let publisher = galata_broker::JetStreamPublisher::connect(
+                &url,
+                &identity,
+                &galata_broker::ledger_inbox(&venue_name),
+            )
+            .await?;
+            tracing::info!(url, user = identity.user, "publishing the accounts");
+            parts.bus = Some(Box::new(LedgerBus(publisher)));
+        }
         let shutdown = tokio_util::sync::CancellationToken::new();
         let signal = shutdown.clone();
         tokio::spawn(async move {
@@ -700,6 +735,32 @@ fn run_ledger_for(
         });
         adapters::run_ledger(&venue_name, &market, parts, shutdown).await
     })
+}
+
+/// The account stream, for a ledger: galata-broker's acknowledged publisher,
+/// each envelope on its account's subject (`Subject::of`, a set under its
+/// kind).
+#[cfg(feature = "ledger")]
+pub struct LedgerBus(pub galata_broker::JetStreamPublisher);
+
+#[cfg(feature = "ledger")]
+impl crate::ledger::publish::AccountBus for LedgerBus {
+    fn publish_acked<'a>(
+        &'a self,
+        id: &'a str,
+        envelope: &'a galata_wire::Envelope,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            use galata_broker::AccountPublisher as _;
+            let subject =
+                Subject::of(envelope).ok_or_else(|| "a row with no account subject".to_string())?;
+            self.0
+                .publish_acked(&subject, id, envelope)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    }
 }
 
 /// Wait for a request to stop: an interrupt, **or a termination**.

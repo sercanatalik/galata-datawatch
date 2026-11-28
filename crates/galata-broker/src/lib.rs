@@ -43,6 +43,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod encode;
 pub mod grants;
 pub mod identity;
@@ -51,10 +52,11 @@ pub mod streams;
 pub mod subject;
 pub mod subscriber;
 
+pub use account::{AccountPublisher, Acknowledged, JetStreamPublisher};
 pub use encode::{DecodeError, EncodeError, decode, encode};
 pub use grants::{
     BUS_ADMIN, BUS_ADMIN_INBOX, GALATA_MARKETS, GALATA_MARKETS_INBOX, Grant, Grants, ROOTS,
-    password_var, to_nats_config,
+    ledger_identity, ledger_inbox, password_var, to_nats_config,
 };
 pub use identity::BrokerIdentity;
 pub use publisher::{ConnectRefusal, NatsPublisher, NullPublisher, PublishError, Publisher};

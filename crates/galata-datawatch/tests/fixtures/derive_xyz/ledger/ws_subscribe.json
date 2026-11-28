@@ -1,0 +1,27 @@
+{
+ "id": 2,
+ "result": {
+  "status": {
+   "1001.trades": "ok",
+   "1002.orders": "ok",
+   "1003.balances": "ok",
+   "1002.balances": "ok",
+   "1003.trades": "ok",
+   "1002.trades": "ok",
+   "1001.orders": "ok",
+   "1001.balances": "ok",
+   "1003.orders": "ok"
+  },
+  "current_subscriptions": [
+   "1001.trades",
+   "1003.trades",
+   "1001.orders",
+   "1002.trades",
+   "1001.balances",
+   "1003.balances",
+   "1003.orders",
+   "1002.orders",
+   "1002.balances"
+  ]
+ }
+}

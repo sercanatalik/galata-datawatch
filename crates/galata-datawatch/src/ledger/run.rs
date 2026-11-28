@@ -34,8 +34,90 @@ use crate::ledger::accounts::{
 use crate::normalise::{Normalise, NormaliseError};
 use crate::record::{Archive, Payload, PayloadAddress, RecordError};
 use crate::sink::Sink;
-use crate::source::Backoff;
-use crate::venue::{Cadence, Polled};
+use crate::source::stream::StreamSource;
+use crate::source::{Backoff, Frame};
+use crate::venue::{Cadence, Endpoint, Keepalive, Polled};
+
+/// What one frame of a venue's account stream is, to the loop.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum StreamFrame {
+    /// About the account the venue names by its address: recorded under
+    /// `channel`, a payload of `kind`.
+    Account {
+        /// The channel it is recorded under.
+        channel: &'static str,
+        /// The dataset it lands in.
+        kind: Kind,
+        /// The account's address as the frame names it, held so that it cannot
+        /// print itself; fingerprinted to find the account, and kept nowhere.
+        address: Secret,
+        /// What it asks for at once, where it states a change but not the
+        /// whole of it.
+        then: Then,
+    },
+    /// Something changed that the frame does not state whole, on an account it
+    /// does not name: recorded under each master, and answered by reading
+    /// every account's history at once.
+    Changed {
+        /// The channel it is recorded under.
+        channel: &'static str,
+        /// The dataset its rows would land in.
+        kind: Kind,
+    },
+    /// The venue acknowledging, or answering a keepalive: the connection is
+    /// alive; nothing to record.
+    Control,
+    /// Anything else.
+    Other,
+}
+
+/// What a frame asks the loop to read at once, as soon as the last such read
+/// allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Then {
+    /// Nothing: the frame states what changed.
+    Nothing,
+    /// The accounts' history: a fill whose order is to be read with its type.
+    History,
+    /// The accounts' state: a change the frame names and does not state whole
+    /// (Derive's balance updates).
+    Snapshot,
+}
+
+/// How often a stream is kept alive: inside every minute, which Hyperliquid
+/// closes a silent connection after.
+pub const STREAM_KEEPALIVE_MICROS: i64 = 30_000_000;
+
+/// How often the record is flushed and published.
+pub const PUBLISH_EVERY_MICROS: i64 = 1_000_000;
+
+/// How often the ledger compacts its own record's closed hours (task 4.3).
+pub const COMPACT_EVERY_MICROS: i64 = 3_600_000_000;
+
+/// The room left for an hour's last flush before it counts as closed.
+const COMPACT_GRACE_MICROS: i64 = 300_000_000;
+
+/// The least time between two history reads a stream frame asks for.
+const HISTORY_SOONEST_MICROS: i64 = 2_000_000;
+
+/// When each of the loop's timers is next due.
+#[derive(Debug, Clone, Copy)]
+struct Due {
+    snapshot: i64,
+    events: i64,
+    discovery: i64,
+    connect: i64,
+    keepalive: i64,
+    publish: i64,
+    compact: i64,
+    /// A history read a frame asked for, where one did.
+    history: Option<i64>,
+    /// When the last asked-for history read ran.
+    history_ran: i64,
+    /// When the last snapshot pass ran.
+    snapshot_ran: i64,
+}
 
 /// Which question an answer was to, for the channel it is recorded under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,16 +310,67 @@ pub trait AccountVenue: Send + Sync {
     ) -> impl Future<Output = Result<Vec<u8>, Refused>> + Send {
         async { Err(Refusal::Unreachable.into()) }
     }
+    /// The venue's account stream, where it has one (`add-realtime-account-
+    /// ledger`, design D1): one connection carrying every account.
+    fn stream_endpoint(&self) -> Option<Endpoint> {
+        None
+    }
+    /// The frames that subscribe one account's streams.
+    fn stream_subscriptions(&self, _account: &ResolvedAccount) -> Vec<String> {
+        Vec::new()
+    }
+    /// The keepalive the stream wants.
+    fn stream_keepalive(&self) -> Keepalive {
+        Keepalive::None
+    }
+    /// What a frame is.
+    fn stream_frame(&self, _frame: &[u8]) -> StreamFrame {
+        StreamFrame::Other
+    }
+    /// A frame as it is recorded: verbatim, beside what its rows need — the
+    /// mode last heard, the reference last read, the alias of the account it
+    /// is about.
+    fn compose_stream(
+        &self,
+        _account: &ResolvedAccount,
+        _mode: Option<(&[u8], i64)>,
+        _reference: Option<&[u8]>,
+        frame: &[u8],
+    ) -> Vec<u8> {
+        frame.to_vec()
+    }
+    /// The frame that logs the connection in for a master's accounts, where
+    /// the venue's private channels need one (Derive's `public/login`), sent
+    /// before any subscription.
+    fn stream_hello(&self, _master: &ResolvedAccount, _now_micros: i64) -> Option<String> {
+        None
+    }
+    /// Whether a frame answers the login: `Some(true)` accepted, `Some(false)`
+    /// refused, `None` another frame.
+    fn stream_hello_answer(&self, _frame: &[u8]) -> Option<bool> {
+        None
+    }
     /// The kinds the ledger projects for this venue's accounts, and reads
     /// back for the fold.
     fn projected_kinds(&self) -> &'static [Kind] {
         &crate::ledger::project::PROJECTED
     }
-    /// The answer that states this venue's open orders: their own read where
-    /// the venue answers them apart, or the answer they ride. Its newest
-    /// receipt is the open-orders set the projection writes.
-    fn orders_answer(&self) -> Kind {
-        Kind::Orders
+    /// What a recorded payload states whole, for the publication: each account
+    /// and state kind it holds the whole of, in its scope. None, by default.
+    fn states(
+        &self,
+        _payload: &Payload,
+        _rows: &[Envelope],
+    ) -> Vec<crate::ledger::publish::Stated> {
+        Vec::new()
+    }
+    /// The channel of the answer that states this venue's open orders
+    /// **whole**: their own read of every dex, or the answer they ride. Its
+    /// newest receipt is the open-orders set the projection writes; a streamed
+    /// frame of one dex is not it. `None` where the venue keeps no open
+    /// orders.
+    fn orders_answer(&self) -> Option<&'static str> {
+        None
     }
     /// A wallet payload: the answer verbatim, with the alias each subaccount
     /// it names is bound to. `aliases` is keyed by the subaccount's
@@ -304,6 +437,20 @@ pub struct AccountStatus {
     /// remain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_warning: Option<String>,
+    /// Whether its account stream is connected, on a venue that streams
+    /// (`add-realtime-account-ledger`, design D7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_connected: Option<bool>,
+    /// When its stream last connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_connected_micros: Option<i64>,
+    /// When its stream last delivered a frame about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_frame_micros: Option<i64>,
+    /// When its stream went down, while it is down: closed, or not connected
+    /// when asked. Cleared on connecting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_down_micros: Option<i64>,
 }
 
 /// One kind of an account's history, as the status surface shows it.
@@ -414,6 +561,17 @@ pub struct LedgerRun<V: AccountVenue, C: Clock> {
     fold: Option<(StatusFile, crate::ledger::fold::Tolerances)>,
     /// Where each fold pass projects the rows it read, if anywhere.
     projection: Option<std::path::PathBuf>,
+    /// The venue's account stream, where it has one.
+    stream: Option<StreamSource>,
+    /// The waits between reconnections.
+    reconnect: Backoff,
+    /// The loop's timers, once it runs.
+    due: Option<Due>,
+    /// The record, published to the account stream, where a bus is given.
+    publication: Option<(
+        crate::ledger::publish::Publication,
+        Box<dyn crate::ledger::publish::AccountBus>,
+    )>,
 }
 
 /// What one pass over the accounts' histories did.
@@ -496,6 +654,10 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
             reached: BTreeSet::new(),
             fold: None,
             projection: None,
+            stream: None,
+            reconnect: Backoff::new(Duration::from_secs(1), Duration::from_secs(60), 0.2),
+            due: None,
+            publication: None,
         }
     }
 
@@ -514,6 +676,54 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
     pub fn with_projection(mut self, root: Option<std::path::PathBuf>) -> LedgerRun<V, C> {
         self.projection = root;
         self
+    }
+
+    /// Publish the record to the account stream through `bus`
+    /// (`add-realtime-account-ledger`), keeping the cursor beside the record.
+    pub fn with_publication(
+        mut self,
+        bus: Box<dyn crate::ledger::publish::AccountBus>,
+    ) -> LedgerRun<V, C> {
+        let venue = self.venue.venue().clone();
+        let cursor =
+            crate::ledger::publish::Publication::cursor_path(self.archive.root(), venue.as_str());
+        self.publication = Some((crate::ledger::publish::Publication::new(venue, cursor), bus));
+        self
+    }
+
+    /// Publish what the record holds past the cursor. `None` where no bus was
+    /// given. **Best effort**, as the fold is: a publication that stops short
+    /// leaves the cursor where the stream last acknowledged, and the next pass
+    /// asks again from there; the ledger goes on recording either way.
+    pub async fn publish(&mut self) -> Option<crate::ledger::publish::Published> {
+        let now = self.clock.now_micros();
+        let (publication, bus) = self.publication.as_mut()?;
+        let venue = &self.venue;
+        let states = |payload: &Payload, rows: &[Envelope]| venue.states(payload, rows);
+        match publication
+            .publish(
+                self.archive.root(),
+                self.venue.normaliser(),
+                &states,
+                bus.as_ref(),
+                now,
+            )
+            .await
+        {
+            Ok(published) => {
+                if published.stopped {
+                    tracing::warn!(
+                        cursor = ?publication.cursor(),
+                        "the account stream did not acknowledge; publication resumes from the cursor"
+                    );
+                }
+                Some(published)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the record was not published");
+                None
+            }
+        }
     }
 
     /// Fold every polled account from the record, and write the report.
@@ -561,7 +771,10 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
                 continue;
             }
             let rows = history.rows();
-            let orders_read = history.read_at(self.venue.orders_answer());
+            let orders_read = self
+                .venue
+                .orders_answer()
+                .and_then(|channel| history.read_at(channel));
             // The same rows, projected. Best effort, as the report's own write
             // is: a projection that cannot be written must not stop the ledger
             // recording, which is what it projects.
@@ -1684,32 +1897,362 @@ impl<V: AccountVenue, C: Clock> LedgerRun<V, C> {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<(), LedgerError> {
         self.boot().await?;
-        let mut next_discovery = self.clock.now_micros() + self.cadences.discover_micros;
-        let mut next_events = self.clock.now_micros();
         while !shutdown.is_cancelled() {
-            let pass = self.snapshot_all().await?;
-            let mut throttled = pass.throttled;
-            if self.clock.now_micros() >= next_events {
-                throttled |= self.events_all().await?.throttled;
-                self.fold_all()?;
-                next_events = self.clock.now_micros() + self.cadences.events_micros;
-            }
-            if self.clock.now_micros() >= next_discovery {
-                self.discover().await?;
-                next_discovery = self.clock.now_micros() + self.cadences.discover_micros;
-            }
-            let wait = if throttled {
-                self.backoff.next_wait()
-            } else {
-                Duration::from_micros(self.cadences.snapshot_micros.max(1) as u64)
-            };
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(wait) => {}
-            }
+            self.step().await?;
         }
+        // What was read last is recorded and published before the stop.
+        self.archive.flush().map_err(record_error)?;
+        self.publish().await;
         self.write_status();
         Ok(())
+    }
+
+    /// **One turn of the loop**: read the stream for at most its poll window,
+    /// then run whatever is due — the snapshot, the events and the fold,
+    /// discovery, a history read a frame asked for, the stream's keepalive and
+    /// reconnection, the record's flush and publication, its compaction.
+    ///
+    /// `run` turns it until cancelled; a test turns it by hand, its clock
+    /// moved between turns.
+    pub async fn step(&mut self) -> Result<(), LedgerError> {
+        let now = self.clock.now_micros();
+        let mut due = self.due.unwrap_or(Due {
+            snapshot: now,
+            events: now,
+            discovery: now + self.cadences.discover_micros,
+            connect: now,
+            keepalive: now + STREAM_KEEPALIVE_MICROS,
+            publish: now,
+            compact: now + COMPACT_EVERY_MICROS,
+            history: None,
+            history_ran: i64::MIN / 2,
+            snapshot_ran: i64::MIN / 2,
+        });
+        if self.stream.is_none()
+            && let Some(endpoint) = self.venue.stream_endpoint()
+        {
+            self.stream = Some(StreamSource::new(endpoint));
+        }
+
+        // The stream: (re)connect when due, then read one window.
+        match self.stream.as_ref().map(StreamSource::is_connected) {
+            Some(false) if now >= due.connect => {
+                if self.connect_stream().await {
+                    // **The backstop** (design D5): on every connection, each
+                    // account's state and its events since the cursor, read
+                    // now, so nothing missed while disconnected is lost.
+                    due.snapshot = now;
+                    due.events = now;
+                    due.keepalive = now + STREAM_KEEPALIVE_MICROS;
+                } else {
+                    self.stream_down();
+                    let wait = self.reconnect.next_wait().as_micros() as i64;
+                    due.connect = now + wait;
+                }
+            }
+            _ => {}
+        }
+        let frame = match self.stream.as_mut() {
+            Some(source) if source.is_connected() => Some(source.next_frame().await),
+            _ => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                None
+            }
+        };
+        match frame {
+            Some(Ok(Frame::Bytes(bytes))) => self.on_frame(&bytes, &mut due)?,
+            Some(Ok(Frame::Closed)) | Some(Err(_)) => {
+                self.stream_down();
+                let wait = self.reconnect.next_wait().as_micros() as i64;
+                due.connect = self.clock.now_micros() + wait;
+            }
+            _ => {}
+        }
+
+        let now = self.clock.now_micros();
+        if now >= due.snapshot {
+            let pass = self.snapshot_all().await?;
+            due.snapshot_ran = now;
+            due.snapshot = now
+                + if pass.throttled {
+                    self.backoff.next_wait().as_micros() as i64
+                } else {
+                    self.cadences.snapshot_micros
+                };
+        }
+        if now >= due.events {
+            self.archive.flush().map_err(record_error)?;
+            self.events_all().await?;
+            self.fold_all()?;
+            due.events = self.clock.now_micros() + self.cadences.events_micros;
+            due.history = None;
+            due.history_ran = now;
+        } else if due.history.is_some_and(|at| now >= at) {
+            self.history_now().await?;
+            due.history = None;
+            due.history_ran = now;
+        }
+        if now >= due.discovery {
+            self.discover().await?;
+            due.discovery = self.clock.now_micros() + self.cadences.discover_micros;
+            // A sub-account discovery bound is subscribed at once.
+            if self.stream.as_ref().is_some_and(StreamSource::is_connected) {
+                self.subscribe_all().await;
+            }
+        }
+        if now >= due.keepalive {
+            let keepalive = self.venue.stream_keepalive();
+            if let Some(source) = self.stream.as_mut()
+                && source.is_connected()
+            {
+                let _ = source.keepalive(&keepalive).await;
+            }
+            due.keepalive = now + STREAM_KEEPALIVE_MICROS;
+        }
+        if now >= due.publish {
+            self.archive.flush().map_err(record_error)?;
+            self.publish().await;
+            due.publish = now + PUBLISH_EVERY_MICROS;
+        }
+        if now >= due.compact {
+            self.compact_record(now);
+            due.compact = now + COMPACT_EVERY_MICROS;
+        }
+        self.due = Some(due);
+        Ok(())
+    }
+
+    /// Connect the stream and subscribe every polled account. Whether it
+    /// connected.
+    async fn connect_stream(&mut self) -> bool {
+        let Some(source) = self.stream.as_mut() else {
+            return false;
+        };
+        if let Err(error) = source.connect().await {
+            tracing::warn!(%error, "the account stream did not connect; the reads go on, and it is asked again");
+            return false;
+        }
+        // **The login, answered, before any subscription**: a private channel
+        // asked of a connection not yet logged in is refused. One login a
+        // connection, for its first master: Derive logs a connection in to
+        // one wallet.
+        let now = self.clock.now_micros();
+        let hello = self
+            .masters
+            .iter()
+            .find_map(|master| self.venue.stream_hello(master, now));
+        if let Some(hello) = hello {
+            if self.masters.len() > 1 {
+                tracing::warn!(
+                    "the account stream logs in to the first wallet only; the others are read by REST alone"
+                );
+            }
+            let Some(source) = self.stream.as_mut() else {
+                return false;
+            };
+            if source.subscribe(&[hello]).await.is_err() {
+                source.close().await;
+                return false;
+            }
+            let mut answered = None;
+            for _ in 0..25 {
+                match source.next_frame().await {
+                    Ok(Frame::Bytes(bytes)) => {
+                        if let Some(ok) = self.venue.stream_hello_answer(&bytes) {
+                            answered = Some(ok);
+                            break;
+                        }
+                    }
+                    Ok(Frame::Closed) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            if answered != Some(true) {
+                tracing::warn!(
+                    refused = answered == Some(false),
+                    "the account stream's login was not accepted; the reads go on, and it is asked again"
+                );
+                source.close().await;
+                return false;
+            }
+        }
+        self.subscribe_all().await;
+        self.reconnect.reset();
+        let now = self.clock.now_micros();
+        for account in self.polled() {
+            let entry = self
+                .status
+                .accounts
+                .entry(account.alias.to_string())
+                .or_default();
+            entry.stream_connected = Some(true);
+            entry.stream_connected_micros = Some(now);
+            entry.stream_down_micros = None;
+        }
+        tracing::info!("the account stream connected");
+        self.write_status();
+        true
+    }
+
+    /// Subscribe every polled account's streams.
+    async fn subscribe_all(&mut self) {
+        let frames: Vec<String> = self
+            .polled()
+            .iter()
+            .flat_map(|account| self.venue.stream_subscriptions(account))
+            .collect();
+        if let Some(source) = self.stream.as_mut()
+            && let Err(error) = source.subscribe(&frames).await
+        {
+            tracing::warn!(%error, "a subscription was not sent; it is sent again on reconnection");
+        }
+    }
+
+    /// The stream closed: said, and asked again after the reconnection's wait.
+    fn stream_down(&mut self) {
+        let now = self.clock.now_micros();
+        for account in self.polled() {
+            let entry = self
+                .status
+                .accounts
+                .entry(account.alias.to_string())
+                .or_default();
+            entry.stream_connected = Some(false);
+            entry.stream_down_micros.get_or_insert(now);
+        }
+        tracing::warn!("the account stream is down; the reads go on, and it is asked again");
+        self.write_status();
+    }
+
+    /// One frame: recorded under its account, verbatim with what its rows
+    /// need, before anything is published from it.
+    fn on_frame(&mut self, bytes: &[u8], due: &mut Due) -> Result<(), LedgerError> {
+        let now = self.clock.now_micros();
+        match self.venue.stream_frame(bytes) {
+            StreamFrame::Account {
+                channel,
+                kind,
+                address,
+                then,
+            } => {
+                let fp = crate::ledger::accounts::fingerprint_secret(&self.key, &address);
+                let Some(account) = self.polled().into_iter().find(|a| a.fingerprint == fp) else {
+                    // Not an account this ledger polls: nothing of ours.
+                    return Ok(());
+                };
+                let mode = self
+                    .modes
+                    .get(&account.alias)
+                    .map(|(answer, at)| (answer.as_slice(), *at));
+                let composed =
+                    self.venue
+                        .compose_stream(&account, mode, self.reference.as_deref(), bytes);
+                // On a venue read by wallet, a subaccount's rows are its
+                // wallet's record's, as its snapshot's are.
+                let under = match self.subs.get(&account.alias) {
+                    Some((master, _)) if self.venue.reads_by_wallet() => self
+                        .masters
+                        .iter()
+                        .find(|m| &m.alias == master)
+                        .cloned()
+                        .unwrap_or_else(|| account.clone()),
+                    _ => account.clone(),
+                };
+                self.record_streamed(&under, channel, kind, composed)
+                    .map_err(record_error)?;
+                self.status
+                    .accounts
+                    .entry(account.alias.to_string())
+                    .or_default()
+                    .stream_frame_micros = Some(now);
+                match then {
+                    Then::History => self.history_soon(due, now),
+                    Then::Snapshot => {
+                        due.snapshot = due
+                            .snapshot
+                            .min(now.max(due.snapshot_ran + HISTORY_SOONEST_MICROS));
+                    }
+                    Then::Nothing => {}
+                }
+            }
+            StreamFrame::Changed { channel, kind } => {
+                for master in self.masters.clone() {
+                    self.record_streamed(&master, channel, kind, bytes.to_vec())
+                        .map_err(record_error)?;
+                }
+                self.history_soon(due, now);
+            }
+            StreamFrame::Control | StreamFrame::Other => {}
+        }
+        Ok(())
+    }
+
+    /// Ask for a history read as soon as the last one allows.
+    fn history_soon(&self, due: &mut Due, now: i64) {
+        let at = now.max(due.history_ran + HISTORY_SOONEST_MICROS);
+        due.history = Some(due.history.map_or(at, |held| held.min(at)));
+    }
+
+    /// The whole reads at the events cadence, every account, now: what a
+    /// streamed change the frame did not state whole asks for.
+    async fn history_now(&mut self) -> Result<(), LedgerError> {
+        let mut pass = EventsPass::default();
+        for account in self.polled() {
+            self.history_reads(&account, &mut pass).await?;
+        }
+        Ok(())
+    }
+
+    /// Record one streamed frame. **Buffered**, as capture's frames are, and
+    /// flushed before anything reads the record.
+    fn record_streamed(
+        &mut self,
+        account: &ResolvedAccount,
+        channel: &str,
+        kind: Kind,
+        bytes: Vec<u8>,
+    ) -> Result<(), RecordError> {
+        let payload = Payload {
+            seq: 0,
+            recv_micros: self.clock.now_micros(),
+            address: PayloadAddress::Account(account.record_address()),
+            channel: channel.to_string(),
+            kind: kind.as_str().to_string(),
+            symbol: None,
+            origin: Origin::Streamed,
+            payload: bytes,
+        };
+        ingest(
+            &mut self.archive,
+            self.venue.normaliser(),
+            self.sink.as_ref(),
+            payload,
+        )?;
+        Ok(())
+    }
+
+    /// Fold the record's closed days and closed hours, as `galata-compact`
+    /// folds the archive's: **nothing else can**, its root being the owner's
+    /// alone (task 4.3). Best effort: a fold that fails leaves the segments as
+    /// they were, every one still read.
+    fn compact_record(&mut self, now: i64) {
+        let root = self.archive.root().to_path_buf();
+        let today = crate::calendar::date_of(now);
+        let cutoff =
+            (now - COMPACT_GRACE_MICROS).div_euclid(COMPACT_EVERY_MICROS) * COMPACT_EVERY_MICROS;
+        let codec = galata_segments::Codec::Zstd;
+        let days = galata_segments::compact_closed(&root, &today, codec);
+        let hours = galata_segments::compact_closed_hours(&root, &today, cutoff, codec);
+        match (days, hours) {
+            (Ok(days), Ok(hours)) => tracing::debug!(
+                before = days.segments_before + hours.segments_before,
+                after = days.segments_after + hours.segments_after,
+                "the record's closed hours compacted"
+            ),
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::warn!(%error, "the record was not compacted; it is asked again in an hour")
+            }
+        }
     }
 }
 
@@ -1769,6 +2312,8 @@ mod tests {
         order_history: Mutex<Result<Vec<u8>, Refusal>>,
         /// What the portfolio answers.
         portfolio: Mutex<Result<Vec<u8>, Refusal>>,
+        /// Its account stream, where the test serves one.
+        stream: Option<Endpoint>,
         /// Every account-wide ask: (address, ask).
         wide_asked: Mutex<Vec<(String, Ask)>>,
         /// What each key check answers, in order; `Ok(None)` after.
@@ -1801,6 +2346,7 @@ mod tests {
                 open_orders_on: Mutex::new(BTreeMap::new()),
                 order_history: Mutex::new(Ok(b"[]".to_vec())),
                 portfolio: Mutex::new(Ok(b"[]".to_vec())),
+                stream: None,
                 wide_asked: Mutex::new(Vec::new()),
                 keys: Mutex::new(std::collections::VecDeque::new()),
                 listings: Mutex::new(0),
@@ -1867,6 +2413,37 @@ mod tests {
                 (Ask::OrderHistory, Series::OrderUpdates),
                 (Ask::Portfolio, Series::PnlHistory),
             ]
+        }
+        fn states(
+            &self,
+            payload: &Payload,
+            rows: &[Envelope],
+        ) -> Vec<crate::ledger::publish::Stated> {
+            hl::states(payload, rows)
+        }
+        fn stream_endpoint(&self) -> Option<Endpoint> {
+            self.stream.clone()
+        }
+        fn orders_answer(&self) -> Option<&'static str> {
+            Some(hl::OPEN_ORDERS_CHANNEL)
+        }
+        fn stream_subscriptions(&self, account: &ResolvedAccount) -> Vec<String> {
+            hl::subscriptions(account.address().expose(), &account.dexes)
+        }
+        fn stream_keepalive(&self) -> Keepalive {
+            Keepalive::Frame(hl::KEEPALIVE.into())
+        }
+        fn stream_frame(&self, frame: &[u8]) -> StreamFrame {
+            crate::adapters::hyperliquid::accounts::stream_frame(frame)
+        }
+        fn compose_stream(
+            &self,
+            _account: &ResolvedAccount,
+            mode: Option<(&[u8], i64)>,
+            reference: Option<&[u8]>,
+            frame: &[u8],
+        ) -> Vec<u8> {
+            crate::adapters::hyperliquid::accounts::compose_stream(mode, reference, frame)
         }
         async fn account_wide(
             &self,
@@ -2440,6 +3017,15 @@ mod tests {
     const T0: i64 = 1_790_332_213 * SECOND;
 
     fn ledger(root: &std::path::Path) -> (LedgerRun<Scripted, TestClock>, std::path::PathBuf) {
+        ledger_from(root, 0)
+    }
+
+    /// As [`ledger`], its record numbered from `first`: what a restart over
+    /// the same record is, since production seeds the number from the clock.
+    fn ledger_from(
+        root: &std::path::Path,
+        first: u64,
+    ) -> (LedgerRun<Scripted, TestClock>, std::path::PathBuf) {
         let config = crate::config::Ledger {
             root: root.to_path_buf(),
             tape: None,
@@ -2469,7 +3055,7 @@ mod tests {
         let run = LedgerRun::new(
             Scripted::new(),
             TestClock::at(T0),
-            Archive::open(root),
+            Archive::open(root).from_seq(first),
             Box::new(NullSink),
             key,
             Cadences {
@@ -3060,6 +3646,438 @@ mod tests {
         run.snapshot_all().await.unwrap();
         run.fold_all().unwrap();
         assert_eq!(resting(&tape), 0);
+    }
+
+    /// A bus that keeps what it acknowledged, in order, and refuses while
+    /// told to: the account stream as the publication sees it.
+    #[derive(Clone, Default)]
+    struct Recorded {
+        sent: std::sync::Arc<Mutex<Vec<(String, Envelope)>>>,
+        refusing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::ledger::publish::AccountBus for Recorded {
+        fn publish_acked<'a>(
+            &'a self,
+            id: &'a str,
+            envelope: &'a Envelope,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.refusing.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("the broker is not there".into());
+                }
+                self.sent
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), envelope.clone()));
+                Ok(())
+            })
+        }
+    }
+
+    impl Recorded {
+        fn ids(&self) -> Vec<String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+        fn sets_of(&self, kind: Kind) -> Vec<Vec<Event>> {
+            self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(_, e)| match &e.event {
+                    Event::StateSet(s) if s.kind == kind => Some(s.rows.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+        fn refuse(&self, refusing: bool) {
+            self.refusing
+                .store(refusing, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A ledger publishing to a recorder, its stream begun before anything
+    /// was recorded, so everything recorded is published.
+    async fn publishing(
+        root: &std::path::Path,
+        first: u64,
+    ) -> (LedgerRun<Scripted, TestClock>, Recorded) {
+        let bus = Recorded::default();
+        let (run, _) = ledger_from(root, first);
+        let mut run = run.with_publication(Box::new(bus.clone()));
+        run.publish().await.unwrap();
+        (run, bus)
+    }
+
+    fn fills_page(n: u64) -> String {
+        let fills: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"coin":"BTC","px":"81213.5","sz":"0.01","side":"B","time":{},"startPosition":"0.0","dir":"Open Long","closedPnl":"0.0","hash":"0x0","oid":{},"crossed":true,"fee":"0.3","builderFee":"0.0","tid":{},"feeToken":"USDC","twapId":null}}"#, 1790332213000 + i, 100 + i, 200 + i))
+            .collect();
+        format!("[{}]", fills.join(","))
+    }
+
+    #[tokio::test]
+    async fn a_set_and_an_event_are_published_each_with_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, bus) = publishing(dir.path(), 0).await;
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.venue.pages(MAIN, Kind::Fills, &[&fills_page(1)]);
+        run.events_all().await.unwrap();
+        let published = run.publish().await.unwrap();
+        assert!(!published.stopped);
+        assert_eq!(published.events, 1, "the one fill");
+
+        let ids = bus.ids();
+        assert!(
+            ids.contains(&"hyperliquid:main:fill:200:100".to_string()),
+            "{ids:?}"
+        );
+        // The margin of both dexes, read in one pass, is one set of two rows:
+        // the account's, whole.
+        let margins = bus.sets_of(Kind::Margin);
+        assert_eq!(margins.len(), 1, "{ids:?}");
+        assert_eq!(margins[0].len(), 2);
+        // No position, no open order: each a set with no rows, said once.
+        assert_eq!(bus.sets_of(Kind::Positions), vec![Vec::<Event>::new()]);
+        assert_eq!(bus.sets_of(Kind::Orders), vec![Vec::<Event>::new()]);
+        assert_eq!(bus.sets_of(Kind::Balances).len(), 1);
+        let set_ids: Vec<&String> = ids.iter().filter(|i| i.contains(":set:")).collect();
+        assert!(
+            set_ids.iter().all(|i| i.starts_with("hyperliquid:main:")),
+            "{set_ids:?}"
+        );
+        // Every message names the account by its alias, never an address.
+        for (_, envelope) in bus.sent.lock().unwrap().iter() {
+            assert_eq!(envelope.account().map(|a| a.as_str()), Some("main"));
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_is_lost_or_published_twice_across_an_outage_and_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, bus) = publishing(dir.path(), 0).await;
+        *run.venue.order_history.lock().unwrap() = Ok(HISTORICAL_ORDERS.to_vec());
+        run.boot().await.unwrap();
+        run.events_all().await.unwrap();
+        run.publish().await.unwrap();
+        let first = bus.ids().len();
+
+        // The broker goes away while two more passes are read.
+        bus.refuse(true);
+        run.venue.pages(MAIN, Kind::Fills, &[&fills_page(3)]);
+        for _ in 0..2 {
+            run.clock.advance_secs(300);
+            run.events_all().await.unwrap();
+            let out = run.publish().await.unwrap();
+            assert!(out.stopped && out.events == 0);
+        }
+        // It comes back: everything read meanwhile, in the order read, once.
+        bus.refuse(false);
+        run.clock.advance_secs(300);
+        run.publish().await.unwrap();
+        let ids = bus.ids();
+        let fills: Vec<&String> = ids.iter().filter(|i| i.contains(":fill:")).collect();
+        assert_eq!(fills.len(), 3, "{fills:?}");
+        let unique: BTreeSet<&String> = ids.iter().filter(|i| !i.contains(":set:")).collect();
+        assert_eq!(
+            unique.len(),
+            ids.iter().filter(|i| !i.contains(":set:")).count(),
+            "an event published twice"
+        );
+        let updates = ids.iter().filter(|i| i.contains(":order_updates:")).count();
+        let stated: Vec<serde_json::Value> = serde_json::from_slice(HISTORICAL_ORDERS).unwrap();
+        assert_eq!(
+            updates,
+            stated.len(),
+            "each update once, however often the venue repeats them"
+        );
+        assert!(ids.len() > first);
+
+        // A restart over the same record: nothing already acknowledged goes
+        // again, but the accounts' current sets, once.
+        drop(run);
+        let (mut again, bus) = publishing(dir.path(), 1 << 40).await;
+        again.boot().await.unwrap();
+        again.publish().await.unwrap();
+        assert!(
+            bus.ids().iter().all(|i| i.contains(":set:")),
+            "only sets after a restart: {:?}",
+            bus.ids()
+        );
+    }
+
+    #[tokio::test]
+    async fn ten_pushes_in_a_second_publish_one_set_and_ten_fills_ten() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, bus) = publishing(dir.path(), 0).await;
+        run.boot().await.unwrap();
+        run.snapshot_all().await.unwrap();
+        run.publish().await.unwrap();
+        let before = bus.sets_of(Kind::Margin).len();
+
+        // Ten reads a tenth of a second apart, each stating a new value.
+        for i in 1..=10 {
+            run.clock.advance(SECOND / 10);
+            let state = String::from_utf8(FLAT.to_vec()).unwrap().replacen(
+                r#""accountValue":"0.0""#,
+                &format!(r#""accountValue":"{i}.5""#),
+                1,
+            );
+            *run.venue.snapshot.lock().unwrap() = Ok(state.into_bytes());
+            run.snapshot_all().await.unwrap();
+            run.publish().await.unwrap();
+        }
+        let margins = bus.sets_of(Kind::Margin);
+        assert_eq!(margins.len(), before + 1, "one set for the ten");
+        let Event::Margin(m) = &margins.last().unwrap()[0] else {
+            panic!("not a margin row")
+        };
+        assert_eq!(
+            m.account_value.map(|v| v.to_string()).as_deref(),
+            Some("10.5"),
+            "the newest"
+        );
+
+        // A read stating nothing new publishes nothing.
+        run.clock.advance_secs(2);
+        run.snapshot_all().await.unwrap();
+        run.publish().await.unwrap();
+        assert_eq!(bus.sets_of(Kind::Margin).len(), before + 1);
+
+        // Events are never coalesced.
+        run.venue.pages(MAIN, Kind::Fills, &[&fills_page(10)]);
+        run.events_all().await.unwrap();
+        let out = run.publish().await.unwrap();
+        assert_eq!(out.events, 10);
+    }
+
+    /// One fill row as Hyperliquid states it, streamed or walked alike.
+    fn fill_row(tid: u64) -> String {
+        format!(
+            r#"{{"coin":"BTC","px":"81213.5","sz":"0.01","side":"B","time":{},"startPosition":"0.0","dir":"Open Long","closedPnl":"0.0","hash":"0x0","oid":{},"crossed":true,"fee":"0.3","builderFee":"0.0","tid":{tid},"feeToken":"USDC","twapId":null}}"#,
+            1790332213000 + tid,
+            100 + tid
+        )
+    }
+
+    /// A websocket server standing in for the venue's stream: each connection
+    /// is sent the fills snapshot of the fills made so far, and the first is
+    /// closed by the venue once it has been sent.
+    async fn venue_stream(
+        made: std::sync::Arc<Mutex<Vec<u64>>>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    continue;
+                };
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let made = made.clone();
+                tokio::spawn(async move {
+                    // The subscriptions arrive first; then the snapshot.
+                    let _ = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+                    let fills: Vec<String> =
+                        made.lock().unwrap().iter().map(|t| fill_row(*t)).collect();
+                    let frame = format!(
+                        r#"{{"channel":"userFills","data":{{"isSnapshot":true,"user":"{MAIN}","fills":[{}]}}}}"#,
+                        fills.join(",")
+                    );
+                    let _ = ws.send(Message::Text(frame.into())).await;
+                    if n == 1 {
+                        let _ = ws.close(None).await;
+                        return;
+                    }
+                    while let Some(Ok(_)) = ws.next().await {}
+                });
+            }
+        });
+        (url, connections)
+    }
+
+    #[tokio::test]
+    async fn a_fill_made_while_disconnected_is_published_once_after_reconnecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = std::sync::Arc::new(Mutex::new(vec![1u64]));
+        let (url, connections) = venue_stream(made.clone()).await;
+        let (mut run, bus) = publishing(dir.path(), 0).await;
+        run.venue.stream = Some(Endpoint::held("STREAM", Secret::new(url)));
+        // Fill 1 is in the walk as well as the stream.
+        run.venue
+            .pages(MAIN, Kind::Fills, &[&format!("[{}]", fill_row(1))]);
+        run.boot().await.unwrap();
+
+        let fills = |bus: &Recorded| -> Vec<String> {
+            bus.ids()
+                .into_iter()
+                .filter(|i| i.contains(":fill:"))
+                .collect()
+        };
+        // Connect, read, publish: fill 1, once, whichever way it came first.
+        for _ in 0..20 {
+            run.step().await.unwrap();
+            run.clock.advance(SECOND / 2);
+            if fills(&bus).len() == 1 && connections.load(std::sync::atomic::Ordering::SeqCst) == 1
+            {
+                break;
+            }
+        }
+        assert_eq!(fills(&bus), ["hyperliquid:main:fill:1:101"]);
+
+        // The venue closes the stream. While disconnected, fill 2 is made: in
+        // the next snapshot the stream sends, and in the walk's next page.
+        made.lock().unwrap().push(2);
+        run.venue.pages(
+            MAIN,
+            Kind::Fills,
+            &[&format!("[{},{}]", fill_row(1), fill_row(2))],
+        );
+        let mut reconnected_at = None;
+        for _ in 0..40 {
+            run.step().await.unwrap();
+            if reconnected_at.is_none()
+                && connections.load(std::sync::atomic::Ordering::SeqCst) == 2
+            {
+                reconnected_at = Some(run.clock.now_micros());
+            }
+            run.clock.advance(SECOND / 2);
+            if fills(&bus).len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(
+            fills(&bus),
+            ["hyperliquid:main:fill:1:101", "hyperliquid:main:fill:2:102"],
+            "each fill once, the one made while disconnected after reconnecting"
+        );
+        // The status says it reconnected, and when (design D7).
+        let main = &run.status().accounts["main"];
+        assert_eq!(main.stream_connected, Some(true));
+        assert_eq!(main.stream_down_micros, None, "cleared on reconnecting");
+        assert!(main.stream_connected_micros >= reconnected_at.map(|at| at - SECOND));
+        assert!(main.stream_frame_micros.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_hour_of_streamed_frames_compacts_to_one_segment_read_back_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, bus) = publishing(dir.path(), 0).await;
+        run.boot().await.unwrap();
+        let main = run.polled().remove(0);
+        // An hour of state frames, one every 2 s, each flushed as it would be.
+        let hour = 3_600 * SECOND;
+        let start = (T0 / hour + 1) * hour;
+        run.clock.set(start);
+        for i in 0..1_800 {
+            let frame = format!(
+                r#"{{"channel":"clearinghouseState","data":{{"dex":"","user":"{MAIN}","clearinghouseState":{}}}}}"#,
+                String::from_utf8(FLAT.to_vec()).unwrap().replacen(
+                    r#""accountValue":"0.0""#,
+                    &format!(r#""accountValue":"{i}.5""#),
+                    1
+                )
+            );
+            let bytes = crate::adapters::hyperliquid::accounts::compose_stream(
+                None,
+                None,
+                frame.as_bytes(),
+            );
+            run.record_streamed(&main, hl::WS_CLEARINGHOUSE, Kind::Margin, bytes)
+                .unwrap();
+            run.archive.flush().unwrap();
+            run.clock.advance(2 * SECOND);
+        }
+        run.publish().await.unwrap();
+        let cursor = run.publication.as_ref().unwrap().0.cursor();
+        let day = format!("date={}", crate::calendar::date_of(start));
+        let partition = |root: &std::path::Path| -> Vec<std::path::PathBuf> {
+            root.join("venue=hyperliquid/account=main/kind=margin")
+                .join(&day)
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    galata_segments::Cursor::parse(p.file_name().unwrap().to_str().unwrap())
+                        .is_some()
+                })
+                .collect()
+        };
+        let before = partition(dir.path()).len();
+        assert!(before >= 1_800, "a segment a flush: {before}");
+        let read = |root: &std::path::Path| -> Vec<u64> {
+            crate::replay::read_all(root)
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.payload().channel == hl::WS_CLEARINGHOUSE)
+                .map(|r| r.seq())
+                .collect()
+        };
+        let seqs = read(dir.path());
+
+        // An hour later and its grace, the ledger folds it.
+        run.clock.set(start + hour + COMPACT_GRACE_MICROS + SECOND);
+        run.compact_record(run.clock.now_micros());
+        let after = partition(dir.path()).len();
+        assert!(
+            after <= 2,
+            "the closed hour is one segment: {after} from {before}"
+        );
+        let mut again = read(dir.path());
+        again.sort_unstable();
+        let mut held = seqs.clone();
+        held.sort_unstable();
+        assert_eq!(again, held, "every payload still read back");
+
+        // The cursor stands, and nothing is published again.
+        let sent = bus.ids().len();
+        run.publish().await.unwrap();
+        assert_eq!(run.publication.as_ref().unwrap().0.cursor(), cursor);
+        assert_eq!(bus.ids().len(), sent);
+    }
+
+    #[tokio::test]
+    async fn a_streamed_frame_of_one_dex_does_not_stand_for_every_dex_in_the_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut run, _root, tape) = projecting(dir.path());
+        run.boot().await.unwrap();
+        // The REST read of both dexes: an order resting on each.
+        *run.venue.open_orders.lock().unwrap() = Ok(resting_orders());
+        run.snapshot_all().await.unwrap();
+        run.fold_all().unwrap();
+        let both = projected_rows(&tape, Kind::Orders);
+        assert!(both > 0);
+        // Then a streamed frame of the main dex alone, holding none.
+        run.clock.advance_secs(1);
+        let main = run.polled().remove(0);
+        let frame = format!(
+            r#"{{"channel":"openOrders","data":{{"dex":"","user":"{MAIN}","orders":[]}}}}"#
+        );
+        let bytes =
+            crate::adapters::hyperliquid::accounts::compose_stream(None, None, frame.as_bytes());
+        run.record_streamed(&main, hl::WS_OPEN_ORDERS, Kind::Orders, bytes)
+            .unwrap();
+        run.archive.flush().unwrap();
+        run.fold_all().unwrap();
+        assert_eq!(
+            projected_rows(&tape, Kind::Orders),
+            both,
+            "the projection's set is the newest whole read, not one dex's frame"
+        );
     }
 
     #[tokio::test]

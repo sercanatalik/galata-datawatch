@@ -74,6 +74,118 @@ pub const FUNDING_HISTORY_CHANNEL: &str = "private/get_funding_history";
 /// The channel a window of a wallet's value history is recorded under.
 pub const VALUE_HISTORY_CHANNEL: &str = "private/get_subaccount_value_history";
 
+/// The streamed channels (`add-realtime-account-ledger`, design D2), each
+/// subaccount's, after a login signed with the ledger's key. Their shapes are
+/// Derive's documented ones (`docs.derive.xyz/api-reference/channels`, read
+/// 2026-11-28): no frame of them arrived in ten minutes of a quiet account.
+/// A subaccount's orders, each whole, at a change.
+pub const WS_ORDERS: &str = "ws/orders";
+/// A subaccount's trades, at a fill.
+pub const WS_TRADES: &str = "ws/trades";
+/// A subaccount's balance changes, `{name, new_balance, previous_balance,
+/// update_type}`: **not its state**, which the wallet's snapshot states
+/// whole, so a frame of them asks for one at once.
+pub const WS_BALANCES: &str = "ws/balances";
+
+/// A streamed frame as recorded: the frame verbatim, beside the alias its
+/// channel's subaccount is bound to, as a wallet's answers are.
+pub fn stream_bytes(subaccount_id: &str, alias: &Account, frame: &[u8]) -> Vec<u8> {
+    let mut named = serde_json::Map::new();
+    named.insert(subaccount_id.to_string(), Value::String(alias.to_string()));
+    let mut out = Vec::with_capacity(frame.len() + 64);
+    out.extend_from_slice(b"{\"aliases\":");
+    out.extend_from_slice(Value::Object(named).to_string().as_bytes());
+    out.extend_from_slice(b",\"answer\":");
+    out.extend_from_slice(frame);
+    out.push(b'}');
+    out
+}
+
+/// The rows of a recorded streamed frame, bound to the subaccount's alias: an
+/// order as it stood at its latest change, at that change's time; a trade as
+/// a fill; a balance change, none.
+pub fn stream_rows(
+    venue: &Venue,
+    channel: &str,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let composed: Value =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let alias = composed["aliases"]
+        .as_object()
+        .and_then(|a| a.values().next())
+        .and_then(Value::as_str)
+        .ok_or_else(|| NormaliseError::Shape {
+            kind: "stream",
+            detail: "a frame without its alias".into(),
+        })?;
+    let account = Account::new(alias)?;
+    let rows = composed["answer"]["params"]["data"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let at =
+        |row: &Value, field: &str| row.get(field).and_then(Value::as_i64).map(millis_to_micros);
+    let envelope = |at: Option<i64>, event: Event| {
+        Envelope::for_account(venue.clone(), account.clone(), at, recv_micros, event)
+    };
+    Ok(match channel {
+        WS_ORDERS => rows
+            .iter()
+            .filter_map(|r| {
+                order_of(r).map(|o| envelope(at(r, "last_update_timestamp"), Event::OrderUpdate(o)))
+            })
+            .collect(),
+        WS_TRADES => rows
+            .iter()
+            .filter_map(|r| trade_of(r).map(|f| envelope(at(r, "timestamp"), Event::Fill(f))))
+            .collect(),
+        WS_BALANCES => Vec::new(),
+        other => return Err(NormaliseError::UnknownChannel(other.to_string())),
+    })
+}
+
+/// What a streamed frame is: a subaccount's channel, by the id its channel
+/// names, or an answer to one of the connection's own requests.
+#[cfg(feature = "capture")]
+pub fn streamed(frame: &[u8]) -> crate::ledger::run::StreamFrame {
+    use crate::ledger::run::{StreamFrame, Then};
+    use galata_wire::Kind;
+    let Ok(v) = serde_json::from_slice::<Value>(frame) else {
+        return StreamFrame::Other;
+    };
+    if v.get("method").and_then(Value::as_str) != Some("subscription") {
+        // An answer to the login, a subscription or a keepalive.
+        return if v.get("id").is_some() {
+            StreamFrame::Control
+        } else {
+            StreamFrame::Other
+        };
+    }
+    let Some((id, name)) = v["params"]["channel"]
+        .as_str()
+        .and_then(|c| c.split_once('.'))
+    else {
+        return StreamFrame::Other;
+    };
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return StreamFrame::Other;
+    }
+    let (channel, kind) = match name {
+        "orders" => (WS_ORDERS, Kind::OrderUpdates),
+        "trades" => (WS_TRADES, Kind::Fills),
+        "balances" => (WS_BALANCES, Kind::MarginState),
+        _ => return StreamFrame::Other,
+    };
+    StreamFrame::Account {
+        channel,
+        kind,
+        address: crate::config::Secret::new(id),
+        // Every change on a subaccount moves its state: the snapshot, at once.
+        then: Then::Snapshot,
+    }
+}
+
 /// The list each history method's answer holds its rows under (measured
 /// 2026-11-27).
 fn history_list(channel: &str) -> Option<&'static str> {
@@ -506,6 +618,45 @@ fn list<'a>(portfolio: &'a Value, field: &str) -> &'a [Value] {
         .map_or(&[], Vec::as_slice)
 }
 
+/// What a recorded payload states **whole**, for the publication
+/// (`add-realtime-account-ledger`, design D3): a wallet's snapshot states every
+/// bound subaccount's margin, positions, collateral and open orders, the
+/// subaccounts its aliases name. A kind it holds no row of for one is one that
+/// subaccount holds none of.
+#[cfg(feature = "capture")]
+pub fn states(payload: &Payload, _rows: &[Envelope]) -> Vec<crate::ledger::publish::Stated> {
+    use crate::ledger::publish::Stated;
+    use galata_wire::Kind;
+    if payload.channel != SNAPSHOT_CHANNEL {
+        return Vec::new();
+    }
+    let Ok(composed) = serde_json::from_slice::<Value>(&payload.payload) else {
+        return Vec::new();
+    };
+    let Some(aliases) = composed.get("aliases").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for alias in aliases.values().filter_map(Value::as_str) {
+        let Ok(account) = Account::new(alias) else {
+            continue;
+        };
+        for kind in [
+            Kind::MarginState,
+            Kind::PositionState,
+            Kind::Collateral,
+            Kind::Orders,
+        ] {
+            out.push(Stated {
+                account: account.clone(),
+                kind,
+                scope: None,
+            });
+        }
+    }
+    out
+}
+
 /// Derive's ledger answers to rows: a wallet's snapshot to its subaccounts'
 /// margin, positions and collateral. A listing carries no rows; the bindings
 /// discovery makes of it are recorded by the loop.
@@ -536,6 +687,12 @@ impl Normalise for LedgerNormaliser {
                 wallet_rows(&self.venue, payload.recv_micros, &payload.payload)
             }
             LISTING_CHANNEL => Ok(Vec::new()),
+            WS_ORDERS | WS_TRADES | WS_BALANCES => stream_rows(
+                &self.venue,
+                &payload.channel,
+                payload.recv_micros,
+                &payload.payload,
+            ),
             ORDER_HISTORY_CHANNEL
             | TRADE_HISTORY_CHANNEL
             | FUNDING_HISTORY_CHANNEL
@@ -984,6 +1141,94 @@ mod tests {
                 3
             );
             assert_eq!(num_pages(b"{}"), 1, "one where it says nothing");
+        }
+
+        /// A frame of a subaccount's channel, in the documented envelope, its
+        /// `data` the fixture's rows of that shape.
+        fn frame(channel: &str, data: Value) -> Vec<u8> {
+            serde_json::json!({"method": "subscription", "params": {"channel": channel, "data": data}})
+                .to_string()
+                .into_bytes()
+        }
+
+        fn streamed_rows(ws: &str, frame: &[u8]) -> Vec<Envelope> {
+            let composed = stream_bytes("1001", &Account::new("owner_s1").unwrap(), frame);
+            stream_rows(&Venue::new(VENUE).unwrap(), ws, 7, &composed).unwrap()
+        }
+
+        #[test]
+        fn a_streamed_order_is_an_update_at_its_latest_change_bound_to_its_alias() {
+            let orders: Value = serde_json::from_slice(ORDERS).unwrap();
+            let listed = orders["result"]["orders"].clone();
+            let rows = streamed_rows(WS_ORDERS, &frame("1001.orders", listed.clone()));
+            assert_eq!(rows.len(), listed.as_array().unwrap().len());
+            for (row, o) in rows.iter().zip(listed.as_array().unwrap()) {
+                assert_eq!(row.account().map(|a| a.as_str()), Some("owner_s1"));
+                assert_eq!(
+                    row.at_micros,
+                    Some(millis_to_micros(
+                        o["last_update_timestamp"].as_i64().unwrap()
+                    ))
+                );
+                let Event::OrderUpdate(u) = &row.event else {
+                    panic!("{:?}", row.event)
+                };
+                assert_eq!(u.status.as_deref(), o["order_status"].as_str());
+            }
+            // The same order streamed and read by history is one update.
+            let history = window(ORDER_HISTORY_CHANNEL, None, ORDERS);
+            assert_eq!(
+                crate::ledger::events::identity(&rows[0]),
+                crate::ledger::events::identity(&history[0])
+            );
+            names_neither(&rows);
+        }
+
+        #[test]
+        fn a_streamed_trade_is_the_fill_the_history_gives() {
+            let trades: Value = serde_json::from_slice(TRADES).unwrap();
+            let listed = trades["result"]["trades"].clone();
+            let rows = streamed_rows(WS_TRADES, &frame("1001.trades", listed));
+            let history = window(TRADE_HISTORY_CHANNEL, None, TRADES);
+            assert_eq!(rows.len(), history.len());
+            for (streamed, read) in rows.iter().zip(&history) {
+                assert_eq!(streamed.event, read.event);
+                assert_eq!(
+                    crate::ledger::events::identity(streamed),
+                    crate::ledger::events::identity(read)
+                );
+            }
+            names_neither(&rows);
+        }
+
+        #[test]
+        fn a_balance_change_makes_no_row_and_asks_for_the_state() {
+            let data = serde_json::json!([{"name": "ETH-PERP", "new_balance": "1",
+                "previous_balance": "0", "update_type": "trade"}]);
+            let bytes = frame("1001.balances", data);
+            assert!(streamed_rows(WS_BALANCES, &bytes).is_empty());
+            match streamed(&bytes) {
+                crate::ledger::run::StreamFrame::Account {
+                    channel,
+                    then,
+                    address,
+                    ..
+                } => {
+                    assert_eq!(channel, WS_BALANCES);
+                    assert_eq!(then, crate::ledger::run::Then::Snapshot);
+                    assert_eq!(address.expose(), "1001");
+                }
+                other => panic!("{other:?}"),
+            }
+            // The connection's own answers are no account's.
+            assert!(matches!(
+                streamed(br#"{"id":1,"result":[1001,1002]}"#),
+                crate::ledger::run::StreamFrame::Control
+            ));
+            assert!(matches!(
+                streamed(br#"{"method":"subscription","params":{"channel":"ticker.ETH-PERP","data":{}}}"#),
+                crate::ledger::run::StreamFrame::Other
+            ));
         }
 
         #[test]

@@ -1,0 +1,41 @@
+{
+ "channel": "userFundings",
+ "data": {
+  "isSnapshot": true,
+  "user": "0x0001000100010001000100010001000100010001",
+  "fundings": [
+   {
+    "time": 1768250302690,
+    "coin": "xyz:TKNC",
+    "usdc": "-493.517431",
+    "szi": "425.57",
+    "fundingRate": "517.1384225141",
+    "nSamples": null
+   },
+   {
+    "time": 1768250302690,
+    "coin": "para:TKNE",
+    "usdc": "-163.606465",
+    "szi": "957.1",
+    "fundingRate": "991.71557553",
+    "nSamples": null
+   },
+   {
+    "time": 1768253902702,
+    "coin": "TKNF",
+    "usdc": "901.207566",
+    "szi": "356.3122",
+    "fundingRate": "-515.8200445816",
+    "nSamples": null
+   },
+   {
+    "time": 1768253902702,
+    "coin": "TKNA",
+    "usdc": "-134.015053",
+    "szi": "505.94",
+    "fundingRate": "441.2310133002",
+    "nSamples": null
+   }
+  ]
+ }
+}

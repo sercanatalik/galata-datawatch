@@ -278,6 +278,10 @@ pub struct LedgerParts {
     pub fold: (crate::capture::StatusFile, crate::ledger::fold::Tolerances),
     /// Where the ledger is projected, if anywhere (`ledger.tape`).
     pub projection: Option<std::path::PathBuf>,
+    /// The account stream, where a broker is configured
+    /// (`add-realtime-account-ledger`).
+    #[cfg(feature = "capture")]
+    pub bus: Option<Box<dyn crate::ledger::publish::AccountBus>>,
 }
 
 /// Run a venue's ledger until cancelled.
@@ -296,10 +300,10 @@ pub async fn run_ledger(
     match venue {
         #[cfg(feature = "hyperliquid")]
         hyperliquid::VENUE => {
-            let accounts = hyperliquid::accounts::HyperliquidAccounts::new(
-                hyperliquid::Market::parse(market)?.rest_url(),
-            )?
-            .with_key(parts.key.clone());
+            let network = hyperliquid::Market::parse(market)?;
+            let accounts = hyperliquid::accounts::HyperliquidAccounts::new(network.rest_url())?
+                .with_key(parts.key.clone())
+                .with_stream(crate::venue::Endpoint::public(network.ws_url()));
             let mut run = crate::ledger::run::LedgerRun::new(
                 accounts,
                 crate::capture::SystemClock,
@@ -313,15 +317,18 @@ pub async fn run_ledger(
             .with_status_file(parts.status)
             .with_fold(parts.fold.0, parts.fold.1)
             .with_projection(parts.projection);
+            if let Some(bus) = parts.bus {
+                run = run.with_publication(bus);
+            }
             run.run(shutdown).await?;
             Ok(())
         }
         #[cfg(feature = "derive-xyz")]
         derive_xyz::VENUE => {
-            let accounts = derive_xyz::accounts::DeriveAccounts::new(
-                derive_xyz::Market::parse(market)?.rest_url(),
-                parts.key.clone(),
-            )?;
+            let network = derive_xyz::Market::parse(market)?;
+            let accounts =
+                derive_xyz::accounts::DeriveAccounts::new(network.rest_url(), parts.key.clone())?
+                    .with_stream(crate::venue::Endpoint::public(network.ws_url()));
             let mut run = crate::ledger::run::LedgerRun::new(
                 accounts,
                 crate::capture::SystemClock,
@@ -335,6 +342,9 @@ pub async fn run_ledger(
             .with_status_file(parts.status)
             .with_fold(parts.fold.0, parts.fold.1)
             .with_projection(parts.projection);
+            if let Some(bus) = parts.bus {
+                run = run.with_publication(bus);
+            }
             run.run(shutdown).await?;
             Ok(())
         }

@@ -1,0 +1,74 @@
+{
+ "channel": "spotState",
+ "data": {
+  "user": "0x0001000100010001000100010001000100010001",
+  "spotState": {
+   "portfolioMarginEnabled": true,
+   "balances": [
+    {
+     "coin": "USDC",
+     "token": 900,
+     "total": "540.86017374",
+     "hold": "-219.44753186",
+     "entryNtl": "0.0",
+     "spotHold": "111.106947",
+     "ltv": "0.0",
+     "supplied": "451.90210456"
+    },
+    {
+     "coin": "TKNA",
+     "token": 901,
+     "total": "325.824833",
+     "hold": "0.0",
+     "entryNtl": "0.0",
+     "ltv": "202.74",
+     "supplied": "15.330011"
+    },
+    {
+     "coin": "TKNB",
+     "token": 902,
+     "total": "0.0",
+     "hold": "-904.91452845",
+     "entryNtl": "0.0",
+     "spotHold": "0.0",
+     "ltv": "0.0"
+    }
+   ],
+   "portfolioMarginRatio": "0.0",
+   "tokenToPortfolioBorrowRatio": [
+    [
+     0,
+     "0.0"
+    ]
+   ],
+   "tokenToPortfolioSupplyRatio": [
+    [
+     150,
+     "314.2331335503"
+    ]
+   ],
+   "tokenToAvailableAfterMaintenance": [
+    [
+     0,
+     "704.40554033"
+    ],
+    [
+     150,
+     "683.524348"
+    ],
+    [
+     197,
+     "0.0"
+    ],
+    [
+     268,
+     "726.29232514"
+    ],
+    [
+     360,
+     "0.0"
+    ]
+   ]
+  }
+ }
+}

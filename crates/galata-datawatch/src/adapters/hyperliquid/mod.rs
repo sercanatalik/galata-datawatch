@@ -166,7 +166,7 @@ impl Market {
     }
 
     /// The websocket endpoint. A **code identity**, never configurable.
-    fn ws_url(&self) -> &'static str {
+    pub(crate) fn ws_url(&self) -> &'static str {
         match self {
             Market::Mainnet => "wss://api.hyperliquid.xyz/ws",
             Market::Testnet => "wss://api.hyperliquid-testnet.xyz/ws",

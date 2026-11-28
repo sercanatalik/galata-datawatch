@@ -15,6 +15,9 @@
 //!                 ──▶ an `orders` row per resting order, every dex in one set
 //!   history    historicalOrders ──▶ an `order_updates` row per status change
 //!   portfolio  portfolio     ──▶ a `pnl_history` row per window and time
+//!   stream     { mode, names, frame }, a `ws/<channel>` frame verbatim
+//!                 ──▶ the rows its REST answer gives: margin and positions,
+//!                     open orders, balances, fills, funding, ledger updates
 //! ```
 //!
 //! **A snapshot is recorded as one payload holding two answers**, each byte for
@@ -61,6 +64,281 @@ pub const ORDER_HISTORY_CHANNEL: &str = "historicalOrders";
 /// The channel an account's value and PnL history is recorded under,
 /// verbatim.
 pub const PORTFOLIO_CHANNEL: &str = "portfolio";
+
+/// The streamed channels (`add-realtime-account-ledger`, design D1): each frame
+/// recorded verbatim under `ws/` and the venue's name for it, beside what its
+/// rows need (the mode last heard, the reference's token names).
+pub const WS_CLEARINGHOUSE: &str = "ws/clearinghouseState";
+/// One dex's open orders, streamed.
+pub const WS_OPEN_ORDERS: &str = "ws/openOrders";
+/// The account's spot state, streamed.
+pub const WS_SPOT: &str = "ws/spotState";
+/// A change of an order's status, streamed **without the order's type or
+/// trigger** (measured shape, 2026-11-28): recorded, and answered by reading
+/// the order history at once, whose rows carry the whole order.
+pub const WS_ORDER_UPDATES: &str = "ws/orderUpdates";
+/// The account's fills, streamed, a snapshot first.
+pub const WS_FILLS: &str = "ws/userFills";
+/// The account's funding, streamed, a snapshot first.
+pub const WS_FUNDINGS: &str = "ws/userFundings";
+/// The account's ledger updates, streamed, a snapshot first.
+pub const WS_LEDGER_UPDATES: &str = "ws/userNonFundingLedgerUpdates";
+
+/// The frames that subscribe one account's streams: its state on each
+/// declared dex, its spot state, and its order updates, fills, funding and
+/// ledger updates. **The address goes into them**, to the venue and nowhere
+/// else, as it goes into a REST body.
+pub fn subscriptions(user: &str, dexes: &[String]) -> Vec<String> {
+    let one = |kind: &str, dex: Option<&str>| {
+        let mut subscription = serde_json::json!({ "type": kind, "user": user });
+        if let Some(dex) = dex.filter(|d| !d.is_empty()) {
+            subscription["dex"] = serde_json::Value::String(dex.to_string());
+        }
+        serde_json::json!({ "method": "subscribe", "subscription": subscription }).to_string()
+    };
+    let mut out = Vec::new();
+    for dex in dexes {
+        out.push(one("clearinghouseState", Some(dex)));
+        out.push(one("openOrders", Some(dex)));
+    }
+    for kind in [
+        "spotState",
+        "orderUpdates",
+        "userFills",
+        "userFundings",
+        "userNonFundingLedgerUpdates",
+    ] {
+        out.push(one(kind, None));
+    }
+    out
+}
+
+/// The keepalive the stream wants: a frame of its own within every minute.
+pub const KEEPALIVE: &str = r#"{"method":"ping"}"#;
+
+/// What one streamed frame is, for the loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Streamed {
+    /// About the account the venue names by `user`: recorded under `channel`
+    /// as a payload of `kind`.
+    Account {
+        /// The `ws/` channel.
+        channel: &'static str,
+        /// The dataset it lands in.
+        kind: galata_wire::Kind,
+        /// The address, as the venue names it. Held only to fingerprint.
+        user: String,
+    },
+    /// An order's status changed, on an account the frame does not name.
+    OrderUpdates,
+    /// The venue acknowledging a subscription or answering a ping.
+    Control,
+    /// Anything else: recorded nowhere, counted.
+    Other,
+}
+
+/// Classify a frame without building its rows.
+pub fn streamed(frame: &[u8]) -> Streamed {
+    use galata_wire::Kind;
+    #[derive(Deserialize)]
+    struct Head<'a> {
+        channel: &'a str,
+        #[serde(borrow)]
+        data: Option<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct User {
+        user: Option<String>,
+    }
+    let Ok(head) = serde_json::from_slice::<Head<'_>>(frame) else {
+        return Streamed::Other;
+    };
+    let (channel, kind) = match head.channel {
+        "subscriptionResponse" | "pong" => return Streamed::Control,
+        "orderUpdates" => return Streamed::OrderUpdates,
+        "clearinghouseState" => (WS_CLEARINGHOUSE, Kind::Margin),
+        "openOrders" => (WS_OPEN_ORDERS, Kind::Orders),
+        "spotState" => (WS_SPOT, Kind::Balances),
+        "userFills" => (WS_FILLS, Kind::Fills),
+        "userFundings" => (WS_FUNDINGS, Kind::FundingPayments),
+        "userNonFundingLedgerUpdates" => (WS_LEDGER_UPDATES, Kind::LedgerUpdates),
+        _ => return Streamed::Other,
+    };
+    let user = head
+        .data
+        .and_then(|d| serde_json::from_str::<User>(d.get()).ok())
+        .and_then(|u| u.user);
+    match user {
+        Some(user) => Streamed::Account {
+            channel,
+            kind,
+            user,
+        },
+        None => Streamed::Other,
+    }
+}
+
+/// Compose a streamed frame for the record: the frame **verbatim**, beside the
+/// mode last heard and the names the reference last gave, which its rows need
+/// and a normaliser, a function of the bytes, cannot ask for.
+pub fn stream_bytes(
+    mode: Option<(&[u8], i64)>,
+    names: Option<&std::collections::BTreeMap<u32, String>>,
+    frame: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(frame.len() + 128);
+    out.extend_from_slice(b"{\"mode\":");
+    match mode {
+        Some((answer, recv_micros)) => {
+            out.extend_from_slice(b"{\"answer\":");
+            out.extend_from_slice(answer);
+            out.extend_from_slice(format!(",\"recv_micros\":{recv_micros}}}").as_bytes());
+        }
+        None => out.extend_from_slice(b"null"),
+    }
+    out.extend_from_slice(b",\"names\":");
+    match names {
+        Some(names) => {
+            out.extend_from_slice(serde_json::to_string(names).unwrap_or_default().as_bytes())
+        }
+        None => out.extend_from_slice(b"null"),
+    }
+    out.extend_from_slice(b",\"frame\":");
+    out.extend_from_slice(frame);
+    out.push(b'}');
+    out
+}
+
+#[derive(Deserialize)]
+struct StreamComposed<'a> {
+    #[serde(borrow)]
+    mode: Option<StreamMode<'a>>,
+    names: Option<std::collections::BTreeMap<u32, String>>,
+    #[serde(borrow)]
+    frame: StreamFrameBody<'a>,
+}
+
+#[derive(Deserialize)]
+struct StreamMode<'a> {
+    #[serde(borrow)]
+    answer: &'a RawValue,
+    recv_micros: i64,
+}
+
+#[derive(Deserialize)]
+struct StreamFrameBody<'a> {
+    #[serde(borrow)]
+    data: &'a RawValue,
+}
+
+/// A recorded streamed frame to its rows: **the rows its REST answer gives**,
+/// through the same normaliser, so a fill streamed and a fill walked are one
+/// row by identity.
+pub fn stream_rows(
+    venue: &Venue,
+    account: &Account,
+    key: Option<&crate::ledger::FingerprintKey>,
+    own_fingerprint: &str,
+    channel: &str,
+    recv_micros: i64,
+    bytes: &[u8],
+) -> Result<Vec<Envelope>, NormaliseError> {
+    let composed: StreamComposed<'_> =
+        serde_json::from_slice(bytes).map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let data: serde_json::Value = serde_json::from_str(composed.frame.data.get())
+        .map_err(|e| NormaliseError::Json(e.to_string()))?;
+    let raw = |field: &str| -> Result<Vec<u8>, NormaliseError> {
+        data.get(field)
+            .map(|v| serde_json::to_vec(v).unwrap_or_default())
+            .ok_or_else(|| NormaliseError::Shape {
+                kind: "stream",
+                detail: format!("a {channel} frame without {field}"),
+            })
+    };
+    let dex = data
+        .get("dex")
+        .and_then(|d| d.as_str())
+        .unwrap_or_default()
+        .to_string();
+    match channel {
+        WS_CLEARINGHOUSE => {
+            let mode = composed
+                .mode
+                .as_ref()
+                .map(|m| (m.answer.get().as_bytes(), m.recv_micros));
+            let state = raw("clearinghouseState")?;
+            snapshot_rows(
+                venue,
+                account,
+                recv_micros,
+                &snapshot_bytes(&dex, mode, &state),
+            )
+        }
+        WS_OPEN_ORDERS => open_order_rows(
+            venue,
+            account,
+            recv_micros,
+            &open_orders_bytes(&[(dex.as_str(), raw("orders")?)]),
+        ),
+        WS_SPOT => balance_rows(
+            venue,
+            account,
+            recv_micros,
+            &wide_bytes(
+                BALANCES_CHANNEL,
+                composed.names.as_ref(),
+                &raw("spotState")?,
+            ),
+        ),
+        WS_FILLS => super::events::fill_rows(venue, account, recv_micros, &raw("fills")?),
+        // Streamed flat, `{time, coin, usdc, szi, fundingRate, nSamples}`;
+        // walked under `delta`. Lifted into the walked shape, so both are one
+        // row by identity.
+        WS_FUNDINGS => {
+            let lifted: Vec<serde_json::Value> = data
+                .get("fundings")
+                .and_then(|f| f.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .map(|r| {
+                            let mut delta = r.clone();
+                            if let Some(d) = delta.as_object_mut() {
+                                d.remove("time");
+                                d.insert("type".into(), "funding".into());
+                            }
+                            serde_json::json!({ "time": r.get("time"), "delta": delta })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            super::events::funding_rows(
+                venue,
+                account,
+                recv_micros,
+                &serde_json::to_vec(&lifted).unwrap_or_default(),
+            )
+        }
+        WS_LEDGER_UPDATES => {
+            let key = key.ok_or_else(|| NormaliseError::Shape {
+                kind: "userNonFundingLedgerUpdates",
+                detail: "no fingerprint key: this normaliser cannot tell the parties of a \
+                         transfer apart"
+                    .into(),
+            })?;
+            super::events::update_rows(
+                venue,
+                account,
+                key,
+                own_fingerprint,
+                recv_micros,
+                &raw("nonFundingLedgerUpdates")?,
+            )
+        }
+        // States no whole order: the order history read it triggers does.
+        WS_ORDER_UPDATES => Ok(Vec::new()),
+        other => Err(NormaliseError::UnknownChannel(other.to_string())),
+    }
+}
 
 /// Compose an account's open orders: **every declared dex's answer verbatim**,
 /// one payload, so that it is recorded only as a complete set. A dex that did
@@ -793,6 +1071,89 @@ pub fn snapshot_rows(
     Ok(out)
 }
 
+/// What a recorded payload states **whole**, for the publication
+/// (`add-realtime-account-ledger`, design D3): its account's kinds, each within
+/// the dex it was read on where the venue answers per dex. A kind it states
+/// and holds no row of is one the account holds none of, there.
+#[cfg(feature = "capture")]
+pub fn states(payload: &Payload, rows: &[Envelope]) -> Vec<crate::ledger::publish::Stated> {
+    use crate::ledger::publish::Stated;
+    use galata_wire::Kind;
+    let PayloadAddress::Account(address) = &payload.address else {
+        return Vec::new();
+    };
+    let Ok(account) = Account::new(address.account.as_str()) else {
+        return Vec::new();
+    };
+    let whole = |kind: Kind, scope: Option<String>| Stated {
+        account: account.clone(),
+        kind,
+        scope,
+    };
+    match payload.channel.as_str() {
+        // One dex's margin and positions: which dex is the margin row's.
+        SNAPSHOT_CHANNEL => rows
+            .iter()
+            .find_map(|e| match &e.event {
+                Event::Margin(m) => Some(m.dex.clone()),
+                _ => None,
+            })
+            .map(|dex| {
+                vec![
+                    whole(Kind::Margin, dex.clone()),
+                    whole(Kind::Positions, dex),
+                ]
+            })
+            .unwrap_or_default(),
+        BALANCES_CHANNEL => vec![
+            whole(Kind::Balances, None),
+            whole(Kind::PortfolioMargin, None),
+            whole(Kind::TokenMargin, None),
+        ],
+        BORROW_LEND_CHANNEL => vec![whole(Kind::BorrowLend, None), whole(Kind::LendHealth, None)],
+        // A streamed state: the one dex its frame names, or the account's spot.
+        WS_CLEARINGHOUSE | WS_OPEN_ORDERS => {
+            let dex = serde_json::from_slice::<serde_json::Value>(&payload.payload)
+                .ok()
+                .and_then(|v| v["frame"]["data"]["dex"].as_str().map(str::to_string))
+                .filter(|d| !d.is_empty());
+            if payload.channel == WS_CLEARINGHOUSE {
+                vec![
+                    whole(Kind::Margin, dex.clone()),
+                    whole(Kind::Positions, dex),
+                ]
+            } else {
+                vec![whole(Kind::Orders, dex)]
+            }
+        }
+        WS_SPOT => vec![
+            whole(Kind::Balances, None),
+            whole(Kind::PortfolioMargin, None),
+            whole(Kind::TokenMargin, None),
+        ],
+        // Every declared dex's open orders, read together.
+        OPEN_ORDERS_CHANNEL => {
+            #[derive(Deserialize)]
+            struct Dexes {
+                dexes: Vec<Named>,
+            }
+            #[derive(Deserialize)]
+            struct Named {
+                dex: String,
+            }
+            serde_json::from_slice::<Dexes>(&payload.payload)
+                .map(|d| {
+                    d.dexes
+                        .into_iter()
+                        .map(|n| whole(Kind::Orders, (!n.dex.is_empty()).then_some(n.dex)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The ledger's normaliser: snapshot payloads to rows; the listing, role and
 /// mode answers to **none** — they are recorded, and what they mean is the
 /// ledger's to act on (a binding, a refusal, a mode stamped on the next
@@ -866,6 +1227,25 @@ impl Normalise for LedgerNormaliser {
                 } else {
                     borrow_lend_rows(venue, &account, recv, bytes)
                 }
+            }
+            WS_CLEARINGHOUSE | WS_OPEN_ORDERS | WS_SPOT | WS_ORDER_UPDATES | WS_FILLS
+            | WS_FUNDINGS | WS_LEDGER_UPDATES => {
+                let PayloadAddress::Account(address) = &payload.address else {
+                    return Err(NormaliseError::Shape {
+                        kind: "stream",
+                        detail: "a frame not addressed to an account".into(),
+                    });
+                };
+                let account = Account::new(address.account.as_str())?;
+                stream_rows(
+                    &self.venue,
+                    &account,
+                    self.key.as_ref(),
+                    &address.fingerprint,
+                    &payload.channel,
+                    payload.recv_micros,
+                    &payload.payload,
+                )
             }
             super::events::FILLS_CHANNEL
             | super::events::FUNDING_CHANNEL
@@ -1582,5 +1962,205 @@ mod tests {
                 (Some("11.0".into()), Some("0.5".into()))
             ]
         );
+    }
+
+    /// The probe's frames of 2026-11-28, scrubbed (`design/measured.md`).
+    fn ws(name: &str) -> Vec<u8> {
+        std::fs::read(format!(
+            "{}/tests/fixtures/hyperliquid/ledger-ws-{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    fn streamed_rows(channel: &str, frame: &[u8]) -> Vec<Envelope> {
+        let key = crate::ledger::FingerprintKey::new(Secret::new("deployment-key"));
+        stream_rows(
+            &venue(),
+            &main(),
+            Some(&key),
+            "0123456789abcdef",
+            channel,
+            9,
+            &stream_bytes(None, None, frame),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn every_measured_frame_is_classified_by_its_account() {
+        for (name, channel, kind) in [
+            (
+                "clearinghouse-state-main",
+                WS_CLEARINGHOUSE,
+                galata_wire::Kind::Margin,
+            ),
+            (
+                "clearinghouse-state-xyz",
+                WS_CLEARINGHOUSE,
+                galata_wire::Kind::Margin,
+            ),
+            (
+                "open-orders-main",
+                WS_OPEN_ORDERS,
+                galata_wire::Kind::Orders,
+            ),
+            ("spot-state", WS_SPOT, galata_wire::Kind::Balances),
+            ("user-fills-snapshot", WS_FILLS, galata_wire::Kind::Fills),
+            (
+                "user-fundings-snapshot",
+                WS_FUNDINGS,
+                galata_wire::Kind::FundingPayments,
+            ),
+            (
+                "ledger-updates-snapshot",
+                WS_LEDGER_UPDATES,
+                galata_wire::Kind::LedgerUpdates,
+            ),
+        ] {
+            match streamed(&ws(name)) {
+                Streamed::Account {
+                    channel: c,
+                    kind: k,
+                    user,
+                } => {
+                    assert_eq!((c, k), (channel, kind), "{name}");
+                    assert!(user.starts_with("0x") && user.len() == 42, "{name}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            streamed(br#"{"channel":"subscriptionResponse","data":{}}"#),
+            Streamed::Control
+        );
+        assert_eq!(streamed(br#"{"channel":"pong"}"#), Streamed::Control);
+        assert_eq!(
+            streamed(br#"{"channel":"orderUpdates","data":[]}"#),
+            Streamed::OrderUpdates
+        );
+    }
+
+    #[test]
+    fn a_streamed_state_gives_the_rows_its_rest_answer_gives() {
+        let main = streamed_rows(WS_CLEARINGHOUSE, &ws("clearinghouse-state-main"));
+        assert_eq!(main.len(), 1, "a margin row, no position");
+        assert!(matches!(&main[0].event, Event::Margin(m) if m.dex.is_none()));
+        let xyz = streamed_rows(WS_CLEARINGHOUSE, &ws("clearinghouse-state-xyz"));
+        assert!(matches!(&xyz[0].event, Event::Margin(m) if m.dex.as_deref() == Some("xyz")));
+        assert!(streamed_rows(WS_OPEN_ORDERS, &ws("open-orders-xyz")).is_empty());
+        let spot = streamed_rows(WS_SPOT, &ws("spot-state"));
+        let balances = spot
+            .iter()
+            .filter(|e| matches!(e.event, Event::Balance(_)))
+            .count();
+        assert_eq!(balances, 3);
+        assert!(
+            spot.iter()
+                .any(|e| matches!(e.event, Event::PortfolioMargin(_)))
+        );
+        // What it states whole, each scope its own.
+        let payload = |channel: &str, frame: &[u8]| Payload {
+            seq: 1,
+            recv_micros: 9,
+            address: PayloadAddress::Account(crate::record::AccountAddress {
+                venue: "hyperliquid".into(),
+                account: "main".into(),
+                fingerprint: "0123456789abcdef".into(),
+            }),
+            channel: channel.into(),
+            kind: "margin".into(),
+            symbol: None,
+            origin: galata_wire::Origin::Streamed,
+            payload: stream_bytes(None, None, frame),
+        };
+        let stated = states(
+            &payload(WS_CLEARINGHOUSE, &ws("clearinghouse-state-xyz")),
+            &xyz,
+        );
+        let scopes: Vec<(galata_wire::Kind, Option<String>)> =
+            stated.into_iter().map(|s| (s.kind, s.scope)).collect();
+        assert_eq!(
+            scopes,
+            [
+                (galata_wire::Kind::Margin, Some("xyz".to_string())),
+                (galata_wire::Kind::Positions, Some("xyz".to_string()))
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fills_snapshot_tagged_as_one_gives_each_fill_spot_ones_among_them() {
+        let frame = ws("user-fills-snapshot");
+        let tagged: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(tagged["data"]["isSnapshot"], true);
+        let rows = streamed_rows(WS_FILLS, &frame);
+        assert_eq!(
+            rows.len(),
+            tagged["data"]["fills"].as_array().unwrap().len()
+        );
+        assert!(
+            rows.iter()
+                .any(|r| matches!(&r.event, Event::Fill(f) if f.market.starts_with('@')))
+        );
+        // And each is the row the walk gives for the same fill: one identity.
+        let walked = super::super::events::fill_rows(
+            &venue(),
+            &main(),
+            9,
+            &serde_json::to_vec(&tagged["data"]["fills"]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows, walked);
+    }
+
+    #[test]
+    fn a_streamed_funding_row_is_the_row_its_walk_gives() {
+        let frame = ws("user-fundings-snapshot");
+        let streamed: Vec<Envelope> = streamed_rows(WS_FUNDINGS, &frame);
+        let flat: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        let walked_page: Vec<serde_json::Value> = flat["data"]["fundings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                serde_json::json!({"time": r["time"], "hash": "0x0", "delta": {
+                    "type": "funding", "coin": r["coin"], "usdc": r["usdc"], "szi": r["szi"],
+                    "fundingRate": r["fundingRate"], "nSamples": r["nSamples"]}})
+            })
+            .collect();
+        let walked = super::super::events::funding_rows(
+            &venue(),
+            &main(),
+            9,
+            &serde_json::to_vec(&walked_page).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(streamed.len(), 4);
+        for (s, w) in streamed.iter().zip(&walked) {
+            assert_eq!(
+                crate::ledger::events::identity(s),
+                crate::ledger::events::identity(w)
+            );
+        }
+        let updates = streamed_rows(WS_LEDGER_UPDATES, &ws("ledger-updates-snapshot"));
+        assert_eq!(updates.len(), 3);
+    }
+
+    #[test]
+    fn an_account_subscribes_each_stream_and_names_a_dex_only_where_one_is_declared() {
+        let frames = subscriptions("0xabc", &["".to_string(), "xyz".to_string()]);
+        assert_eq!(frames.len(), 9);
+        let parsed: Vec<serde_json::Value> = frames
+            .iter()
+            .map(|f| serde_json::from_str(f).unwrap())
+            .collect();
+        let with_dex = parsed
+            .iter()
+            .filter(|f| f["subscription"]["dex"] == "xyz")
+            .count();
+        assert_eq!(with_dex, 2, "clearinghouseState and openOrders on xyz");
+        assert!(parsed.iter().all(|f| f["subscription"]["user"] == "0xabc"));
+        assert!(parsed.iter().all(|f| f["method"] == "subscribe"));
     }
 }

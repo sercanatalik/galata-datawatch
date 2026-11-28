@@ -184,7 +184,8 @@ pub fn write(
 /// Write the given kinds for one account, each file whole.
 ///
 /// `orders_read_micros` is the receipt of the newest answer that stated the
-/// account's open orders ([`crate::ledger::events::History::read_at`]);
+/// account's open orders whole ([`crate::ledger::events::History::read_at`]
+/// of the venue's `orders_answer` channel);
 /// `None` where none was read, and then no `orders` file is written.
 pub fn write_kinds(
     root: &Path,

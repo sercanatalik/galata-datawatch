@@ -267,6 +267,10 @@ pub enum Event {
     OrderUpdate(Order),
     /// One point of the account-value and PnL history the venue states.
     PnlPoint(PnlPoint),
+    /// **One read's whole set** of an account's state of one kind, as the bus
+    /// carries it: the newest message on a subject is the account's state of
+    /// that kind, and an empty set says it holds none.
+    StateSet(StateSet),
 }
 
 impl Event {
@@ -304,6 +308,7 @@ impl Event {
             Event::Order(_) => Kind::Orders,
             Event::OrderUpdate(_) => Kind::OrderUpdates,
             Event::PnlPoint(_) => Kind::PnlHistory,
+            Event::StateSet(set) => set.kind,
         }
     }
 }
@@ -1406,6 +1411,29 @@ pub struct Order {
     pub placed_micros: Option<i64>,
 }
 
+/// One read's whole set of an account's state of one kind
+/// (`add-realtime-account-ledger`, design D3): **the rows of that read, every
+/// one, or none**. Published as one message, so no reader ever sees part of a
+/// set, and an empty set is a message like any other rather than a special
+/// case. The read's time is the envelope's.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StateSet {
+    /// The kind every row is of: a state kind ([`Kind::is_state`]).
+    pub kind: Kind,
+    /// The rows, as read. Empty where the account held none.
+    pub rows: Vec<Event>,
+}
+
+impl StateSet {
+    /// A set of `kind`, refused (`None`) where `kind` is not a state kind or a
+    /// row is of another kind: a set holding a fill, or positions filed as
+    /// margin, would be state nobody could trust.
+    pub fn of(kind: Kind, rows: Vec<Event>) -> Option<StateSet> {
+        (kind.is_state() && rows.iter().all(|row| row.kind() == kind))
+            .then_some(StateSet { kind, rows })
+    }
+}
+
 /// One point of the account-value and PnL history **the venue states**, in
 /// one of its windows. Nothing here is computed: a window the venue does not
 /// state has no points. The point's time is the envelope's `at_micros`.
@@ -1474,6 +1502,60 @@ mod tests {
             status: status.map(str::to_string),
             placed_micros: Some(1_700_000_000_000_000),
         }
+    }
+
+    #[test]
+    fn an_empty_set_is_a_message_with_no_rows() {
+        let set = StateSet::of(Kind::Positions, Vec::new()).unwrap();
+        let envelope = Envelope::for_account(
+            Venue::new("hyperliquid").unwrap(),
+            Account::new("main").unwrap(),
+            Some(7),
+            7,
+            Event::StateSet(set),
+        );
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["event"]["StateSet"]["kind"], "positions");
+        assert_eq!(json["event"]["StateSet"]["rows"], serde_json::json!([]));
+        assert_eq!(envelope.kind(), Kind::Positions, "filed under its kind");
+        let back: Envelope = serde_json::from_value(json).unwrap();
+        assert_eq!(back, envelope);
+    }
+
+    #[test]
+    fn a_set_holds_one_state_kind_and_carries_no_float() {
+        let orders = vec![
+            Event::Order(stop_order(None)),
+            Event::Order(stop_order(Some("untriggered"))),
+        ];
+        let set = StateSet::of(Kind::Orders, orders.clone()).unwrap();
+        let envelope = Envelope::for_account(
+            Venue::new("hyperliquid").unwrap(),
+            Account::new("main").unwrap(),
+            None,
+            9,
+            Event::StateSet(set),
+        );
+        fn floats(v: &serde_json::Value, key: &str, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Number(n)
+                    if !["seq", "at_micros", "recv_micros", "placed_micros"].contains(&key) =>
+                {
+                    out.push(format!("{key} = {n}"))
+                }
+                serde_json::Value::Object(map) => map.iter().for_each(|(k, x)| floats(x, k, out)),
+                serde_json::Value::Array(items) => items.iter().for_each(|x| floats(x, key, out)),
+                _ => {}
+            }
+        }
+        let mut bad = Vec::new();
+        floats(&serde_json::to_value(&envelope).unwrap(), "", &mut bad);
+        assert!(bad.is_empty(), "{bad:?}");
+        // A set of events, or of two kinds, is no set.
+        assert!(StateSet::of(Kind::OrderUpdates, Vec::new()).is_none());
+        let mut mixed = orders;
+        mixed.push(Event::OrderUpdate(stop_order(Some("filled"))));
+        assert!(StateSet::of(Kind::Orders, mixed).is_none());
     }
 
     #[test]

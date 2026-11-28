@@ -1,0 +1,55 @@
+{
+ "channel": "userNonFundingLedgerUpdates",
+ "data": {
+  "isSnapshot": true,
+  "user": "0x0001000100010001000100010001000100010001",
+  "nonFundingLedgerUpdates": [
+   {
+    "time": 1767288860010,
+    "hash": "0xabababababababababababababababababababababababababababababababab",
+    "delta": {
+     "type": "send",
+     "user": "0x0002000200020002000200020002000200020002",
+     "destination": "0x0001000100010001000100010001000100010001",
+     "sourceDex": "spot",
+     "destinationDex": "",
+     "token": "USDC",
+     "amount": "993.0",
+     "usdcValue": "661.6",
+     "fee": "0.0",
+     "nativeTokenFee": "0.0",
+     "nonce": 912,
+     "feeToken": ""
+    }
+   },
+   {
+    "time": 1767288935017,
+    "hash": "0xabababababababababababababababababababababababababababababababab",
+    "delta": {
+     "type": "send",
+     "user": "0x0002000200020002000200020002000200020002",
+     "destination": "0x0001000100010001000100010001000100010001",
+     "sourceDex": "spot",
+     "destinationDex": "",
+     "token": "USDC",
+     "amount": "32.55",
+     "usdcValue": "372.51",
+     "fee": "0.0",
+     "nativeTokenFee": "0.0",
+     "nonce": 913,
+     "feeToken": ""
+    }
+   },
+   {
+    "time": 1768292648045,
+    "hash": "0xabababababababababababababababababababababababababababababababab",
+    "delta": {
+     "type": "withdraw",
+     "usdc": "534.5",
+     "nonce": 914,
+     "fee": "582.0"
+    }
+   }
+  ]
+ }
+}

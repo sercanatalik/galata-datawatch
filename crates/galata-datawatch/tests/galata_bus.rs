@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use galata_broker::{BUS_ADMIN, BrokerIdentity, NatsSubscriber, grants, password_var, streams};
 
 const VENUES: [&str; 1] = ["hyperliquid"];
+const LEDGERS: [&str; 1] = ["hyperliquid"];
 
 fn password(identity: &str) -> String {
     format!("test-password-{identity}")
@@ -43,7 +44,7 @@ fn free_port() -> u16 {
 /// and — if `admin_password` is given — that literal for `bus-admin` in place
 /// of its variable, so the server and `galata-bus` can be made to disagree.
 fn write_config(dir: &Path, port: u16, admin_password: Option<&str>) -> PathBuf {
-    let mut table = grants::to_nats_config(&grants::table(&VENUES));
+    let mut table = grants::to_nats_config(&grants::table(&VENUES, &LEDGERS));
     if let Some(literal) = admin_password {
         table = table.replace(
             &format!("${}", password_var(BUS_ADMIN)),
@@ -74,7 +75,7 @@ fn start(port: u16, config: &Path) -> (Child, mpsc::Receiver<String>) {
         .env("NO_COLOR", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    for grant in grants::table(&VENUES).iter() {
+    for grant in grants::table(&VENUES, &LEDGERS).iter() {
         command.env(password_var(&grant.identity), password(&grant.identity));
     }
     let mut child = command.spawn().expect("galata-bus starts");

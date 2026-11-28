@@ -133,6 +133,10 @@ EXPOSE_ALLOWED = {
     # An account's address into an info request's body, to the venue
     # (`Secret::expose`). Added 2026-09-25 with `ledger-accounts-and-snapshots`.
     "crates/galata-datawatch/src/adapters/hyperliquid/client.rs",
+    # An account's address into its stream's subscription frames, to the
+    # venue, as `client.rs` puts it into a body (`Secret::expose`). Added
+    # 2026-11-28 with `add-realtime-account-ledger`.
+    "crates/galata-datawatch/src/adapters/hyperliquid/accounts.rs",
     # An address and the fingerprint key into the HMAC, never out of it
     # (`Secret::expose`). Added with the same change;
     # `check-no-address-in-names.sh` holds where an address may go.

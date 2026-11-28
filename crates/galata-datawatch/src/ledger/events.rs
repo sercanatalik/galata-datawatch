@@ -140,10 +140,12 @@ pub struct History {
     /// The newest receipt read. The next read starts **at** it, inclusive:
     /// two payloads can share a microsecond, and identity drops the repeat.
     through_micros: Option<i64>,
-    /// The newest receipt of an answer of each kind that normalised, rows or
-    /// none: when a state was last read, which a read that found nothing
-    /// leaves no row to say.
-    read_at: BTreeMap<Kind, i64>,
+    /// The newest receipt of an answer on each channel that normalised, rows
+    /// or none: when a state was last read, which a read that found nothing
+    /// leaves no row to say. **By channel, not by kind**: a streamed frame of
+    /// one dex shares its kind with the read of every dex, and must not stand
+    /// for it.
+    read_at: BTreeMap<String, i64>,
     kinds: Vec<Kind>,
     ours: BTreeMap<String, Account>,
 }
@@ -154,11 +156,11 @@ impl History {
         &self.rows
     }
 
-    /// The receipt of the newest answer of `kind` read, **whether it held
+    /// The receipt of the newest answer on `channel` read, **whether it held
     /// rows or none**: an open-orders answer that found nothing resting was
-    /// still read. `None` where no answer of that kind has normalised.
-    pub fn read_at(&self, kind: Kind) -> Option<i64> {
-        self.read_at.get(&kind).copied()
+    /// still read. `None` where no answer on that channel has normalised.
+    pub fn read_at(&self, channel: &str) -> Option<i64> {
+        self.read_at.get(channel).copied()
     }
 
     /// Read what the record gained since the last call, and merge it in.
@@ -210,10 +212,10 @@ impl History {
             let Ok(rows) = normaliser.normalise(payload) else {
                 continue;
             };
-            if let Ok(kind) = payload.kind.parse::<Kind>() {
-                let at = read_at.entry(kind).or_insert(payload.recv_micros);
-                *at = (*at).max(payload.recv_micros);
-            }
+            let at = read_at
+                .entry(payload.channel.clone())
+                .or_insert(payload.recv_micros);
+            *at = (*at).max(payload.recv_micros);
             for mut row in rows {
                 if !wanted.contains(row.kind().as_str()) {
                     continue;

@@ -24,6 +24,9 @@ pub mod accounts;
 pub mod events;
 pub mod fold;
 pub mod project;
+/// The record, published to the bus's account stream. Needs a runtime.
+#[cfg(feature = "capture")]
+pub mod publish;
 /// The loop: asking the venue, on a cadence. Needs a runtime.
 #[cfg(feature = "capture")]
 pub mod run;

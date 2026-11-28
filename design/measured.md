@@ -6377,8 +6377,109 @@ Derive, wallet-wide (subaccount_id 0 in the answer)
 - **A Hyperliquid spot fill failed its whole fills page** (2026-11-28,
   counted over the live record, values never read): 90 of 335 recorded
   pages would not normalise, each refused because `@…` is no ticker. With
-  `Fill` naming its market as text, 426 of 426 pages normalise (the record
-  had grown while the walk asked the stuck range again).
+  `Fill` naming its market as text, 426 of 426 pages normalise. The record
+  grew at the walk's own pace, a page each pass: 12 in the hour before the
+  deploy and 12 in the hour after.
 - **Hyperliquid's order history holds spot orders.** 8 of the 221 rows name
   a spot pair (`@…` or `…/…`), which a ticker cannot hold, so an order names
   its market as text.
+
+## The account streams, held ten minutes — 2026-11-28
+
+`add-realtime-account-ledger` tasks 1.1 and 1.2. One connection to each
+venue for ten minutes, for the owner's accounts, read-only:
+- **Hyperliquid**, by address, nine user subscriptions;
+- **Derive**, after `public/login` with the ledger's session key, each
+  subaccount's three channels.
+
+The secrets came from the vault through `gv run --only`. No address, wallet
+or subaccount id was printed, and the frames were kept raw only in a private
+scratch folder.
+
+```text
+Hyperliquid                         messages   bytes    a minute     first frame
+  clearinghouseState, dex ""         120        51,960   12 (max 13)  {dex, user, clearinghouseState}
+  clearinghouseState, dex "xyz"      120        52,320   12           as above
+  openOrders, dex ""                 120        12,720   12           {dex, user, orders}
+  openOrders, dex "xyz"              120        13,080   12           as above
+  spotState                          120        92,437   12           {user, spotState}
+  userFills                            1         9,680   -            {isSnapshot: true, user, fills}
+  userFundings                         1        11,784   -            {isSnapshot: true, user, fundings}
+  userNonFundingLedgerUpdates          1         1,896   -            {isSnapshot: true, user, nonFundingLedgerUpdates}
+  orderUpdates                         0             0   -            (none: it speaks on a change)
+
+Derive
+  public/login                       answered in 237 ms: {result: [the wallet's 3 subaccount ids]}
+  subscribe, 9 channels              each "ok"
+  {id}.balances, .orders, .trades    0 frames in ten minutes: no subaccount traded
+```
+
+- **Every subscription was acknowledged**, the dex-scoped ones with their
+  dex (`subscriptionResponse`).
+- **Hyperliquid pushes state every 5 seconds, changed or not.** Each push of
+  `clearinghouseState`, `openOrders` and `spotState` is the whole state, in
+  the REST answers' shapes. A frame adds its `dex` and the account's `user`,
+  which is the address and is scrubbed from every fixture.
+- **The event streams open with a snapshot** tagged `isSnapshot`, then speak
+  only on a change. The fills snapshot holds perp and spot fills. A streamed
+  funding row is flat, `{time, coin, usdc, szi, fundingRate, nSamples}`,
+  where REST's carries the same under `delta`.
+- **Derive's login answers with the subaccount ids**, so the ledger subscribes
+  without a second request. Its channels push only on a change. With no
+  trade in the ten minutes, there is no frame of them to keep, and their
+  normalisers are tested against the documented shapes until one is
+  recorded.
+
+**The rate published, coalesced (design D3).** At most one set a second per
+account and kind:
+- Hyperliquid's pushes come every 5 s, so dex-scoped kinds (margin,
+  positions, open orders) publish at most two sets every 5 s, one per dex
+  push that falls in a different second. Account-wide kinds (balances,
+  portfolio and token margin) publish one.
+- **A set identical to the last one published for its account and kind is
+  not published again.** The venue's timer is not a change, and the newest
+  message still states the account's state. Whether the stream is alive is
+  the status's to say (design D7).
+- An idle account therefore publishes almost nothing. One whose state moves
+  every push, with positions marked to market, publishes about what it
+  receives: some 22 KB a minute for the main account, about 32 MB a day.
+
+**Projected size over seven days**, the account stream's `max_age`:
+- Hyperliquid, at most about 220 MB, an account in positions all week;
+- Derive, a snapshot every 300 s and its pushes on a change, under 10 MB;
+- events, a few hundred a day, under 5 MB.
+
+That is about 0.24 GB beside the market window's 2 GB cap, inside the
+broker's 4 GB file store. `ACCOUNTS` keeps no byte cap of its own
+(`max_bytes: -1`), so the store's is the bound.
+
+Fixtures, scrubbed, none of the 87 replaced values left:
+- `tests/fixtures/hyperliquid/ledger-ws-*.json`: both dexes'
+  `clearinghouseState` and `openOrders`, `spotState`, and the three
+  snapshots. The fills keep perp and spot rows; the ledger updates are
+  `send` and `withdraw`.
+- `tests/fixtures/derive_xyz/ledger/ws_login.json` and `ws_subscribe.json`.
+
+## The account vocabulary, an hour deployed — 2026-11-28
+
+`add-account-vocabulary-orders` task 6.1. `3374519` built into
+`galata-datawatch:latest`, both ledgers reinstalled at 04:19 UTC, read at
+05:20 (counts only):
+
+```text
+projection, rewritten 05:19–05:20     orders  order_updates  fills  funding_payments  pnl_history
+  hyperliquid main                      0        221          233       1,171             450
+  derive-xyz owner_s3                   1          3            2           0              25
+  derive-xyz owner_s2                   0          0            0           0               1
+  derive-xyz owner_s1                   0          0            0           0               0
+```
+
+- Hyperliquid's PnL points grew from 325 to 450 over the hour, every window's
+  newest point each pass. Its funding gained the hour's payment, and Derive
+  `owner_s3` its hourly value point.
+- **The fold is clean on both venues**: 13 spot fills counted apart, 12 books
+  on Hyperliquid, no break, skew or snapshot difference. Derive folds each
+  subaccount on its own.
+- Neither ledger's log warns, and neither stopped.
+- The fills walk recorded 12 pages in the hour before the deploy and 12 in
+  the hour after, one each events pass.

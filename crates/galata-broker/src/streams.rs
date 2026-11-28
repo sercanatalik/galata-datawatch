@@ -173,6 +173,9 @@ pub const MARKET_STREAM: &str = "MARKETS";
 /// The status stream's name: each venue's latest status.
 pub const STATUS_STREAM: &str = "STATUS";
 
+/// The account stream's name: every ledger's accounts, complete.
+pub const ACCOUNT_STREAM: &str = "ACCOUNTS";
+
 /// The streams, in the order the broker's start applies them.
 pub fn table() -> Vec<Stream> {
     vec![
@@ -184,7 +187,7 @@ pub fn table() -> Vec<Stream> {
             max_messages_per_subject: -1,
         },
         Stream {
-            name: "ACCOUNTS",
+            name: ACCOUNT_STREAM,
             subjects: vec!["accounts.>".into()],
             max_age: ACCOUNTS_KEPT,
             max_bytes: -1,

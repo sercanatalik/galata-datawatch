@@ -61,6 +61,12 @@ pub fn fingerprint(key: &FingerprintKey, address: &str) -> String {
         .collect()
 }
 
+/// [`fingerprint`] of an address held as a [`Secret`]: what a frame naming an
+/// account is matched by, the address going into the HMAC and nowhere else.
+pub fn fingerprint_secret(key: &FingerprintKey, address: &Secret) -> String {
+    fingerprint(key, address.expose())
+}
+
 /// A declared account, resolved: its alias, its venue, and its address held so
 /// that it cannot print itself.
 #[derive(Debug, Clone)]

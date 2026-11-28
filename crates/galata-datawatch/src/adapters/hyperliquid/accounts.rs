@@ -21,6 +21,57 @@ use crate::normalise::{Normalise, NormaliseError};
 pub struct HyperliquidAccounts {
     client: Client,
     normaliser: LedgerNormaliser,
+    /// Where its account stream is, where one is read.
+    stream: Option<crate::venue::Endpoint>,
+}
+
+/// What a streamed frame is to the loop.
+pub(crate) fn stream_frame(frame: &[u8]) -> crate::ledger::run::StreamFrame {
+    use crate::ledger::run::StreamFrame;
+    match ledger::streamed(frame) {
+        ledger::Streamed::Account {
+            channel,
+            kind,
+            user,
+        } => StreamFrame::Account {
+            channel,
+            kind,
+            address: Secret::new(user),
+            // A fill's order is read at once, so it arrives with its type.
+            then: if kind == galata_wire::Kind::Fills {
+                crate::ledger::run::Then::History
+            } else {
+                crate::ledger::run::Then::Nothing
+            },
+        },
+        ledger::Streamed::OrderUpdates => StreamFrame::Changed {
+            channel: ledger::WS_ORDER_UPDATES,
+            kind: galata_wire::Kind::OrderUpdates,
+        },
+        ledger::Streamed::Control => StreamFrame::Control,
+        ledger::Streamed::Other => StreamFrame::Other,
+    }
+}
+
+/// A streamed frame as recorded: with the mode last heard, and — for the spot
+/// state, whose balances name tokens by index — the names the reference gives
+/// the indices it holds.
+pub(crate) fn compose_stream(
+    mode: Option<(&[u8], i64)>,
+    reference: Option<&[u8]>,
+    frame: &[u8],
+) -> Vec<u8> {
+    let names = match ledger::streamed(frame) {
+        ledger::Streamed::Account {
+            channel: ledger::WS_SPOT,
+            ..
+        } => serde_json::from_slice::<serde_json::Value>(frame)
+            .ok()
+            .and_then(|v| serde_json::to_vec(&v["data"]["spotState"]).ok())
+            .and_then(|spot| ledger::names_for(reference, &spot)),
+        _ => None,
+    };
+    ledger::stream_bytes(mode, names.as_ref(), frame)
 }
 
 impl HyperliquidAccounts {
@@ -29,7 +80,15 @@ impl HyperliquidAccounts {
         Ok(HyperliquidAccounts {
             client: Client::new(rest_url),
             normaliser: LedgerNormaliser::new()?,
+            stream: None,
         })
+    }
+
+    /// Reading its accounts' streams too, at the network's websocket
+    /// (`add-realtime-account-ledger`, design D1).
+    pub fn with_stream(mut self, endpoint: crate::venue::Endpoint) -> HyperliquidAccounts {
+        self.stream = Some(endpoint);
+        self
     }
 
     /// Able to read ledger updates: the key decides which side of a transfer
@@ -67,6 +126,45 @@ impl AccountVenue for HyperliquidAccounts {
             // A wallet's history, which only a venue read by wallet asks.
             Ask::TradeHistory | Ask::FundingHistory | Ask::ValueHistory => "not-asked",
         }
+    }
+
+    fn states(
+        &self,
+        payload: &crate::record::Payload,
+        rows: &[galata_wire::Envelope],
+    ) -> Vec<crate::ledger::publish::Stated> {
+        ledger::states(payload, rows)
+    }
+
+    fn stream_endpoint(&self) -> Option<crate::venue::Endpoint> {
+        self.stream.clone()
+    }
+
+    /// Every declared dex's open orders, read together: the whole set.
+    fn orders_answer(&self) -> Option<&'static str> {
+        Some(ledger::OPEN_ORDERS_CHANNEL)
+    }
+
+    fn stream_subscriptions(&self, account: &crate::ledger::ResolvedAccount) -> Vec<String> {
+        ledger::subscriptions(account.address().expose(), &account.dexes)
+    }
+
+    fn stream_keepalive(&self) -> crate::venue::Keepalive {
+        crate::venue::Keepalive::Frame(ledger::KEEPALIVE.into())
+    }
+
+    fn stream_frame(&self, frame: &[u8]) -> crate::ledger::run::StreamFrame {
+        stream_frame(frame)
+    }
+
+    fn compose_stream(
+        &self,
+        _account: &crate::ledger::ResolvedAccount,
+        mode: Option<(&[u8], i64)>,
+        reference: Option<&[u8]>,
+        frame: &[u8],
+    ) -> Vec<u8> {
+        compose_stream(mode, reference, frame)
     }
 
     fn account_wide_asks(&self) -> &'static [(Ask, Series)] {

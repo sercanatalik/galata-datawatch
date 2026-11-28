@@ -1,7 +1,7 @@
 //! Who may publish and subscribe to what, **enforced by the server**.
 //!
 //! ```text
-//!   grants::table(venues)      the declaration
+//!   grants::table(venues, ledgers)   the declaration
 //!   grants::to_nats_config()   the server's own fragment
 //! ```
 //!
@@ -26,13 +26,13 @@
 use std::fmt::Write as _;
 
 /// The roots this system addresses. **Every one must be granted to somebody**,
-/// which `scripts/check-grant-coverage.sh` holds — so adding a third forces a
+/// which `scripts/check-grant-coverage.sh` holds — so adding one forces a
 /// decision about who may read it, at the moment it is added.
 ///
-/// `accounts.` is not here yet. `Subject::account` builds its subjects and the
-/// broker keeps an ACCOUNTS stream for them, but no login publishes or reads
-/// account data until the ledger's change, which adds the root with them.
-pub const ROOTS: [&str; 2] = ["markets.", "status."];
+/// `accounts.` arrived with the ledger's publication
+/// (`add-realtime-account-ledger`): each venue's ledger publishes its own
+/// accounts there, and nobody else publishes under it.
+pub const ROOTS: [&str; 3] = ["markets.", "status.", "accounts."];
 
 /// One identity's authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,8 @@ impl Grants {
     }
 }
 
-/// The table for a set of capturing venues.
+/// The table for a set of capturing venues and a set of venues whose ledger
+/// publishes.
 ///
 /// Two kinds of identity, because they are two kinds of component:
 ///
@@ -90,7 +91,12 @@ impl Grants {
 /// the broker's start, and galata-markets ([`GALATA_MARKETS`]), which consumes
 /// the windows and serves clients over HTTP — so the firehose's one password
 /// stays in a container and never reaches an operator.
-pub fn table(venues: &[&str]) -> Grants {
+///
+/// And **a ledger per venue** ([`ledger_identity`]): it publishes its own
+/// venue's accounts and nothing else, and hears only its own inbox, where the
+/// broker's acknowledgements of what it published arrive. It subscribes to no
+/// subject, as capture does not.
+pub fn table(venues: &[&str], ledgers: &[&str]) -> Grants {
     let mut grants = Vec::new();
     for venue in venues {
         grants.push(Grant {
@@ -98,6 +104,13 @@ pub fn table(venues: &[&str]) -> Grants {
             publish: vec![format!("markets.{venue}.>"), format!("status.{venue}")],
             // **Nothing.** Capture publishes and never consumes.
             subscribe: Vec::new(),
+        });
+    }
+    for venue in ledgers {
+        grants.push(Grant {
+            identity: ledger_identity(venue),
+            publish: vec![format!("accounts.{venue}.>")],
+            subscribe: vec![format!("{}.>", ledger_inbox(venue))],
         });
     }
     grants.push(Grant {
@@ -143,6 +156,19 @@ pub fn table(venues: &[&str]) -> Grants {
         subscribe: vec![format!("{GALATA_MARKETS_INBOX}.>")],
     });
     Grants(grants)
+}
+
+/// The identity one venue's ledger publishes its accounts as:
+/// `ledger-hyperliquid`, `ledger-derive-xyz`.
+pub fn ledger_identity(venue: &str) -> String {
+    format!("ledger-{venue}")
+}
+
+/// The inbox prefix a venue's ledger connects with, and the only one it may
+/// hear on: `_INBOX_LEDGER_DERIVE_XYZ`, as galata-markets has
+/// [`GALATA_MARKETS_INBOX`].
+pub fn ledger_inbox(venue: &str) -> String {
+    format!("_INBOX_LEDGER_{}", venue.replace('-', "_").to_uppercase())
 }
 
 /// The identity galata-markets reads the bus as.
@@ -230,7 +256,10 @@ mod tests {
     use super::*;
 
     fn rendered() -> String {
-        to_nats_config(&table(&["hyperliquid", "rh-chain"]))
+        to_nats_config(&table(
+            &["hyperliquid", "rh-chain"],
+            &["hyperliquid", "derive-xyz"],
+        ))
     }
 
     /// The lines the server acts on.
@@ -285,7 +314,7 @@ mod tests {
     #[test]
     fn capture_publishes_and_never_consumes() {
         // A component that only writes should not hold a handle that can read.
-        let grants = table(&["hyperliquid"]);
+        let grants = table(&["hyperliquid"], &["hyperliquid"]);
         let capture = grants
             .iter()
             .find(|g| g.identity == "datawatch-hyperliquid")
@@ -299,7 +328,7 @@ mod tests {
 
     #[test]
     fn a_reader_subscribes_and_never_publishes() {
-        let grants = table(&["hyperliquid"]);
+        let grants = table(&["hyperliquid"], &["hyperliquid"]);
         let reader = grants.iter().find(|g| g.identity == "reader").unwrap();
         assert!(reader.publish.is_empty());
         assert_eq!(reader.subscribe, vec!["status.>"]);
@@ -309,7 +338,7 @@ mod tests {
     fn one_venue_cannot_publish_anothers_subjects() {
         // The whole point: the server refuses it, rather than a reviewer
         // noticing.
-        let grants = table(&["hyperliquid", "rh-chain"]);
+        let grants = table(&["hyperliquid", "rh-chain"], &["hyperliquid", "derive-xyz"]);
         let hl = grants
             .iter()
             .find(|g| g.identity == "datawatch-hyperliquid")
@@ -326,7 +355,7 @@ mod tests {
     /// thing it must not have catches it coming back.
     #[test]
     fn a_reader_is_granted_no_market_subject() {
-        let grants = table(&["hyperliquid", "rh-chain"]);
+        let grants = table(&["hyperliquid", "rh-chain"], &["hyperliquid", "derive-xyz"]);
         let reader = grants.iter().find(|g| g.identity == "reader").unwrap();
         assert!(
             !reader
@@ -346,7 +375,7 @@ mod tests {
     fn every_root_the_code_declares_is_granted_to_somebody() {
         // The guard's rule, asserted here too so a root added without a grant
         // fails a test as well as the build.
-        let grants = table(&["hyperliquid"]);
+        let grants = table(&["hyperliquid"], &["hyperliquid"]);
         for root in ROOTS {
             assert!(grants.covers(root), "{root} is granted to nobody");
         }
@@ -354,12 +383,12 @@ mod tests {
 
     #[test]
     fn a_root_nobody_is_granted_is_visible_as_such() {
-        assert!(!table(&["hyperliquid"]).covers("views."));
+        assert!(!table(&["hyperliquid"], &["hyperliquid"]).covers("views."));
     }
 
     #[test]
     fn the_bus_admin_may_administer_the_streams_and_nothing_else() {
-        let grants = table(&["hyperliquid"]);
+        let grants = table(&["hyperliquid"], &["hyperliquid"]);
         let admin = grants.iter().find(|g| g.identity == BUS_ADMIN).unwrap();
         for stream in ["MARKETS", "ACCOUNTS", "STATUS"] {
             for verb in ["CREATE", "UPDATE", "INFO"] {
@@ -387,7 +416,7 @@ mod tests {
 
     #[test]
     fn galata_markets_may_consume_the_windows_and_nothing_else() {
-        let grants = table(&["hyperliquid"]);
+        let grants = table(&["hyperliquid"], &["hyperliquid"]);
         let markets = grants
             .iter()
             .find(|g| g.identity == GALATA_MARKETS)
@@ -417,8 +446,63 @@ mod tests {
     }
 
     #[test]
+    fn each_ledger_publishes_its_own_venues_accounts_and_nothing_else() {
+        let grants = table(&["hyperliquid"], &["hyperliquid", "derive-xyz"]);
+        for (venue, other) in [("hyperliquid", "derive-xyz"), ("derive-xyz", "hyperliquid")] {
+            let ledger = grants
+                .iter()
+                .find(|g| g.identity == format!("ledger-{venue}"))
+                .unwrap();
+            assert_eq!(ledger.publish, vec![format!("accounts.{venue}.>")]);
+            assert!(
+                !ledger.publish.iter().any(|s| s.contains(other)),
+                "{:?}",
+                ledger.publish
+            );
+            // Its own inbox only, where its acknowledgements arrive.
+            assert_eq!(ledger.subscribe, vec![format!("{}.>", ledger_inbox(venue))]);
+        }
+        assert_eq!(ledger_inbox("derive-xyz"), "_INBOX_LEDGER_DERIVE_XYZ");
+        assert_eq!(
+            password_var(&ledger_identity("derive-xyz")),
+            "GALATA_BROKER_PASSWORD_LEDGER_DERIVE_XYZ"
+        );
+    }
+
+    #[test]
+    fn nobody_but_a_ledger_publishes_an_account() {
+        let grants = table(
+            &["hyperliquid", "derive-xyz"],
+            &["hyperliquid", "derive-xyz"],
+        );
+        for grant in grants.iter() {
+            let publishes_accounts = grant.publish.iter().any(|s| s.starts_with("accounts."));
+            assert_eq!(
+                publishes_accounts,
+                grant.identity.starts_with("ledger-"),
+                "{}: {:?}",
+                grant.identity,
+                grant.publish
+            );
+            // And nobody subscribes to one yet: galata-markets' grant arrives
+            // with `add-markets-accounts`.
+            assert!(
+                !grant.subscribe.iter().any(|s| s.starts_with("accounts.")),
+                "{}",
+                grant.identity
+            );
+        }
+    }
+
+    #[test]
+    fn a_venue_without_a_ledger_has_no_ledger_identity() {
+        let grants = table(&["hyperliquid", "rh-chain"], &["hyperliquid"]);
+        assert!(!grants.iter().any(|g| g.identity == "ledger-rh-chain"));
+    }
+
+    #[test]
     fn no_other_identity_touches_the_stream_api() {
-        for grant in table(&["hyperliquid", "rh-chain"]).iter() {
+        for grant in table(&["hyperliquid", "rh-chain"], &["hyperliquid", "derive-xyz"]).iter() {
             // The two that do, each pinned by a test of its own above.
             if grant.identity == BUS_ADMIN || grant.identity == GALATA_MARKETS {
                 continue;

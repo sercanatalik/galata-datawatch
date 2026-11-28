@@ -4,7 +4,9 @@
     python3 scripts/lib/ledger_vars.py <config.toml> --venues
 
 Each declared account's `address_var` on that venue, and its `session_key_var`
-where it has one, then the fingerprint key.
+where it has one, then the fingerprint key, then — where the configuration
+declares a `[broker]` — the ledger's own broker password, with which it
+publishes the venue's accounts (add-realtime-account-ledger, design D6).
 Read from the deployment's configuration so the token minted for the ledger
 (`mint-service-tokens.sh`) and the names the service asks for
 (`run-service.sh`) come from one place and cannot disagree. Names only: the
@@ -44,4 +46,8 @@ names = [
 ]
 if not names:
     sys.exit(3)
-print("\n".join(sorted(set(names)) + [ledger["fingerprint_key_var"]]))
+names = sorted(set(names)) + [ledger["fingerprint_key_var"]]
+if config.get("broker"):
+    # As `galata_broker::password_var(&ledger_identity(venue))` spells it.
+    names.append("GALATA_BROKER_PASSWORD_LEDGER_" + venue.replace("-", "_").upper())
+print("\n".join(names))

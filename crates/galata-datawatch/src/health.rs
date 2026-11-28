@@ -38,6 +38,10 @@ pub const CAPTURE_ALLOWANCE_SECS: i64 = 60;
 pub const SUBSCRIBE_GRACE_SECS: i64 = 3 * 60;
 /// How long the record's judge's report may age: it runs hourly.
 pub const RECORD_ALLOWANCE_SECS: i64 = 2 * 3_600;
+/// How long a ledger's account stream may stay down before it is a finding:
+/// the minute capture's own disconnection is allowed
+/// (`add-realtime-account-ledger`, design D7).
+pub const STREAM_DOWN_ALLOWANCE_SECS: i64 = 60;
 /// The window a restart loop is counted in, and how many starts make one.
 pub const RESTART_WINDOW_SECS: i64 = 10 * 60;
 /// Starts in [`RESTART_WINDOW_SECS`] that make a loop.
@@ -164,6 +168,9 @@ struct AccountView {
     answered_micros: BTreeMap<String, i64>,
     key_expires_micros: Option<i64>,
     key_warning: Option<String>,
+    stream_connected: Option<bool>,
+    stream_connected_micros: Option<i64>,
+    stream_down_micros: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -386,6 +393,32 @@ fn ledger(
                 },
                 "a session key with more than its warning's days left".into(),
                 account.key_expires_micros,
+            );
+        }
+        // **Its account stream, down past the minute.** Measured against now,
+        // not the report's time: the ledger writes its status the moment the
+        // stream closes and the moment it connects again, so the report says
+        // which it is; while the ledger still reports, how long it has been
+        // down is now's question. The REST reads go on meanwhile, so it warns.
+        if account.stream_connected == Some(false)
+            && live.is_some()
+            && view.stopped.is_none()
+            && let Some(down) = account.stream_down_micros
+            && now - down > STREAM_DOWN_ALLOWANCE_SECS * SECOND
+        {
+            judged.say(
+                State::Warning,
+                format!("{service}/stream-down/{alias}"),
+                "stream-down",
+                format!(
+                    "{service} `{alias}`'s account stream is down since {}; last connected {}",
+                    time_of(down),
+                    account
+                        .stream_connected_micros
+                        .map_or("never".to_string(), |at| format!("at {}", time_of(at)))
+                ),
+                format!("a stream reconnected within {STREAM_DOWN_ALLOWANCE_SECS} s"),
+                account.stream_connected_micros,
             );
         }
         // Only an account that has answered and was still polled: one just
@@ -634,6 +667,59 @@ mod tests {
             snapshot_secs: 300,
             events_secs: Some(300),
         }
+    }
+
+    /// The ledger's report at `T - 100 s`, `owner_s1`'s stream as given.
+    fn streaming(connected: bool, down: Option<i64>, last_connected: Option<i64>) -> Reports {
+        let mut reports = well();
+        let status = reports.ledgers[0].status.as_mut().unwrap();
+        let account = &mut status["accounts"]["owner_s1"];
+        account["stream_connected"] = connected.into();
+        if let Some(down) = down {
+            account["stream_down_micros"] = down.into();
+        }
+        if let Some(at) = last_connected {
+            account["stream_connected_micros"] = at.into();
+        }
+        reports
+    }
+
+    #[test]
+    fn a_stream_down_for_two_minutes_is_a_finding_naming_the_account_and_its_last_connection() {
+        let j = judge(&streaming(false, Some(T - 120 * S), Some(T - 3_600 * S)), T);
+        let f = finding(&j, "ledger:derive-xyz/stream-down/owner_s1");
+        assert!(f.observed.contains("`owner_s1`"), "{}", f.observed);
+        assert!(f.observed.contains("last connected at"), "{}", f.observed);
+        assert_eq!(f.since_micros, Some(T - 3_600 * S));
+    }
+
+    #[test]
+    fn a_stream_that_reconnects_inside_the_minute_is_no_finding() {
+        // Down twenty seconds, then connected again: the report says connected.
+        let j = judge(&streaming(true, Some(T - 40 * S), Some(T - 20 * S)), T);
+        assert!(
+            !ids(&j).iter().any(|i| i.contains("stream-down")),
+            "{:?}",
+            ids(&j)
+        );
+        // And down for less than the minute is not one yet.
+        let j = judge(&streaming(false, Some(T - 30 * S), Some(T - 3_600 * S)), T);
+        assert!(
+            !ids(&j).iter().any(|i| i.contains("stream-down")),
+            "{:?}",
+            ids(&j)
+        );
+    }
+
+    #[test]
+    fn a_stream_never_connected_says_so() {
+        let j = judge(&streaming(false, Some(T - 90 * S), None), T);
+        let f = finding(&j, "ledger:derive-xyz/stream-down/owner_s1");
+        assert!(
+            f.observed.contains("last connected never"),
+            "{}",
+            f.observed
+        );
     }
 
     fn service<'a>(judgement: &'a Judgement, name: &str) -> &'a ServiceHealth {

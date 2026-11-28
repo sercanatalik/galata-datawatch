@@ -32,6 +32,8 @@ pub struct DeriveAccounts {
     client: PrivateClient,
     normaliser: LedgerNormaliser,
     key: FingerprintKey,
+    /// Where its account stream is, where one is read.
+    stream: Option<crate::venue::Endpoint>,
 }
 
 impl DeriveAccounts {
@@ -45,7 +47,16 @@ impl DeriveAccounts {
             client: PrivateClient::new(rest_url),
             normaliser: LedgerNormaliser::new()?,
             key,
+            stream: None,
         })
+    }
+
+    /// Reading its subaccounts' streams too, at the network's websocket,
+    /// logged in with the ledger's key (`add-realtime-account-ledger`, design
+    /// D2).
+    pub fn with_stream(mut self, endpoint: crate::venue::Endpoint) -> DeriveAccounts {
+        self.stream = Some(endpoint);
+        self
     }
 }
 
@@ -76,6 +87,17 @@ fn signer(account: &ResolvedAccount) -> Result<SessionKey, Refused> {
 /// Never asked of this venue: it has no per-dex snapshot, roles, modes or
 /// account-wide reads.
 const NOT_ASKED: &str = "not-asked";
+
+/// The websocket's methods the ledger names: a login, a subscription and a
+/// keepalive. **Nothing that acts** (`tests/ledger_acts_on_nothing.rs`).
+pub const STREAM_LOGIN: &str = "public/login";
+/// Subscribing a subaccount's channels.
+pub const STREAM_SUBSCRIBE: &str = "subscribe";
+/// The keepalive: the venue's time, asked.
+pub const STREAM_KEEPALIVE: &str = "public/get_time";
+const STREAM_LOGIN_ID: u64 = 1;
+const STREAM_SUBSCRIBE_ID: u64 = 2;
+const STREAM_KEEPALIVE_ID: u64 = 3;
 
 /// Rows a history page holds. The owner's whole month was one page of 50
 /// (measured 2026-11-27).
@@ -131,8 +153,80 @@ impl AccountVenue for DeriveAccounts {
 
     /// The open orders ride the wallet's snapshot: its newest receipt is
     /// every subaccount's newest set.
-    fn orders_answer(&self) -> Kind {
-        Kind::MarginState
+    fn orders_answer(&self) -> Option<&'static str> {
+        Some(ledger::SNAPSHOT_CHANNEL)
+    }
+
+    fn stream_endpoint(&self) -> Option<crate::venue::Endpoint> {
+        self.stream.clone()
+    }
+
+    /// `public/login`: the wallet, a millisecond time, and the session key's
+    /// EIP-191 signature of that time, as the REST headers carry them.
+    fn stream_hello(&self, master: &ResolvedAccount, now_micros: i64) -> Option<String> {
+        let key = signer(master).ok()?;
+        let time = (now_micros / 1_000).to_string();
+        Some(
+            serde_json::json!({
+                "id": STREAM_LOGIN_ID,
+                "method": STREAM_LOGIN,
+                "params": {
+                    "wallet": master.address().expose(),
+                    "timestamp": time,
+                    "signature": key.sign(&time),
+                },
+            })
+            .to_string(),
+        )
+    }
+
+    /// The login's answer: the subaccount ids it was granted, or the venue's
+    /// error (measured 2026-11-28: a list of ids, in 237 ms).
+    fn stream_hello_answer(&self, frame: &[u8]) -> Option<bool> {
+        let v: serde_json::Value = serde_json::from_slice(frame).ok()?;
+        (v.get("id")? == STREAM_LOGIN_ID).then(|| v.get("result").is_some_and(|r| r.is_array()))
+    }
+
+    /// A subaccount's three channels, named by its id: to the venue, and
+    /// nowhere else. A wallet subscribes nothing of its own.
+    fn stream_subscriptions(&self, account: &ResolvedAccount) -> Vec<String> {
+        let id = account.address().expose();
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Vec::new();
+        }
+        let channels: Vec<String> = ["balances", "orders", "trades"]
+            .iter()
+            .map(|c| format!("{id}.{c}"))
+            .collect();
+        vec![
+            serde_json::json!({
+                "id": STREAM_SUBSCRIBE_ID,
+                "method": STREAM_SUBSCRIBE,
+                "params": { "channels": channels },
+            })
+            .to_string(),
+        ]
+    }
+
+    fn stream_keepalive(&self) -> crate::venue::Keepalive {
+        crate::venue::Keepalive::Frame(
+            serde_json::json!({ "id": STREAM_KEEPALIVE_ID, "method": STREAM_KEEPALIVE, "params": {} })
+                .to_string(),
+        )
+    }
+
+    fn stream_frame(&self, frame: &[u8]) -> crate::ledger::run::StreamFrame {
+        ledger::streamed(frame)
+    }
+
+    fn compose_stream(
+        &self,
+        account: &ResolvedAccount,
+        _mode: Option<(&[u8], i64)>,
+        _reference: Option<&[u8]>,
+        frame: &[u8],
+    ) -> Vec<u8> {
+        ledger::stream_bytes(account.address().expose(), &account.alias, frame)
     }
 
     /// Orders change after they first appear (Derive states each at its
@@ -264,6 +358,14 @@ impl AccountVenue for DeriveAccounts {
 
     fn compose(&self, _: &str, _: Option<(&[u8], i64)>, state: &[u8]) -> Vec<u8> {
         state.to_vec()
+    }
+
+    fn states(
+        &self,
+        payload: &crate::record::Payload,
+        rows: &[galata_wire::Envelope],
+    ) -> Vec<crate::ledger::publish::Stated> {
+        ledger::states(payload, rows)
     }
 
     fn account_wide_asks(&self) -> &'static [(Ask, Series)] {
@@ -883,6 +985,19 @@ mod tests {
             Arc<Mutex<Vec<String>>>,
             Routes,
         ) {
+            ledger_streaming(root, listed, None).await
+        }
+
+        /// As [`ledger_over`], reading its subaccounts' stream at `ws`.
+        async fn ledger_streaming(
+            root: &Path,
+            listed: &[u64],
+            ws: Option<String>,
+        ) -> (
+            LedgerRun<DeriveAccounts, TestClock>,
+            Arc<Mutex<Vec<String>>>,
+            Routes,
+        ) {
             let (url, asked, routes) = serve_live(routes(listed)).await;
             let config = Ledger {
                 root: root.to_path_buf(),
@@ -910,7 +1025,12 @@ mod tests {
             };
             let (key, masters) = resolve(&config, "derive-xyz", &Vault(Some(KEY))).unwrap();
             let run = LedgerRun::new(
-                DeriveAccounts::new(&url, key.clone()).unwrap(),
+                match ws {
+                    Some(ws) => DeriveAccounts::new(&url, key.clone())
+                        .unwrap()
+                        .with_stream(crate::venue::Endpoint::held("STREAM", Secret::new(ws))),
+                    None => DeriveAccounts::new(&url, key.clone()).unwrap(),
+                },
                 TestClock::at(NOW),
                 Archive::open(root),
                 Box::new(NullSink),
@@ -1211,6 +1331,212 @@ mod tests {
             run.clock().advance(3_000_000);
             run.snapshot_all().await.unwrap();
             assert_eq!(portfolio_requests(&asked), 1);
+        }
+
+        /// What the stream's server heard, frame by frame.
+        type Heard = Arc<Mutex<Vec<serde_json::Value>>>;
+
+        /// A bus that keeps what it acknowledged, in order.
+        #[derive(Clone, Default)]
+        struct Recorded {
+            sent: Arc<Mutex<Vec<(String, Envelope)>>>,
+        }
+
+        impl crate::ledger::publish::AccountBus for Recorded {
+            fn publish_acked<'a>(
+                &'a self,
+                id: &'a str,
+                envelope: &'a Envelope,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    self.sent
+                        .lock()
+                        .unwrap()
+                        .push((id.to_string(), envelope.clone()));
+                    Ok(())
+                })
+            }
+        }
+
+        /// Derive's stream, standing in: it answers the login with the ids
+        /// granted and the subscription with each channel `ok`, then pushes
+        /// a trade of the first listed subaccount and a balance change.
+        async fn derive_stream(granted: Vec<u64>) -> (String, Heard) {
+            use futures_util::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let heard: Heard = Arc::new(Mutex::new(Vec::new()));
+            let kept = heard.clone();
+            tokio::spawn(async move {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                while let Some(Ok(message)) = ws.next().await {
+                    let Message::Text(text) = message else {
+                        continue;
+                    };
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    kept.lock().unwrap().push(frame.clone());
+                    let answer = match frame["method"].as_str() {
+                        Some("public/login") => {
+                            serde_json::json!({"id": frame["id"], "result": granted})
+                        }
+                        Some("subscribe") => {
+                            let status: serde_json::Map<String, serde_json::Value> =
+                                frame["params"]["channels"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|c| (c.as_str().unwrap().to_string(), "ok".into()))
+                                    .collect();
+                            serde_json::json!({"id": frame["id"], "result": {"status": status}})
+                        }
+                        _ => serde_json::json!({"id": frame["id"], "result": 0}),
+                    };
+                    let _ = ws.send(Message::Text(answer.to_string().into())).await;
+                    if frame["method"] == "subscribe" {
+                        let mut trade: serde_json::Value =
+                            serde_json::from_slice::<serde_json::Value>(include_bytes!(
+                                "../../../tests/fixtures/derive_xyz/ledger/get_trade_history.json"
+                            ))
+                            .unwrap()["result"]["trades"][0]
+                                .clone();
+                        trade["subaccount_id"] = granted[0].into();
+                        let trades = serde_json::json!({"method": "subscription", "params": {
+                            "channel": format!("{}.trades", granted[0]), "data": [trade]}});
+                        let balances = serde_json::json!({"method": "subscription", "params": {
+                            "channel": format!("{}.balances", granted[0]),
+                            "data": [{"name": "ETH-PERP", "new_balance": "1", "previous_balance": "0",
+                                      "update_type": "trade"}]}});
+                        for push in [trades, balances] {
+                            let _ = ws.send(Message::Text(push.to_string().into())).await;
+                        }
+                    }
+                }
+            });
+            (url, heard)
+        }
+
+        #[tokio::test]
+        async fn the_login_is_the_keys_and_only_bound_subaccounts_are_subscribed() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ws, heard) = derive_stream(IDS.to_vec()).await;
+            let (run, asked, _) = ledger_streaming(dir.path(), &IDS[..2], Some(ws)).await;
+            let bus = Recorded::default();
+            let mut run = run.with_publication(Box::new(bus.clone()));
+            run.publish().await.unwrap();
+            run.boot().await.unwrap();
+            let before = portfolio_requests(&asked);
+            for _ in 0..20 {
+                run.step().await.unwrap();
+                run.clock().advance(500_000);
+                if bus
+                    .sent
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(id, _)| id.contains(":fill:"))
+                {
+                    break;
+                }
+            }
+            let heard = heard.lock().unwrap().clone();
+
+            // The login: the wallet, a millisecond time, signed by the key.
+            let login = &heard[0];
+            assert_eq!(login["method"], STREAM_LOGIN);
+            assert_eq!(login["params"]["wallet"], WALLET);
+            let time = login["params"]["timestamp"].as_str().unwrap();
+            let signature = login["params"]["signature"].as_str().unwrap();
+            assert_eq!(
+                super::super::super::sign::recover(time, signature).as_deref(),
+                Some(KEY_ADDRESS),
+                "signed by the ledger's key"
+            );
+
+            // The two bound subaccounts' channels, and nothing of the third.
+            let mut channels: Vec<String> = heard
+                .iter()
+                .filter(|f| f["method"] == STREAM_SUBSCRIBE)
+                .flat_map(|f| {
+                    f["params"]["channels"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| c.as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            channels.sort();
+            let mut expected: Vec<String> = IDS[..2]
+                .iter()
+                .flat_map(|id| ["balances", "orders", "trades"].map(|c| format!("{id}.{c}")))
+                .collect();
+            expected.sort();
+            assert_eq!(channels, expected);
+            assert!(
+                heard
+                    .iter()
+                    .all(|f| !f.to_string().contains(&IDS[2].to_string())),
+                "an id the ledger did not bind is named"
+            );
+
+            // The trade pushed is a fill of the subaccount, by alias, and the
+            // balance change asked for the wallet's state at once.
+            let fills: Vec<(String, Envelope)> = bus
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id.contains(":fill:"))
+                .cloned()
+                .collect();
+            // The streamed trade, and the backstop's window on connecting
+            // holding it and the other the venue has: each once.
+            let streamed: serde_json::Value = serde_json::from_slice::<serde_json::Value>(
+                include_bytes!("../../../tests/fixtures/derive_xyz/ledger/get_trade_history.json"),
+            )
+            .unwrap()["result"]["trades"][0]["trade_id"]
+                .clone();
+            assert_eq!(
+                fills.len(),
+                2,
+                "{:?}",
+                fills.iter().map(|f| &f.0).collect::<Vec<_>>()
+            );
+            let ids: std::collections::BTreeSet<&String> = fills.iter().map(|f| &f.0).collect();
+            assert_eq!(ids.len(), 2, "a fill published twice");
+            assert_eq!(
+                fills
+                    .iter()
+                    .filter(|f| f.0.contains(streamed.as_str().unwrap()))
+                    .count(),
+                1,
+                "the streamed trade, once"
+            );
+            for (_, fill) in &fills {
+                assert_eq!(fill.account().map(|a| a.as_str()), Some("owner_s1"));
+                assert!(matches!(&fill.event, Event::Fill(_)));
+            }
+            assert!(portfolio_requests(&asked) > before, "the snapshot, at once");
+            // No identifier anywhere it would leave the ledger.
+            let status = serde_json::to_string(run.status()).unwrap();
+            for id in IDS {
+                assert!(!status.contains(&id.to_string()), "{id} in the status");
+                assert!(
+                    !fills[0].0.contains(&id.to_string()),
+                    "{id} in a message id"
+                );
+            }
+            assert_eq!(
+                run.status().accounts["owner_s1"].stream_connected,
+                Some(true)
+            );
         }
 
         #[tokio::test]

@@ -120,7 +120,7 @@ impl Market {
         }
     }
 
-    fn ws_url(&self) -> &'static str {
+    pub(crate) fn ws_url(&self) -> &'static str {
         match self {
             Market::Mainnet => "wss://api.derive.xyz/v3/ws",
             Market::Testnet => "wss://testnet.api.derive.xyz/v3/ws",

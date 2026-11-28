@@ -42,8 +42,8 @@ import sys, pathlib
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 path.write_text(text.replace(
-    'pub const ROOTS: [&str; 2] = ["markets.", "status."];',
-    'pub const ROOTS: [&str; 3] = ["markets.", "status.", "views."];',
+    'pub const ROOTS: [&str; 3] = ["markets.", "status.", "accounts."];',
+    'pub const ROOTS: [&str; 4] = ["markets.", "status.", "accounts.", "views."];',
     1,
 ))
 PLANTPY

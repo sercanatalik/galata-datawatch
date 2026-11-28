@@ -364,6 +364,48 @@ impl Kind {
         }
     }
 
+    /// Whether an account's rows of this kind are **state**, read whole and
+    /// published as one set per read, rather than events, each published once
+    /// (`add-realtime-account-ledger`, design D3).
+    ///
+    /// Exhaustive, as [`Kind::addressing`] is, so a kind added later decides.
+    pub fn is_state(&self) -> bool {
+        match self {
+            Kind::Margin
+            | Kind::Positions
+            | Kind::Balances
+            | Kind::BorrowLend
+            | Kind::LendHealth
+            | Kind::PortfolioMargin
+            | Kind::TokenMargin
+            | Kind::MarginState
+            | Kind::PositionState
+            | Kind::Collateral
+            | Kind::Orders => true,
+            Kind::Fills
+            | Kind::FundingPayments
+            | Kind::LedgerUpdates
+            | Kind::OrderUpdates
+            | Kind::PnlHistory
+            | Kind::Accounts
+            | Kind::Trades
+            | Kind::Book
+            | Kind::Candles
+            | Kind::Funding
+            | Kind::Quotes
+            | Kind::Transfers
+            | Kind::Mints
+            | Kind::Marks
+            | Kind::Gaps
+            | Kind::Unparsed
+            | Kind::Sessions
+            | Kind::Instruments
+            | Kind::Reorgs
+            | Kind::Signals
+            | Kind::OptionPricing => false,
+        }
+    }
+
     /// The discriminator written to disk and to a subject.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -436,6 +478,22 @@ mod tests {
             let _ = kind.addressing().key();
         }
         assert_eq!(Kind::ALL.len(), 32);
+    }
+
+    #[test]
+    fn a_state_kind_is_an_accounts() {
+        // State is what one read of an account holds: never market data.
+        for kind in Kind::ALL.into_iter().filter(Kind::is_state) {
+            assert!(matches!(kind.addressing(), Addressing::Account), "{kind}");
+        }
+        for kind in [
+            Kind::Fills,
+            Kind::OrderUpdates,
+            Kind::FundingPayments,
+            Kind::PnlHistory,
+        ] {
+            assert!(!kind.is_state(), "{kind} is an event");
+        }
     }
 
     #[test]
